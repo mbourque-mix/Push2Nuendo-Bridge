@@ -84,7 +84,7 @@ class NuendoLink:
         self._cr_state = None  # Reference to ControlRoomState
         self._last_heartbeat = 0.0
         self._connection_grace_until = 0.0  # Ignore value CCs until this timestamp
-        self._vu_ignore_until = 0.0  # Ignore VU peak clips until this timestamp
+        self._vu_ignore_until = time.time() + 10.0  # Ignore VU peaks until Nuendo is connected
         self._touchstrip_led_callback = None  # Callback for touchstrip LEDs
         self._watchdog_thread = None
         self._running = False
@@ -862,6 +862,11 @@ class NuendoLink:
         if self._midi_out and self._running:
             self._midi_out.send_message([0xB5, cc_num & 0x7F, int(value) & 0x7F])
 
+    def send_cc_ch7(self, cc_num, value):
+        """Send a CC message on channel 7 (0xB6). Used for bank zone sends."""
+        if self._midi_out and self._running:
+            self._midi_out.send_message([0xB6, cc_num & 0x7F, int(value) & 0x7F])
+
     def send_note(self, note, velocity):
         """Send a Note On/Off message to Nuendo (Loop port)."""
         if self._midi_out and self._running:
@@ -941,9 +946,9 @@ class NuendoLink:
         self.send_cc(40 + track_in_bank, midi_val)
 
     def send_send_change(self, track_in_bank, value_0_to_1):
-        """Send a send level change. CC 48-55."""
+        """Send a send level change. CC 48-55 channel 7."""
         midi_val = int(value_0_to_1 * 127)
-        self.send_cc(48 + track_in_bank, midi_val)
+        self.send_cc_ch7(48 + track_in_bank, midi_val)
 
     def send_quick_control_change(self, qc_index, value_0_to_1):
         """Send a Quick Control change. CC 56-63 channel 5."""
@@ -1022,7 +1027,7 @@ class NuendoLink:
 # ─────────────────────────────────────────────
 
 # 0 dB = CC 101 on a 7-bit MIDI fader = process value 101/127
-_ZERO_DB = 101.0 / 127.0  # 0.795276
+_ZERO_DB = 99.0 / 127.0  # 0.779528
 
 def _to_db(normalized_volume):
     """

@@ -42,7 +42,7 @@ class TrackInfo:
         self.color = (150, 150, 150)
         
         # Volume: 0.0 to 1.0 (1.0 = 0 dB)
-        self.volume = 101.0 / 127.0  # 0 dB = CC 101
+        self.volume = 99.0 / 127.0  # 0 dB = CC 99
         self.volume_db = 0.0        # dB version for display
         self.volume_display = ""    # Display text from Nuendo (ex: "-6.0 dB")
         

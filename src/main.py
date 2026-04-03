@@ -37,7 +37,7 @@ def terminal_main():
     
     print()
     print("╔═══════════════════════════════════════════════╗")
-    print("║       Push 2 / Nuendo Bridge  v1.0.0          ║")
+    print("║       Push 2 / Nuendo Bridge  v1.0.1          ║")
     print("╚═══════════════════════════════════════════════╝")
     print()
     

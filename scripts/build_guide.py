@@ -91,7 +91,7 @@ def build():
     s.append(Spacer(1, 0.5*inch))
     s.append(HRFlowable(width="60%", color=ACCENT, thickness=2, spaceAfter=20))
     s.append(Spacer(1, 0.3*inch))
-    s.append(Paragraph("Version 1.0", styles['Body']))
+    s.append(Paragraph("Version 1.0.1", styles['Body']))
     s.append(Paragraph("Compatible with Nuendo 14+ and Cubase 14+", styles['Body']))
     s.append(Paragraph("macOS and Windows", styles['Body']))
     s.append(Spacer(1, 1.5*inch))
@@ -411,6 +411,12 @@ def build():
     s.append(B("<b>Scale button</b>: Opens the scale selector (choose scale and root note)"))
     s.append(B("<b>Accent button</b>: Hold for fixed velocity (adjustable with the first encoder)"))
     s.append(B("<b>Note Repeat</b>: Hold for automatic note repeat at the selected subdivision"))
+    s.append(B("<b>Tempo Encoder</b> (top left knob): When Note Repeat is active, adjusts the "
+        "repeat tempo (40-300 BPM)"))
+    s.append(Paragraph(
+        "<b>Note:</b> The Note Repeat tempo is independent from the project tempo. "
+        "It controls only the speed of the repeated notes.",
+        styles['Note']))
     s.append(Paragraph(
         "Make sure to set your instrument track's MIDI input to <b>BridgeNotes</b> in Nuendo, "
         "or enable <b>In All MIDI Inputs</b> for BridgeNotes in "
@@ -456,6 +462,7 @@ def build():
          ['Scale', 'Scale selector', ''],
          ['Accent', 'Fixed velocity (hold)', ''],
          ['Note Repeat', 'Auto-repeat (hold)', ''],
+         ['Tempo Encoder', 'Repeat BPM (when active)', ''],
          ['Upper row (long)', 'Open instrument UI', ''],
          ['Lower row 7 + Shift', 'Rescan tracks', '']],
         col_widths=[1.5*inch, 2.2*inch, 2.2*inch]))
@@ -509,7 +516,8 @@ def build():
          "to force a refresh."),
         ("Logs location",
          "macOS: ~/Library/Logs/Push2NuendoBridge.log. "
-         "Check this file for detailed error messages."),
+         "Windows: logs are printed directly in the terminal window. "
+         "You can redirect them to a file by running: python main.py --terminal > bridge.log 2>&1"),
     ]
     for title, desc in problems:
         s.append(Paragraph(f"<b>{title}</b>", styles['BodyBold']))

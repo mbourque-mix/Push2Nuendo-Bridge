@@ -296,8 +296,7 @@ def _draw_volume_cell(draw, cell_x, track):
     fill_h = int(bar_height * track.volume)
     if fill_h > 0:
         color = COLOR_VOLUME_BAR
-        # 0 dB = process value 101/127 ≈ 0.7953
-        if track.volume > 101.0 / 127.0:
+        if track.volume_db > 0.1:
             color = COLOR_WARNING
         draw.rectangle([
             vol_x,
@@ -305,11 +304,6 @@ def _draw_volume_cell(draw, cell_x, track):
             vol_x + vol_w,
             bar_y + bar_height
         ], fill=color)
-    
-    # 0 dB marker (CC 101 = process value 101/127)
-    zero_db_y = bar_y + bar_height - int(bar_height * 101.0 / 127.0)
-    draw.line([(vol_x - 2, zero_db_y), (vol_x + vol_w + 2, zero_db_y)],
-              fill=(100, 100, 100), width=1)
     
     # ── VU Meter (right side of the volume bar) ──
     vu_x = cell_x + 40

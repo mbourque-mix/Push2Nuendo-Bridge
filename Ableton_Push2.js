@@ -46,7 +46,7 @@ for (var i = 0; i < 8; i++) {
     kp.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 40+i);
     knobsPan.push(kp);
     var ks = surface.makeKnob(i*3, 4, 3, 3);
-    ks.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 48+i);
+    ks.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(6, 48+i);
     knobsSend.push(ks);
     var kq = surface.makeKnob(i*3, 6, 3, 3);
     kq.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(4, 56+i);

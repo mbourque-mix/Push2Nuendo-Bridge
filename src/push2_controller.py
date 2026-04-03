@@ -393,13 +393,15 @@ class Push2Controller:
                 else:
                     midi_val = 64 + min(63, abs(increment))
                 self.nuendo_link.send_cc(64, midi_val)
-            elif 'master' in encoder_name.lower():
-                # Master Encoder (haut droite)
+            elif 'tempo' in encoder_name.lower():
+                # Tempo Encoder (CC 14) = Note Repeat BPM when active
                 if self.note_repeat.enabled:
                     self.note_repeat.tempo += increment * 1.0
                     self.note_repeat.tempo = max(40.0, min(300.0, self.note_repeat.tempo))
                     self._sync_repeat_state()
-                elif self.state.user_held:
+            elif 'master' in encoder_name.lower():
+                # Master Encoder (top right) = always CR Volume
+                if self.state.user_held:
                     # User + Master Encoder = Phones Level
                     if increment > 0:
                         midi_val = min(63, abs(increment))
