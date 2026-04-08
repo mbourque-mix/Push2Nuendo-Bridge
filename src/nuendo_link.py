@@ -4,24 +4,24 @@ nuendo_link.py — MIDI link with Nuendo
 This module handles communication between the Python Bridge and Nuendo.
 
 HOW IT WORKS:
-- Nuendo (via its JS script) sends MIDI messages on the "Nuendo-To-Push2" port
+- Nuendo (via its JS script) sends MIDI messages on the "NuendoBridge In" port
 - This module listens on this port and updates the application state (state.py)
-- When the user moves an encoder, this module sends a CC on "Push2-To-Nuendo"
+- When the user moves an encoder, this module sends a CC on "NuendoBridge Out"
 - Nuendo receives this CC and changes the corresponding parameter
 
 COMMUNICATION PROTOCOL (MIDI CC):
-Nuendo → Bridge (port Nuendo-To-Push2) :
+Nuendo → Bridge (port NuendoBridge In) :
   CC 127 ch15 : Heartbeat (sent every ~100ms — proves Nuendo is connected)
   CC 10  : Total number of tracks (value = count)
   CC 11  : Selected track index
   CC 20-27 : Volume of tracks in the current bank (shared bank)
   CC 30-37 : Track pan (value 0-127, 64 = center)
-  CC 40-47 : Send 1 des pistes
-  CC 50-57 : Send 2 des pistes
+  CC 40-47 : Send 1 levels
+  CC 50-57 : Send 2 levels
   CC 60-67 : Quick Controls of the selected track
   SysEx F0 00 21 09 01 ... F7 : Track names and metadata
 
-Bridge → Nuendo (port Push2-To-Nuendo) :
+Bridge → Nuendo (port NuendoBridge Out) :
   CC 1   : Active mode (0=Volume, 1=Pan, 2=Sends, 3=Device, 4=Inserts)
   CC 2   : Bank offset (which bank of 8 tracks is visible)
   CC 20-27 : Volume changes (encoders 1-8)
@@ -51,8 +51,9 @@ PORT_NOTES_OUT   = "BridgeNotes"        # Notes from bridge to Nuendo
 PORT_NOTES_IN    = "BridgeNotes In"     # Playback notes from Nuendo to bridge
 
 # Legacy IAC/loopMIDI port names (fallback if virtual ports fail)
-PORT_FROM_NUENDO = "Nuendo-To-Push2"
-PORT_TO_NUENDO   = "Push2-To-Nuendo"
+# On Windows, users must create these ports in loopMIDI
+PORT_FROM_NUENDO = "NuendoBridge In"
+PORT_TO_NUENDO   = "NuendoBridge Out"
 
 PORT_NOTES       = "Push 2"            # Push 2 User port for MIDI notes
 PORT_NOTES_ALT   = "User Port"         # Alternate name
