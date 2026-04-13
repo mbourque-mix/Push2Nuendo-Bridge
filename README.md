@@ -1,20 +1,28 @@
 # Push 2 / Nuendo Bridge
 
-Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo 14** (and Cubase 14+).
+Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
+![Version](https://img.shields.io/badge/version-1.0.2-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
+
+🌐 **Website:** [push2bridge.kaikuaudio.com](https://push2bridge.kaikuaudio.com)
+
+---
 
 ## Features
 
 ### Mixer Control
 - **Volume** — 8 track faders via encoders with VU meters and peak clip detection
-- **Pan** — Panorama control with visual feedback
-- **Mute / Solo / Monitor / Record** — Toggle per track with LED indicators
+- **Pan** — Panorama control with visual L/C/R feedback
+- **Track** — Combined Vol + Pan + 6 Sends for the selected track
+- **Mute / Solo / Monitor / Record** — Toggle per track with colored LED indicators
+- **Clear All** — Shift+Mute/Solo clears all mutes, solos, monitors, or rec arms
+- **Edit Channel Settings** — Double press upper row to open
 - **Bank navigation** — Browse tracks in groups of 8
 
 ### Sends
-- 8 sends per selected track with destination names
+- 8 sends per selected track with destination names and level display
 - On/Off toggle, Pre/Post fader toggle
 - Level control via encoders
 - Track navigation with ◄►
@@ -23,18 +31,22 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - Scan and display 8 insert plugins per track
 - Bypass toggle per slot
 - Plugin parameter control with bank navigation
+- Short press = enter parameters, Long press (0.5s) = open plugin UI only
 - Open plugin UI, Deactivate plugin
+- Mute/Solo/Monitor/Rec on buttons 5-8
 - Track navigation with ◄►
 
 ### Quick Controls (Device)
 - 8 Quick Controls per selected track
-- Open instrument UI via lower row button
+- Open instrument UI
+- Mute/Solo/Monitor/Rec on buttons 5-8
 - Track navigation with ◄►
 
 ### Transport
 - Play / Stop / Record
 - Cycle (Loop) toggle
 - Metronome toggle
+- Undo
 - Play LED: white (stop), green (play), purple (play + loop)
 
 ### Automation
@@ -42,151 +54,146 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - Automate button LED: white (off), green (read), red (write)
 - Per-track R/W indicators on screen
 
+### Control Room
+- 4 pages: Main, Phones, Cues, Sources
+- Full knob control for levels, click, listen, talkback
+- Master encoder always controls Main level
+
 ### Touchstrip
 - 3 modes (cycle with Shift+Layout): Pitch Bend / Mod Wheel / Volume Fader
-- Volume mode controls the selected track's fader
+
+### Setup Page
+- **Aftertouch Mode**: Polyphonic, Channel, or Off
+- **Velocity Curve**: Linear, Logarithmic, Exponential, S-Curve, Fixed (with adjustable value)
+- **About**: Bridge version and JS Script version display
+
+### MIDI CC Controller (Shift+Note)
+- 8 assignable CC faders with real-time value bars
+- CC number editing mode via upper row buttons
+- On/Off toggle via lower row buttons (for sustain, etc.)
+- Default CCs: Mod Wheel, Breath, Volume, Balance, Pan, Expression, Sustain, Portamento
+
+### Note Input
+- Chromatic and drum pad modes
+- Scale selector with root note
+- Note Repeat with adjustable BPM
+- Adjustable velocity curves and fixed velocity
 
 ### Additional Features
 - Track color display from Nuendo
-- Smart track name abbreviation (16 chars)
 - Long press upper row (1s) → Open instrument UI
-- Add Track / New Track Version buttons
-- Duplicate Track / Duplicate Track Version (Shift)
-- Undo (Shift+Delete)
-- Note input with drum and chromatic modes
-- Scale selector
-- Note Repeat with subdivision control
-- Control Room integration
+- Double press upper row → Edit Channel Settings
+- Add Track / New Track Version / Duplicate Track
+- Full 960×160 pixel Push 2 display rendering
+
+---
 
 ## Requirements
 
 - **Ableton Push 2** (connected via USB)
-- **Steinberg Nuendo 14** (or Cubase 14+)
+- **Steinberg Nuendo 14+** (or Cubase 14+)
+- **macOS 11+** or **Windows 10/11**
+- **libusb** (macOS: `brew install libusb`)
+
+For Windows, you also need:
 - **Python 3.9+**
-- **Virtual MIDI ports**:
-  - macOS: IAC Driver (built-in)
-  - Windows: [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)
-- **libusb** (for Push 2 USB communication)
+- **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** for virtual MIDI ports
+- **[Zadig](https://zadig.akeo.ie/)** for USB driver
+
+---
 
 ## Installation
 
-### 1. Install Python dependencies
+### macOS — Standalone App (Recommended)
 
+1. Install libusb: `brew install libusb`
+2. Copy **Push2 Nuendo Bridge v1.0.2.app** to `/Applications`
+3. Copy **Ableton_Push2.js** to:
+   ```
+   ~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/
+   ```
+4. Launch the app — a **P2** icon appears in the menu bar
+5. Open Nuendo — the MIDI Remote script configures itself automatically
+
+### macOS — From Source
+
+```bash
+brew install libusb python3
+pip3 install -r requirements.txt
+cd src && python3 main.py
+```
+
+### Windows
+
+See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide.pdf)** for detailed step-by-step instructions including Python, Zadig, loopMIDI, and Nuendo configuration.
+
+Quick start:
 ```bash
 pip install -r requirements.txt
-```
-
-### 2. Set up virtual MIDI ports
-
-#### macOS (IAC Driver)
-1. Open **Audio MIDI Setup** (Applications → Utilities)
-2. Menu **Window → Show MIDI Studio**
-3. Double-click **IAC Driver**
-4. Check **Device is online**
-5. Create two ports:
-   - `Push2-To-Nuendo`
-   - `Nuendo-To-Push2`
-
-#### Windows (loopMIDI)
-1. Install [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)
-2. Create two ports:
-   - `Push2-To-Nuendo`
-   - `Nuendo-To-Push2`
-
-### 3. Install the Nuendo MIDI Remote script
-
-Copy `Ableton_Push2.js` to:
-
-- **macOS**: `~/Documents/Steinberg/Nuendo 14/MIDI Remote/Driver Scripts/Local/`
-- **Windows**: `%APPDATA%\Steinberg\Nuendo 14\MIDI Remote\Driver Scripts\Local\`
-
-Create the `Local` folder if it doesn't exist.
-
-### 4. Configure Nuendo
-
-1. Open Nuendo
-2. Go to **Studio → Studio Setup → MIDI Remote**
-3. The script should appear as "Ableton Push 2"
-4. Assign the MIDI ports:
-   - Input: `Push2-To-Nuendo`
-   - Output: `Nuendo-To-Push2`
-
-### 5. Run the bridge
-
-```bash
 cd src
-python main.py
+python main.py --terminal
 ```
 
-Or if no `main.py`:
-```bash
-cd src
-python -c "
-from state import AppState
-from nuendo_link import NuendoLink
-from push2_controller import Push2Controller
+---
 
-state = AppState()
-link = NuendoLink(state)
-link.start()
-ctrl = Push2Controller(state, link)
-ctrl.start()
+## Button Reference
 
-import time
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    ctrl.stop()
-    link.stop()
-"
-```
+| Push 2 Button | Function | Shift + Button |
+|---------------|----------|----------------|
+| Mix | Volume mode | Track mode |
+| Clip | Sends mode | Pan mode |
+| Device | Quick Controls | |
+| Browse | Inserts mode | |
+| Note | MIDI note pads | MIDI CC controller |
+| Setup | Setup page | |
+| ◄ ► | Bank navigation | Track nav (Sends/Inserts/Device) |
+| Play | Start playback | |
+| Record | Record toggle | |
+| Fixed Length | Cycle/Loop toggle | |
+| Automate | Automation cycle | |
+| Metronome | Metronome toggle | |
+| Mute | Mute / Monitor toggle | Clear all mutes (or monitors) |
+| Solo | Solo / Rec arm toggle | Clear all solos (or rec arms) |
+| User | Control Room mode | |
+| Layout | Drum/Chromatic toggle | Touchstrip mode cycle |
+| Upper row (long) | Open instrument UI | Clear peak clip |
+| Upper row (double) | Edit Channel Settings | |
 
-## Usage
-
-### Button Mapping
-
-| Push 2 Button | Function |
-|---------------|----------|
-| Mix | Volume mode (Shift: Track mode) |
-| Clip | Sends mode (Shift: Pan mode) |
-| Device | Quick Controls mode |
-| Browse | Inserts mode |
-| ◄ ► | Bank navigation / Track navigation (in Sends/Inserts/Device) |
-| Play | Play/Stop |
-| Record | Record |
-| Fixed Length | Cycle/Loop toggle |
-| Metronome | Metronome toggle |
-| Automate | Automation cycle (Off→R→RW→W→Off) |
-| Add Track | Add Track dialog |
-| New | New Track Version |
-| Duplicate | Duplicate Track (Shift: Duplicate Track Version) |
-| Delete | Delete (Shift: Undo) |
-| Shift+Layout | Touchstrip mode cycle (Pitch/Mod/Volume) |
-| Mute | Mute mode (toggle: Monitor mode) |
-| Solo | Solo mode (toggle: Record arm mode) |
-| Long press upper row | Open instrument UI |
-
-### MIDI Channel Allocation
+## MIDI Channel Allocation
 
 | Channel | Usage |
 |---------|-------|
-| 1 (0xB0) | Main controls (volume, pan, transport, selection, VU) |
-| 2 (0xB1) | Insert parameters (CC 20-27), param bank nav, deactivate |
-| 3 (0xB2) | Send levels for selected track (CC 20-27) |
-| 4 (0xB3) | Insert bypass toggle (CC 20-27) |
-| 5 (0xB4) | Quick Controls (CC 56-63) |
+| 1 (0xB0) | Mixer controls (volume, pan, transport, selection, VU) |
+| 2 (0xB1) | Insert plugin parameters |
+| 3 (0xB2) | Send levels for selected track |
+| 4 (0xB3) | Insert bypass toggles |
+| 5 (0xB4) | Quick Controls |
+| 6 (0xB5) | Control Room knobs and buttons |
+| 7 (0xB6) | Bank zone sends |
+| 16 (0xBF) | Heartbeat (connection monitoring) |
+
+---
 
 ## Troubleshooting
 
 - **Push 2 not found**: Make sure it's connected via USB, libusb is installed, and Ableton Live is not running
-- **No connection to Nuendo**: Check that virtual MIDI ports are active and correctly assigned in Studio Setup
-- **Peak clip on startup**: Normal — wait 2 seconds after connecting, artifacts are filtered automatically
-- **Track names not loading**: Press Shift+upper row or navigate with ◄► to force a refresh
+- **No connection to Nuendo**: Check that the bridge is running and MIDI Remote ports are correctly assigned
+- **Peak clip on startup**: Normal — filtered automatically after a 3-second grace period
+- **Track names not loading**: Navigate with ◄► to force a bank refresh
+
+---
+
+## Documentation
+
+- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide.pdf)** — Complete installation and usage manual
+- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes.pdf)** — Version history
+- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide.pdf)** — Step-by-step Windows setup
+
+---
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.
+This project is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) for details.
 
 ## Contributing
 

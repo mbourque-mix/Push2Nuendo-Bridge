@@ -17,7 +17,9 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 from state import (
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    BANK_SIZE, AppState
+    MODE_SETUP, MODE_MIDICC, AT_POLY, AT_CHANNEL, AT_OFF,
+    VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
+    BRIDGE_VERSION, BANK_SIZE, AppState
 )
 from control_room import (
     CR_PAGES, CR_PAGE_NAMES, CR_PAGE_MAIN, ControlRoomState
@@ -613,14 +615,29 @@ def _render_inserts_screen(state):
         # Bottom separator
         draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
         
-        # Button labels
-        for col in range(8):
+        # Button labels: bypass on 1-4
+        for col in range(4):
             cell_x = col * CELL_WIDTH
             name = names[col] if col < len(names) else ''
             if name:
                 is_active = active[col] if col < len(active) else False
                 bypass_color = (0, 160, 80) if is_active else (200, 120, 0)
                 draw.text((cell_x + 4, 147), "BYPASS", font=FONT_SM, fill=bypass_color)
+        
+        # Buttons 5-8: Mute/Solo/Mon/Rec labels
+        sel = state.selected_track_index
+        track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
+        if track:
+            msrm = [
+                ("MUTE", (220, 200, 0) if track.is_muted else (80, 80, 80)),
+                ("SOLO", (0, 100, 220) if track.is_solo else (80, 80, 80)),
+                ("MON",  (220, 140, 0) if track.is_monitored else (80, 80, 80)),
+                ("REC",  (220, 40, 40) if track.is_armed else (80, 80, 80)),
+            ]
+            for j, (label, color) in enumerate(msrm):
+                x = (4 + j) * CELL_WIDTH
+                tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
+                draw.text((x + (CELL_WIDTH - tw) // 2, 147), label, font=FONT_SM, fill=color)
         
         return _to_push2_frame(img)
     except Exception as e:
@@ -684,7 +701,7 @@ def _render_insert_params_screen(state):
         # Bottom separator
         draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
         
-        # Bottom button labels
+        # Bottom button labels: actions 1-3
         labels = [
             ("OPEN UI", (200, 200, 200)),
             ("BYPASS", (0, 160, 200)),
@@ -693,6 +710,21 @@ def _render_insert_params_screen(state):
         for idx, (label, color) in enumerate(labels):
             cell_x = idx * CELL_WIDTH
             draw.text((cell_x + 4, 147), label, font=FONT_SM, fill=color)
+        
+        # Buttons 5-8: Mute/Solo/Mon/Rec
+        sel = state.selected_track_index
+        track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
+        if track:
+            msrm = [
+                ("MUTE", (220, 200, 0) if track.is_muted else (80, 80, 80)),
+                ("SOLO", (0, 100, 220) if track.is_solo else (80, 80, 80)),
+                ("MON",  (220, 140, 0) if track.is_monitored else (80, 80, 80)),
+                ("REC",  (220, 40, 40) if track.is_armed else (80, 80, 80)),
+            ]
+            for j, (label, color) in enumerate(msrm):
+                x = (4 + j) * CELL_WIDTH
+                tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
+                draw.text((x + (CELL_WIDTH - tw) // 2, 147), label, font=FONT_SM, fill=color)
         
         return _to_push2_frame(img)
     except Exception as e:
@@ -755,8 +787,23 @@ def _render_device_screen(state):
         # Bottom separator
         draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
         
-        # Bottom button label: OPEN UI on the first button
+        # Bottom button labels
         draw.text((4, 147), "OPEN UI", font=FONT_SM, fill=(200, 200, 200))
+        
+        # Buttons 5-8: Mute/Solo/Mon/Rec labels
+        sel = state.selected_track_index
+        track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
+        if track:
+            msrm = [
+                ("MUTE", (220, 200, 0) if track.is_muted else (80, 80, 80)),
+                ("SOLO", (0, 100, 220) if track.is_solo else (80, 80, 80)),
+                ("MON",  (220, 140, 0) if track.is_monitored else (80, 80, 80)),
+                ("REC",  (220, 40, 40) if track.is_armed else (80, 80, 80)),
+            ]
+            for j, (label, color) in enumerate(msrm):
+                x = (4 + j) * CELL_WIDTH
+                tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
+                draw.text((x + (CELL_WIDTH - tw) // 2, 147), label, font=FONT_SM, fill=color)
         
         return _to_push2_frame(img)
     except Exception as e:
@@ -920,6 +967,274 @@ def _draw_bottom_bar(draw, state):
 
 
 # ─────────────────────────────────────────────
+# MIDI CC SCREEN
+# ─────────────────────────────────────────────
+
+# Common CC names for display
+_CC_NAMES = {
+    0: "Bank Sel", 1: "Mod Wheel", 2: "Breath", 3: "CC 3", 4: "Foot Ctrl",
+    5: "Porta Time", 6: "Data MSB", 7: "Volume", 8: "Balance",
+    10: "Pan", 11: "Expression", 12: "Fx Ctrl 1", 13: "Fx Ctrl 2",
+    64: "Sustain", 65: "Portamento", 66: "Sostenuto", 67: "Soft Pedal",
+    68: "Legato", 69: "Hold 2", 70: "Variation", 71: "Resonance",
+    72: "Release", 73: "Attack", 74: "Cutoff", 75: "Decay",
+    76: "Vib Rate", 77: "Vib Depth", 78: "Vib Delay",
+    91: "Reverb", 92: "Tremolo", 93: "Chorus", 94: "Detune", 95: "Phaser",
+}
+
+def _render_midicc_screen(state):
+    """Render the MIDI CC controller page."""
+    try:
+        img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+        draw = ImageDraw.Draw(img)
+        
+        edit_mode = state.cc_edit_mode
+        
+        # Title bar
+        draw.rectangle([0, 0, SCREEN_WIDTH, 18], fill=(30, 30, 50))
+        title = "MIDI CC" if not edit_mode else "MIDI CC  [SELECT CC]"
+        tw = FONT_SM.getlength(title) if hasattr(FONT_SM, 'getlength') else len(title) * 7
+        title_color = (220, 160, 0) if edit_mode else COLOR_ACCENT
+        draw.text(((SCREEN_WIDTH - tw) // 2, 2), title, fill=title_color, font=FONT_SM)
+        
+        for col in range(8):
+            cell_x = col * CELL_WIDTH
+            cc_num = state.cc_numbers[col]
+            cc_val = state.cc_values[col]
+            cc_name = _CC_NAMES.get(cc_num, f"CC {cc_num}")
+            
+            # Separator
+            draw.line([(cell_x, 20), (cell_x, 141)], fill=COLOR_SEPARATOR)
+            
+            # CC number (top)
+            cc_label = f"CC {cc_num}"
+            tw = FONT_SM.getlength(cc_label) if hasattr(FONT_SM, 'getlength') else len(cc_label) * 6
+            if edit_mode:
+                # Highlight CC number when in edit mode
+                draw.rectangle([cell_x + 1, 20, cell_x + CELL_WIDTH - 1, 34], fill=(60, 50, 0))
+            draw.text((cell_x + (CELL_WIDTH - tw) // 2, 22), cc_label,
+                      fill=(220, 160, 0) if edit_mode else COLOR_ACCENT, font=FONT_SM)
+            
+            # CC name
+            name_trunc = cc_name[:12]
+            tw = FONT_SM.getlength(name_trunc) if hasattr(FONT_SM, 'getlength') else len(name_trunc) * 6
+            draw.text((cell_x + (CELL_WIDTH - tw) // 2, 36), name_trunc,
+                      fill=(140, 140, 140), font=FONT_SM)
+            
+            # Value bar
+            bar_x = cell_x + 20
+            bar_w = CELL_WIDTH - 40
+            bar_y = 56
+            bar_h = 55
+            
+            # Bar background
+            draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h],
+                          fill=(30, 30, 30), outline=(50, 50, 50))
+            
+            # Filled portion
+            fill_h = int((cc_val / 127.0) * bar_h)
+            if fill_h > 0:
+                bar_color = COLOR_ACCENT if cc_val < 127 else (0, 220, 120)
+                draw.rectangle([bar_x + 1, bar_y + bar_h - fill_h,
+                              bar_x + bar_w - 1, bar_y + bar_h - 1],
+                              fill=bar_color)
+            
+            # Value text (centered below bar)
+            val_text = str(cc_val)
+            tw = FONT_MD.getlength(val_text) if hasattr(FONT_MD, 'getlength') else len(val_text) * 8
+            draw.text((cell_x + (CELL_WIDTH - tw) // 2, 116), val_text,
+                      fill=COLOR_TEXT_MAIN, font=FONT_MD)
+        
+        # Bottom separator and toggle labels
+        draw.line([(0, 141), (SCREEN_WIDTH, 141)], fill=COLOR_SEPARATOR)
+        for col in range(8):
+            cell_x = col * CELL_WIDTH
+            draw.line([(cell_x, 141), (cell_x, SCREEN_HEIGHT)], fill=COLOR_SEPARATOR)
+            cc_val = state.cc_values[col]
+            label = "ON" if cc_val > 0 else "OFF"
+            color = (0, 200, 120) if cc_val > 0 else (80, 80, 80)
+            tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
+            draw.text((cell_x + (CELL_WIDTH - tw) // 2, 146), label, fill=color, font=FONT_SM)
+        
+        return _to_push2_frame(img)
+    except Exception as e:
+        print(f"  ✗ MIDI CC screen error: {e}")
+        return _render_empty_frame()
+
+
+# ─────────────────────────────────────────────
+# SETUP SCREEN
+# ─────────────────────────────────────────────
+
+# Setup page definitions
+SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+
+# Per-page options: list of (label, value) for lower row buttons
+SETUP_PAGE_OPTIONS = {
+    0: [  # MIDI Controller page — Aftertouch only
+        ('Poly AT', AT_POLY),
+        ('Chan AT', AT_CHANNEL),
+        ('AT Off',  AT_OFF),
+    ],
+    1: [  # Velocity Curve page
+        ('Linear',  VC_LINEAR),
+        ('Log',     VC_LOG),
+        ('Exp',     VC_EXP),
+        ('S-Curve', VC_SCURVE),
+        ('Fixed',   VC_FIXED),
+    ],
+}
+
+def _render_setup_screen(state):
+    """Render the Setup page."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+    
+    page_idx = state.setup_page
+    
+    # ── Title bar ──
+    draw.rectangle([0, 0, SCREEN_WIDTH, 18], fill=(30, 30, 50))
+    title = "SETUP"
+    tw = FONT_SM.getlength(title) if hasattr(FONT_SM, 'getlength') else len(title) * 7
+    draw.text(((SCREEN_WIDTH - tw) // 2, 2), title, fill=COLOR_ACCENT, font=FONT_SM)
+    
+    # ── Upper row labels (page tabs, y=20-38) ──
+    for i in range(8):
+        x = i * CELL_WIDTH
+        draw.line([(x, 20), (x, 38)], fill=COLOR_SEPARATOR)
+        if i < len(SETUP_PAGE_NAMES) and SETUP_PAGE_NAMES[i] is not None:
+            name = SETUP_PAGE_NAMES[i]
+            is_active = (i == page_idx)
+            if is_active:
+                draw.rectangle([x + 1, 20, x + CELL_WIDTH - 1, 38], fill=(0, 60, 80))
+            color = COLOR_ACCENT if is_active else (80, 80, 80)
+            tw = FONT_SM.getlength(name) if hasattr(FONT_SM, 'getlength') else len(name) * 6
+            tx = x + (CELL_WIDTH - tw) // 2
+            draw.text((tx, 23), name, fill=color, font=FONT_SM)
+    
+    # ── Page content ──
+    options = SETUP_PAGE_OPTIONS.get(page_idx, [])
+    
+    if page_idx == 0:
+        # ── Page 0: MIDI Controller — Aftertouch mode ──
+        draw.text((20, 50), "Aftertouch Mode", fill=(200, 200, 200), font=FONT_MD)
+        at_mode = state.aftertouch_mode
+        if at_mode == AT_POLY:
+            at_name, desc = "Polyphonic", "Per-note pressure (0xA0)"
+        elif at_mode == AT_CHANNEL:
+            at_name, desc = "Channel", "Global pressure (0xD0)"
+        else:
+            at_name, desc = "Off", "Pad pressure ignored"
+        draw.text((20, 75), at_name, fill=COLOR_ACCENT, font=FONT_LG)
+        draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
+    
+    elif page_idx == 1:
+        # ── Page 1: Velocity Curve — graphique par bouton ──
+        draw.text((20, 42), "Velocity Curve", fill=(200, 200, 200), font=FONT_MD)
+        
+        # Draw a curve preview above each of the 5 buttons
+        vc_presets = [VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED]
+        for idx, vc_val in enumerate(vc_presets):
+            x = idx * CELL_WIDTH
+            is_selected = (state.velocity_curve == vc_val)
+            
+            # Graph area (y=60-130, within the cell)
+            gx = x + 8
+            gy = 62
+            gw = CELL_WIDTH - 16
+            gh = 65
+            
+            # Background highlight for selected
+            if is_selected:
+                draw.rectangle([x + 1, 58, x + CELL_WIDTH - 1, 135], fill=(0, 45, 60))
+            
+            # Graph border
+            draw.rectangle([gx, gy, gx + gw, gy + gh], outline=(60, 60, 60))
+            
+            # Draw the curve (pass accent_velocity for Fixed mode)
+            curve_color = COLOR_ACCENT if is_selected else (80, 80, 80)
+            fixed_vel = state.accent_velocity
+            _draw_velocity_preview(draw, gx, gy, gw, gh, vc_val, curve_color, fixed_vel)
+            
+            # Show velocity value on Fixed graph
+            if vc_val == VC_FIXED:
+                vel_text = str(state.accent_velocity)
+                tw = FONT_SM.getlength(vel_text) if hasattr(FONT_SM, 'getlength') else len(vel_text) * 6
+                val_color = COLOR_ACCENT if is_selected else (100, 100, 100)
+                draw.text((x + (CELL_WIDTH - tw) // 2, gy - 14), vel_text, fill=val_color, font=FONT_SM)
+            
+            # Separator
+            draw.line([(x, 42), (x, 140)], fill=COLOR_SEPARATOR)
+    
+    elif page_idx == 7:
+        # ── Page 7: About ──
+        # Bridge version
+        draw.text((20, 48), "Push 2 / Nuendo Bridge", fill=(200, 200, 200), font=FONT_MD)
+        draw.text((20, 70), f"Bridge  v{BRIDGE_VERSION}", fill=COLOR_ACCENT, font=FONT_LG)
+        
+        # JS version
+        js_ver = state.js_version if state.js_version != "?" else "not connected"
+        draw.text((20, 95), f"Script  v{js_ver}", fill=COLOR_ACCENT, font=FONT_MD)
+        
+        # Links
+        draw.text((20, 118), "github.com/mbourque-mix/Push2Nuendo-Bridge", fill=(80, 80, 80), font=FONT_SM)
+    
+    # ── Lower row labels (y=142-160) ──
+    draw.line([(0, 141), (SCREEN_WIDTH, 141)], fill=COLOR_SEPARATOR)
+    
+    for i in range(8):
+        x = i * CELL_WIDTH
+        draw.line([(x, 141), (x, SCREEN_HEIGHT)], fill=COLOR_SEPARATOR)
+        
+        if i < len(options):
+            label, value = options[i]
+            
+            if page_idx == 0:
+                is_selected = (state.aftertouch_mode == value)
+            elif page_idx == 1:
+                is_selected = (state.velocity_curve == value)
+            else:
+                is_selected = False
+            
+            if is_selected:
+                draw.rectangle([x + 1, 142, x + CELL_WIDTH - 1, SCREEN_HEIGHT - 1],
+                              fill=(0, 60, 80))
+            
+            color = COLOR_ACCENT if is_selected else (100, 100, 100)
+            tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
+            tx = x + (CELL_WIDTH - tw) // 2
+            draw.text((tx, 146), label, fill=color, font=FONT_SM)
+    
+    return _to_push2_frame(img)
+
+def _draw_velocity_preview(draw, x, y, w, h, vc_mode, color=None, fixed_vel=100):
+    """Draw a velocity curve preview graph."""
+    import math
+    if color is None:
+        color = COLOR_ACCENT
+    
+    prev_px, prev_py = None, None
+    for i in range(0, w + 1, 2):
+        t = i / max(w, 1)
+        if vc_mode == VC_LINEAR:
+            v = t
+        elif vc_mode == VC_LOG:
+            v = math.log1p(t * 3) / math.log1p(3)
+        elif vc_mode == VC_EXP:
+            v = (math.exp(t * 3) - 1) / (math.exp(3) - 1)
+        elif vc_mode == VC_SCURVE:
+            v = 0.5 * (1 + math.tanh(4 * (t - 0.5)) / math.tanh(2))
+        elif vc_mode == VC_FIXED:
+            v = fixed_vel / 127.0 if t > 0 else 0
+        else:
+            v = t
+        px = x + i
+        py = y + h - int(v * h)
+        if prev_px is not None:
+            draw.line([(prev_px, prev_py), (px, py)], fill=color, width=1)
+        prev_px, prev_py = px, py
+
+# ─────────────────────────────────────────────
 # Splash screen
 # ─────────────────────────────────────────────
 
@@ -980,6 +1295,12 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
     
     if state.mode == MODE_CR and cr_state:
         return _render_cr_screen(state, cr_state)
+    
+    if state.mode == MODE_SETUP:
+        return _render_setup_screen(state)
+    
+    if state.mode == MODE_MIDICC:
+        return _render_midicc_screen(state)
     
     if state.mode == MODE_INSERTS:
         return _render_inserts_screen(state)

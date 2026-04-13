@@ -31,13 +31,13 @@ def terminal_main():
     import time
     import signal
     
-    from state import AppState
+    from state import AppState, BRIDGE_VERSION
     from nuendo_link import NuendoLink
     from push2_controller import Push2Controller
     
     print()
     print("╔═══════════════════════════════════════════════╗")
-    print("║       Push 2 / Nuendo Bridge  v1.0.1          ║")
+    print(f"║     Push 2 / Nuendo Bridge  v{BRIDGE_VERSION:<15s}║")
     print("╚═══════════════════════════════════════════════╝")
     print()
     

@@ -78,7 +78,12 @@ def add_page_number(c, doc):
     c.restoreState()
 
 def build():
-    path = "/home/claude/Push2_Nuendo_Bridge_User_Guide.pdf"
+    import os
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_dir = os.path.dirname(script_dir)
+    docs_dir = os.path.join(project_dir, "docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    path = os.path.join(docs_dir, "Push2_Nuendo_Bridge_User_Guide.pdf")
     doc = SimpleDocTemplate(path, pagesize=letter,
         topMargin=0.75*inch, bottomMargin=0.75*inch,
         leftMargin=0.8*inch, rightMargin=0.8*inch)
@@ -91,7 +96,7 @@ def build():
     s.append(Spacer(1, 0.5*inch))
     s.append(HRFlowable(width="60%", color=ACCENT, thickness=2, spaceAfter=20))
     s.append(Spacer(1, 0.3*inch))
-    s.append(Paragraph("Version 1.0.1", styles['Body']))
+    s.append(Paragraph("Version 1.0.2", styles['Body']))
     s.append(Paragraph("Compatible with Nuendo 14+ and Cubase 14+", styles['Body']))
     s.append(Paragraph("macOS and Windows", styles['Body']))
     s.append(Spacer(1, 1.5*inch))
@@ -110,8 +115,9 @@ def build():
         "7. Mixer Modes", "8. Sends Mode", "9. Inserts Mode",
         "10. Quick Controls (Device Mode)", "11. Transport Controls", "12. Automation",
         "13. Touchstrip", "14. Note Input", "15. Control Room",
-        "16. Button Reference", "17. MIDI Channel Allocation", "18. Troubleshooting",
-        "19. Known Issues", "20. Support",
+        "16. Setup Page", "17. MIDI CC Controller",
+        "18. Button Reference", "19. MIDI Channel Allocation", "20. Troubleshooting",
+        "21. Support",
     ]
     for item in toc:
         s.append(Paragraph(item, styles['Body']))
@@ -200,6 +206,11 @@ def build():
     s.append(Paragraph(
         "On Windows, the bridge runs in terminal mode. A future version may include a system tray app.",
         styles['Note']))
+    s.append(Paragraph(
+        "For detailed Windows installation instructions including virtual MIDI port setup "
+        "with loopMIDI, please refer to the separate <b>Windows Installation Guide</b> "
+        "included in the GitHub release.",
+        styles['Body']))
     s.append(PageBreak())
 
     # ═══ 4. FIRST LAUNCH ═══
@@ -298,8 +309,8 @@ def build():
         "The 8 buttons below the screen toggle between Mute, Solo, Monitor, and Record Arm:", styles['Body']))
     s.append(B("Press <b>Mute</b> button to toggle between Mute and Monitor mode"))
     s.append(B("Press <b>Solo</b> button to toggle between Solo and Record Arm mode"))
-    s.append(B("<b>Shift+Mute</b> = Clear all mutes"))
-    s.append(B("<b>Shift+Solo</b> = Clear all solos"))
+    s.append(B("<b>Shift+Mute</b> = Clear all mutes (or Clear all monitors in Monitor mode)"))
+    s.append(B("<b>Shift+Solo</b> = Clear all solos (or Clear all rec arms in Rec mode)"))
     s.append(PageBreak())
 
     # ═══ 7. MIXER MODES ═══
@@ -314,6 +325,7 @@ def build():
         "Peak clip is indicated by a red outline on the VU meter.", styles['Body']))
     s.append(B("<b>Shift + Upper row button</b> = Clear peak clip for that track"))
     s.append(B("<b>Long press upper row</b> (1 second) = Open instrument UI"))
+    s.append(B("<b>Double press upper row</b> = Open Edit Channel Settings"))
     s.append(Spacer(1, 12))
     s.append(Paragraph("Pan Mode (Shift+Clip)", styles['H2']))
     s.append(Paragraph(
@@ -345,9 +357,11 @@ def build():
         styles['Body']))
     s.append(Paragraph("List View", styles['H2']))
     s.append(B("Shows plugin names in each slot (or 'No Insert' if empty)"))
-    s.append(B("<b>Upper row button</b> = Enter parameter view for that insert"))
+    s.append(B("<b>Short press upper row</b> = Enter parameter view for that insert"))
+    s.append(B("<b>Long press upper row</b> (0.5s) = Open plugin UI without entering parameters"))
     s.append(B("<b>Shift + Upper row button</b> = Enter parameters + open plugin UI"))
-    s.append(B("<b>Lower row buttons</b> = Toggle bypass per slot"))
+    s.append(B("<b>Lower row buttons 1-4</b> = Toggle bypass per slot"))
+    s.append(B("<b>Lower row buttons 5-8</b> = Mute / Solo / Monitor / Rec on selected track"))
     s.append(B("<b>Left/Right arrows</b> = Navigate between tracks"))
     s.append(Paragraph("Parameter View", styles['H2']))
     s.append(Paragraph("When viewing a plugin's parameters:", styles['Body']))
@@ -356,6 +370,7 @@ def build():
     s.append(B("<b>Lower row button 1</b> = Open/Close plugin UI"))
     s.append(B("<b>Lower row button 2</b> = Bypass toggle"))
     s.append(B("<b>Lower row button 3</b> = Deactivate plugin"))
+    s.append(B("<b>Lower row buttons 5-8</b> = Mute / Solo / Monitor / Rec on selected track"))
     s.append(B("Press <b>Browse</b> again to return to list view"))
     s.append(PageBreak())
 
@@ -366,6 +381,7 @@ def build():
         "of the selected track (configurable in Nuendo's Inspector).", styles['Body']))
     s.append(B("<b>Encoders</b> = Adjust QC values"))
     s.append(B("<b>Lower row button 1</b> = Open instrument UI"))
+    s.append(B("<b>Lower row buttons 5-8</b> = Mute / Solo / Monitor / Rec on selected track"))
     s.append(B("<b>Left/Right arrows</b> = Navigate between tracks"))
 
     # ═══ 11. TRANSPORT ═══
@@ -437,13 +453,83 @@ def build():
         styles['Body']))
     s.append(PageBreak())
 
-    # ═══ 16. BUTTON REFERENCE ═══
-    s.append(Paragraph("16. Button Reference", styles['H1']))
+    # ═══ 16. SETUP PAGE ═══
+    s.append(Paragraph("16. Setup Page", styles['H1']))
+    s.append(Paragraph(
+        "Press the <b>Setup</b> button to open the Setup page (press again to exit). "
+        "The Setup page has multiple tabs selectable via the upper row buttons.", styles['Body']))
+    
+    s.append(Paragraph("MIDI Ctrl Page", styles['H2']))
+    s.append(Paragraph(
+        "Configure the aftertouch mode for the Push 2 pads:", styles['Body']))
+    s.append(B("<b>Poly AT</b>: Polyphonic aftertouch — each pad sends independent pressure (0xA0)"))
+    s.append(B("<b>Chan AT</b>: Channel aftertouch — all pads share one global pressure value (0xD0)"))
+    s.append(B("<b>AT Off</b>: No aftertouch is sent"))
+    s.append(Paragraph(
+        "The Push 2 hardware always stays in polyphonic mode internally. "
+        "Channel aftertouch conversion is done in software by tracking per-pad pressure "
+        "and sending the maximum value.", styles['Note']))
+    
+    s.append(Paragraph("Vel Curve Page", styles['H2']))
+    s.append(Paragraph(
+        "Choose from 5 velocity curve presets, each shown with a visual graph:", styles['Body']))
+    s.append(B("<b>Linear</b>: proportional response (default)"))
+    s.append(B("<b>Log</b>: logarithmic — more sensitive at low velocities, good for expressive playing"))
+    s.append(B("<b>Exp</b>: exponential — more sensitive at high velocities, good for drums"))
+    s.append(B("<b>S-Curve</b>: compressed extremes, expanded middle — musical compromise"))
+    s.append(B("<b>Fixed</b>: constant velocity — the value is adjustable with the 5th encoder and is synchronized with the Accent button"))
+    
+    s.append(Paragraph("About Page", styles['H2']))
+    s.append(Paragraph(
+        "Displays the Bridge version and the JS Script version currently loaded in Nuendo.", styles['Body']))
+    s.append(PageBreak())
+
+    # ═══ 17. MIDI CC CONTROLLER ═══
+    s.append(Paragraph("17. MIDI CC Controller", styles['H1']))
+    s.append(Paragraph(
+        "Press <b>Shift+Note</b> to open the MIDI CC controller page (press again or Note to exit). "
+        "This page provides 8 assignable MIDI CC faders that send CC messages on the BridgeNotes port.", styles['Body']))
+    s.append(B("<b>Encoders</b>: adjust the CC value (0-127) in real time"))
+    s.append(B("<b>Upper row buttons</b>: toggle CC number edit mode — encoders then change which CC is assigned"))
+    s.append(B("<b>Lower row buttons</b>: toggle CC value between 0 and 127 (for on/off parameters like sustain)"))
+    s.append(Spacer(1, 8))
+    s.append(Paragraph("Default CC assignments:", styles['Body']))
+    s.append(T(['Encoder', 'CC', 'Name'],
+        [['1', '1', 'Mod Wheel'],
+         ['2', '2', 'Breath Controller'],
+         ['3', '7', 'Volume'],
+         ['4', '8', 'Balance'],
+         ['5', '10', 'Pan'],
+         ['6', '11', 'Expression'],
+         ['7', '64', 'Sustain Pedal'],
+         ['8', '65', 'Portamento']],
+        col_widths=[1*inch, 0.8*inch, 3.5*inch]))
+    s.append(Spacer(1, 8))
+    s.append(Paragraph(
+        "The CC messages are sent on the BridgeNotes MIDI port (the same port used for note input). "
+        "Make sure your instrument track's MIDI input includes BridgeNotes.", styles['Note']))
+    s.append(Spacer(1, 8))
+    s.append(Paragraph("CC Feedback from Nuendo", styles['H2']))
+    s.append(Paragraph(
+        "By default, the MIDI CC page is unidirectional (Push to Nuendo). "
+        "The Push 2 display will show the last value sent but will not reflect CC changes "
+        "made in Nuendo (e.g. from automation or another controller).", styles['Body']))
+    s.append(Paragraph(
+        "To enable feedback from Nuendo, add a <b>MIDI Send</b> on your MIDI/Instrument track "
+        "routed to <b>BridgeNotes In</b>. This will forward CC automation playback back to the "
+        "Push 2 display in real time. Note that this requires manual configuration per track.",
+        styles['Note']))
+    s.append(PageBreak())
+
+    # ═══ 18. BUTTON REFERENCE ═══
+    s.append(Paragraph("18. Button Reference", styles['H1']))
     s.append(T(['Button', 'Action', 'Shift + Button'],
         [['Mix', 'Volume mode', 'Track mode'],
          ['Clip', 'Sends mode', 'Pan mode'],
          ['Device', 'Quick Controls mode', ''],
          ['Browse', 'Inserts mode', ''],
+         ['Note', 'MIDI note pads', 'MIDI CC controller'],
+         ['Setup', 'Setup page (toggle)', ''],
          ['Left / Right', 'Bank navigation', 'Track nav (Sends/Inserts/Device)'],
          ['Play', 'Start playback', ''],
          ['Record', 'Record toggle', ''],
@@ -451,8 +537,8 @@ def build():
          ['Automate', 'Automation cycle', ''],
          ['Metronome', 'Metronome toggle', ''],
          ['Undo', 'Undo', ''],
-         ['Mute', 'Mute / Monitor toggle', 'Clear all mutes'],
-         ['Solo', 'Solo / Rec arm toggle', 'Clear all solos'],
+         ['Mute', 'Mute / Monitor toggle', 'Clear all mutes (or monitors)'],
+         ['Solo', 'Solo / Rec arm toggle', 'Clear all solos (or rec arms)'],
          ['Add Track', 'Add Track dialog', ''],
          ['New', 'New Track Version', ''],
          ['Duplicate', 'Duplicate Track', 'Duplicate Track Version'],
@@ -462,14 +548,14 @@ def build():
          ['Scale', 'Scale selector', ''],
          ['Accent', 'Fixed velocity (hold)', ''],
          ['Note Repeat', 'Auto-repeat (hold)', ''],
-         ['Tempo Encoder', 'Repeat BPM (when active)', ''],
-         ['Upper row (long)', 'Open instrument UI', ''],
-         ['Lower row 7 + Shift', 'Rescan tracks', '']],
+         ['Upper row (long)', 'Open instrument UI', 'Clear peak clip'],
+         ['Upper row (double)', 'Edit Channel Settings', ''],
+         ['Upper row (Inserts, long)', 'Open plugin UI only', '']],
         col_widths=[1.5*inch, 2.2*inch, 2.2*inch]))
     s.append(PageBreak())
 
     # ═══ 17. MIDI CHANNEL ALLOCATION ═══
-    s.append(Paragraph("17. MIDI Channel Allocation", styles['H1']))
+    s.append(Paragraph("19. MIDI Channel Allocation", styles['H1']))
     s.append(Paragraph("The bridge uses multiple MIDI channels to avoid CC conflicts:", styles['Body']))
     s.append(T(['Channel', 'Usage'],
         [['1 (0xB0)', 'Mixer controls (volume, pan, transport, selection, VU meters)'],
@@ -492,7 +578,7 @@ def build():
     s.append(PageBreak())
 
     # ═══ 18. TROUBLESHOOTING ═══
-    s.append(Paragraph("18. Troubleshooting", styles['H1']))
+    s.append(Paragraph("20. Troubleshooting", styles['H1']))
     problems = [
         ("Push 2 not found",
          "Check that the Push 2 is connected via USB and powered on. "
@@ -526,7 +612,7 @@ def build():
     s.append(PageBreak())
 
     # ═══ 19. KNOWN ISSUES ═══
-    s.append(Paragraph("19. Known Issues", styles['H1']))
+    s.append(Paragraph("Known Issues", styles['H2']))
     s.append(Paragraph(
         "The following are known limitations of the current version:",
         styles['Body']))
@@ -538,23 +624,14 @@ def build():
          "If the Push 2 display becomes unresponsive or shows stale data, "
          "use Stop/Start Bridge from the menu bar, or quit and relaunch the app."),
         ("Occasional MIDI Remote script reload needed",
-         "Nuendo may occasionally lose the connection to the MIDI Remote script, "
-         "especially after extended sessions or after waking from sleep. "
+         "Nuendo may occasionally lose the connection to the MIDI Remote script. "
          "If controls stop responding but the display still updates, reload the script "
-         "in Nuendo via the MIDI Remote tab (right-click the info line, enable Scripting Tools, "
-         "then click Reload Scripts)."),
+         "in Nuendo via the MIDI Remote tab."),
         ("127 track limit",
-         "The bridge supports a maximum of 127 tracks due to the 7-bit MIDI CC value range "
-         "used for track indexing. Projects with more than 127 tracks will only show "
-         "the first 127 on the Push 2."),
-        ("Track add/move/delete glitches",
-         "Adding, deleting, reordering, or renaming tracks while the bridge is running "
-         "may cause temporary display inconsistencies. Press Shift + 7th lower row button "
-         "to trigger a full rescan, or navigate away and back with the Left/Right arrows."),
-        ("Input and Output tracks display",
-         "Input and Output bus tracks (including the Stereo Out) may display incorrect "
-         "names or parameters. These special track types are not fully supported by the "
-         "Steinberg MIDI Remote API's mixer bank zone."),
+         "The bridge supports a maximum of 127 tracks due to the 7-bit MIDI CC value range."),
+        ("Track add/move/delete",
+         "Adding, deleting, or reordering tracks may cause temporary display inconsistencies. "
+         "Navigate with Left/Right arrows to refresh."),
     ]
     for title, desc in issues:
         s.append(Paragraph(f"<b>{title}</b>", styles['BodyBold']))
@@ -562,8 +639,8 @@ def build():
         s.append(Spacer(1, 4))
     s.append(PageBreak())
 
-    # ═══ 20. SUPPORT ═══
-    s.append(Paragraph("20. Support", styles['H1']))
+    # ═══ 21. SUPPORT ═══
+    s.append(Paragraph("21. Support", styles['H1']))
     s.append(Paragraph(
         "Push 2 / Nuendo Bridge is donationware. It is free to use, but if you find it useful, "
         "please consider supporting the project.", styles['Body']))

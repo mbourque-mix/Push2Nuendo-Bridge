@@ -9,8 +9,16 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 SRC_DIR="$PROJECT_DIR/src"
 
+# Extract version from state.py
+VERSION=$(python3 -c "
+import sys; sys.path.insert(0, '$SRC_DIR')
+from state import BRIDGE_VERSION; print(BRIDGE_VERSION)
+")
+
+APP_NAME="Push2 Nuendo Bridge v${VERSION}"
+
 echo ""
-echo "Building Push 2 / Nuendo Bridge..."
+echo "Building ${APP_NAME}..."
 echo ""
 
 # Check dependencies
@@ -25,7 +33,7 @@ cd "$SRC_DIR"
 # Note: push2-python includes a Flask/SocketIO simulator that requires
 # engineio.async_drivers to be bundled, otherwise it crashes at import.
 pyinstaller \
-    --name "Push2 Nuendo Bridge" \
+    --name "$APP_NAME" \
     --onedir \
     --windowed \
     --noconfirm \
@@ -77,26 +85,42 @@ rm -rf build *.spec
 # Copy JS script into dist
 cp "$PROJECT_DIR/Ableton_Push2.js" "$PROJECT_DIR/dist/"
 
+# Copy docs if they exist
+[ -f "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_User_Guide.pdf" ] && \
+    cp "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_User_Guide.pdf" "$PROJECT_DIR/dist/"
+[ -f "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_Release_Notes.pdf" ] && \
+    cp "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_Release_Notes.pdf" "$PROJECT_DIR/dist/"
+
 # Add LSUIElement to Info.plist (hide from Dock, show only in menu bar)
-PLIST="$PROJECT_DIR/dist/Push2 Nuendo Bridge.app/Contents/Info.plist"
+PLIST="$PROJECT_DIR/dist/${APP_NAME}.app/Contents/Info.plist"
 if [ -f "$PLIST" ]; then
     /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :LSUIElement true" "$PLIST"
     echo "  ✓ LSUIElement set (app will hide from Dock)"
 fi
 
+# Create zip for GitHub release
+cd "$PROJECT_DIR/dist"
+ZIP_NAME="Push2NuendoBridge-v${VERSION}-macOS.zip"
+zip -r "$ZIP_NAME" "${APP_NAME}.app" Ableton_Push2.js \
+    Push2_Nuendo_Bridge_User_Guide.pdf Push2_Nuendo_Bridge_Release_Notes.pdf \
+    2>/dev/null
+cd "$PROJECT_DIR"
+
 echo ""
 echo "═══════════════════════════════════════════════"
-echo "  ✓ Build complete!"
+echo "  ✓ Build complete!  (v${VERSION})"
 echo ""
-echo "  App:    dist/Push2 Nuendo Bridge.app"
+echo "  App:    dist/${APP_NAME}.app"
 echo "  Script: dist/Ableton_Push2.js"
+echo "  Zip:    dist/${ZIP_NAME}"
 echo ""
 echo "  Test it:"
-echo "    ./dist/Push2\\ Nuendo\\ Bridge.app/Contents/MacOS/Push2\\ Nuendo\\ Bridge"
+echo "    open \"dist/${APP_NAME}.app\""
 echo ""
 echo "  To distribute:"
 echo "    1. Copy the .app to /Applications"
 echo "    2. Copy Ableton_Push2.js to Nuendo MIDI Remote folder"
+echo "    3. Upload ${ZIP_NAME} to GitHub Releases"
 echo "═══════════════════════════════════════════════"
 echo ""

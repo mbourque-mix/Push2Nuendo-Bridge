@@ -1,5 +1,6 @@
 // =============================================================================
-// Ableton_Push2.js — Script MIDI Remote pour Nuendo 14
+// Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
+// Version 1.0.2
 //
 // Un seul bank zone de 8 canaux.
 // Banking via mNextBank/mPrevBank (CC 8/9).
@@ -13,6 +14,8 @@
 // CC 110-117 : Monitor  CC 118-125 : Record Arm
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
+
+var JS_VERSION = '1.0.2';
 
 var midiremote_api = require('midiremote_api_v1');
 
@@ -61,6 +64,7 @@ sendPrevBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToContro
 
 // ── BOUTONS ──
 var selButtons = [], muteButtons = [], soloButtons = [], monitorButtons = [], recButtons = [];
+var editorOpenButtons = [];
 for (var i = 0; i < 8; i++) {
     var sb = surface.makeButton(i*3, 8, 3, 2);
     sb.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).setOutputPort(midiOutput_Loop).bindToControlChange(0, 80+i);
@@ -77,6 +81,10 @@ for (var i = 0; i < 8; i++) {
     var rb = surface.makeButton(i*3, 16, 3, 2);
     rb.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).setOutputPort(midiOutput_Loop).bindToControlChange(0, 118+i);
     recButtons.push(rb);
+    // Edit Channel Settings toggle (Note 70+i)
+    var eb = surface.makeButton(i*3, 19, 3, 2);
+    eb.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToNote(0, 70+i);
+    editorOpenButtons.push(eb);
 }
 
 // ── SEND ENABLE BUTTONS (CC 60-67) ──
@@ -288,6 +296,7 @@ for (var i = 0; i < 8; i++) {
     page.makeValueBinding(soloButtons[i].mSurfaceValue, ch.mValue.mSolo);
     page.makeValueBinding(monitorButtons[i].mSurfaceValue, ch.mValue.mMonitorEnable);
     page.makeValueBinding(recButtons[i].mSurfaceValue, ch.mValue.mRecordEnable);
+    page.makeValueBinding(editorOpenButtons[i].mSurfaceValue, ch.mValue.mEditorOpen).setTypeToggle();
 
     // Instrument Open : CC 15 channel 2 + index via Note (on utilise un bouton dédié par canal)
     // Note 80+i channel 1 = toggle instrument UI pour canal i
@@ -891,6 +900,17 @@ stopScanBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, 
 };
 
 // ══════════════════════════════════════════════════
+// DIRECT ACCESS (API 1.2+ / Nuendo 14+)
+// Reserved for future use (volume calibration, track introspection, etc.)
+// ══════════════════════════════════════════════════
+
+if (page.mHostAccess.makeDirectAccess) {
+    console.log('DirectAccess available (API 1.2+) — reserved for future features');
+} else {
+    console.log('DirectAccess not available (API < 1.2)');
+}
+
+// ══════════════════════════════════════════════════
 // IDLE
 // ══════════════════════════════════════════════════
 var tick = 0;
@@ -917,6 +937,13 @@ deviceDriver.mOnIdle = function(context) {
                 midiOutput_Loop.sendMidi(context, [0xB0, 20 + i, Math.round(vol * 127)]);
                 midiOutput_Loop.sendMidi(context, [0xB0, 40 + i, Math.round(pan * 127)]);
             }
+            // Send JS version to bridge via SysEx 0x10
+            var verMsg = [0xF0, 0x00, 0x21, 0x09, 0x10];
+            for (var c = 0; c < JS_VERSION.length; c++) {
+                verMsg.push(JS_VERSION.charCodeAt(c) & 0x7F);
+            }
+            verMsg.push(0xF7);
+            midiOutput_Loop.sendMidi(context, verMsg);
         }
     }
 

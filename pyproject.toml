@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "push2-nuendo-bridge"
-version = "1.0.0"
-description = "Turn your Ableton Push 2 into a control surface for Steinberg Nuendo 14"
+version = "1.0.2"
+description = "Turn your Ableton Push 2 into a control surface for Steinberg Nuendo / Cubase"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "GPL-3.0"}
 requires-python = ">=3.9"
 keywords = ["push2", "nuendo", "cubase", "midi", "daw", "controller"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
@@ -32,8 +32,9 @@ dependencies = [
 push2-nuendo = "src.main:main"
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/push2-nuendo-bridge"
-Issues = "https://github.com/YOUR_USERNAME/push2-nuendo-bridge/issues"
+Homepage = "https://github.com/mbourque-mix/Push2Nuendo-Bridge"
+Issues = "https://github.com/mbourque-mix/Push2Nuendo-Bridge/issues"
+Website = "https://push2bridge.kaikuaudio.com"
 
 [tool.setuptools.packages.find]
 include = ["src*"]

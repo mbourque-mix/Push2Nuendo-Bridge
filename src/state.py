@@ -20,6 +20,23 @@ MODE_INSERTS = "inserts"  # Displays the insert list for the current track
 MODE_TRACK   = "track"    # Combined mode: Vol+Pan+Sends on the selected track
 MODE_OVERVIEW = "overview" # Overview mode: pads = project tracks
 MODE_CR      = "controlroom"  # Control Room mode
+MODE_SETUP   = "setup"    # Setup page (aftertouch mode, etc.)
+MODE_MIDICC  = "midicc"   # MIDI CC controller page
+
+# Bridge version
+BRIDGE_VERSION = "1.0.2"
+
+# Aftertouch modes
+AT_POLY    = "poly"       # Polyphonic aftertouch (per-note)
+AT_CHANNEL = "channel"    # Channel aftertouch (global)
+AT_OFF     = "off"        # No aftertouch
+
+# Velocity curve presets
+VC_LINEAR  = "linear"
+VC_LOG     = "log"       # Logarithmic (more sensitive at low velocities)
+VC_EXP     = "exp"       # Exponential (more sensitive at high velocities)
+VC_SCURVE  = "s-curve"   # S-curve (compressed extremes, expanded middle)
+VC_FIXED   = "fixed"     # Fixed velocity (always 100)
 
 # Number of tracks displayed simultaneously (= number of encoders)
 BANK_SIZE = 8
@@ -201,6 +218,19 @@ class AppState:
         
         # ── Drum mode ──
         self.drum_mode = False  # True = 4x4 drum layout
+        
+        # ── Setup page ──
+        self.setup_page = 0         # 0 = MIDI Controller, future pages...
+        self.aftertouch_mode = AT_POLY  # default: polyphonic aftertouch
+        self.velocity_curve = VC_LINEAR  # default: linear velocity
+        
+        # ── MIDI CC page ──
+        self.cc_numbers = [1, 2, 7, 8, 10, 11, 64, 65]  # default CC assignments
+        self.cc_values = [0] * 8       # current CC values (0-127)
+        self.cc_edit_mode = False      # True = encoders change CC number instead of value
+        
+        # ── Version info ──
+        self.js_version = "?"         # will be set by JS via SysEx
         
         # ── Overview ──
         self.overview_page = 0

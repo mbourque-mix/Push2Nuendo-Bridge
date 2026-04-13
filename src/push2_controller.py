@@ -20,7 +20,9 @@ import threading
 import time
 from state import (
     AppState, BANK_SIZE,
-    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR
+    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
+    MODE_SETUP, MODE_MIDICC, AT_POLY, AT_CHANNEL, AT_OFF,
+    VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED
 )
 from pad_grid import PadGrid
 from overview import compute_overview_layout, get_pad_color_for_overview
@@ -132,6 +134,9 @@ BTN_DUPLICATE     = getattr(Push2Constants, 'BUTTON_DUPLICATE', 'Duplicate')
 # User (for Hold + Master Encoder = Phones)
 BTN_USER          = getattr(Push2Constants, 'BUTTON_USER', 'User')
 
+# Setup button (CC 30, monochrome)
+BTN_SETUP         = getattr(Push2Constants, 'BUTTON_SETUP', 'Setup')
+
 # "Select" buttons above encoders (upper row)
 BUTTONS_UPPER_ROW = [
     Push2Constants.BUTTON_UPPER_ROW_1,
@@ -234,6 +239,10 @@ class Push2Controller:
         self.cr_state        = ControlRoomState()
         self._insert_scan_version = 0
         self._upper_row_press_time = {}  # {button_name: timestamp}
+        self._upper_row_last_press = {}  # {button_name: timestamp} for double press detection
+        self._lower_row_press_time = {}  # {button_name: timestamp}
+        self._lower_row_handled = {}     # {button_name: bool}
+        self._lower_row_press_id = {}    # {button_name: int} — incremented each press to cancel stale timers
         
         # Callback for initial scan when Nuendo connects
         self.nuendo_link._on_connected_callback = lambda: self._initial_bank_refresh()
@@ -423,6 +432,32 @@ class Push2Controller:
         if self.state.accent_held:
             if encoder_index == 0:
                 self.state.accent_velocity = max(1, min(127, self.state.accent_velocity + increment))
+                # If Fixed curve is active, re-apply it with the new velocity
+                if self.state.velocity_curve == VC_FIXED:
+                    self._apply_velocity_curve()
+            return
+        
+        # Setup mode: encoder 5 (index 4) adjusts fixed velocity on Vel Curve page
+        if self.state.mode == MODE_SETUP and self.state.setup_page == 1:
+            if encoder_index == 4:  # 5th encoder, above "Fixed" button
+                self.state.accent_velocity = max(1, min(127, self.state.accent_velocity + increment))
+                if self.state.velocity_curve == VC_FIXED:
+                    self._apply_velocity_curve()
+            return
+        
+        # MIDI CC mode: encoders adjust CC value or CC number
+        if self.state.mode == MODE_MIDICC:
+            if self.state.cc_edit_mode:
+                # Edit mode: encoder changes CC number
+                cc = self.state.cc_numbers[encoder_index]
+                cc = max(0, min(127, cc + increment))
+                self.state.cc_numbers[encoder_index] = cc
+            else:
+                # Normal mode: encoder changes CC value and sends it
+                val = self.state.cc_values[encoder_index]
+                val = max(0, min(127, val + increment))
+                self.state.cc_values[encoder_index] = val
+                self.nuendo_link.send_midi_cc_to_notes(self.state.cc_numbers[encoder_index], val)
             return
         
         # Control Room mode: redirect encoders to CR CCs
@@ -559,6 +594,16 @@ class Push2Controller:
                 self._set_mode(MODE_CR)
                 self.cr_state.page = CR_PAGE_MAIN
                 self._update_cr_leds()
+            return
+        
+        # ── Setup (toggle Setup page) ──
+        if button_name == BTN_SETUP:
+            if state.mode == MODE_SETUP:
+                self._set_mode(MODE_VOLUME)
+            else:
+                self._set_mode(MODE_SETUP)
+                state.setup_page = 0
+            self._update_all_leds()
             return
         
         # ── Undo / Redo ──
@@ -837,8 +882,18 @@ class Push2Controller:
             return
         
         if button_name == BTN_MODE_NOTE:
+            if state.shift_held:
+                # Shift+Note = MIDI CC page
+                if state.mode == MODE_MIDICC:
+                    self._set_mode(MODE_VOLUME)
+                else:
+                    self._set_mode(MODE_MIDICC)
+                    state.cc_edit_mode = False
+                return
             # Return to MIDI note pads (exit Overview if active)
             if state.mode == MODE_OVERVIEW:
+                self._set_mode(MODE_VOLUME)
+            if state.mode == MODE_MIDICC:
                 self._set_mode(MODE_VOLUME)
             self._update_pad_colors()
             return
@@ -876,6 +931,63 @@ class Push2Controller:
                 t.name = f"Track {t.index + 1}"
                 t.color = (150, 150, 150)
             self._full_scan()
+            return
+        
+        # ── Mode MIDI CC : intercepter les boutons ──
+        if state.mode == MODE_MIDICC:
+            # Upper row → toggle CC edit mode per channel
+            for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                if button_name == btn:
+                    state.cc_edit_mode = not state.cc_edit_mode
+                    self._update_all_leds()
+                    return
+            
+            # Lower row → toggle CC value 0/127 (for on/off CCs like sustain)
+            for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                if button_name == btn:
+                    if state.cc_values[i] > 0:
+                        state.cc_values[i] = 0
+                    else:
+                        state.cc_values[i] = 127
+                    self.nuendo_link.send_midi_cc_to_notes(state.cc_numbers[i], state.cc_values[i])
+                    self._update_lower_row_leds()
+                    return
+            return
+        
+        # ── Mode Setup : intercepter les boutons ──
+        if state.mode == MODE_SETUP:
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+            
+            # Upper row → select setup page
+            for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                if button_name == btn:
+                    if i < len(SETUP_PAGES) and SETUP_PAGES[i] is not None:
+                        state.setup_page = i
+                        self._update_all_leds()
+                    return
+            
+            # Lower row → change settings on the current page
+            for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                if button_name == btn:
+                    if state.setup_page == 0:
+                        # Page 0: MIDI Controller — Aftertouch mode (buttons 1-3)
+                        if i == 0:
+                            state.aftertouch_mode = AT_POLY
+                            self._apply_aftertouch_mode()
+                        elif i == 1:
+                            state.aftertouch_mode = AT_CHANNEL
+                            self._apply_aftertouch_mode()
+                        elif i == 2:
+                            state.aftertouch_mode = AT_OFF
+                            self._apply_aftertouch_mode()
+                    elif state.setup_page == 1:
+                        # Page 1: Velocity Curve (buttons 1-5)
+                        VC_LIST = [VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED]
+                        if i < len(VC_LIST):
+                            state.velocity_curve = VC_LIST[i]
+                            self._apply_velocity_curve()
+                    self._update_all_leds()
+                    return
             return
         
         # ── Mode Control Room : intercepter les boutons ──
@@ -946,7 +1058,7 @@ class Push2Controller:
         
         # ── Device mode: intercept buttons ──
         if state.mode == MODE_DEVICE:
-            # Lower row: button 1 = Open Instrument UI
+            # Lower row: button 1 = Open Instrument UI, buttons 5-8 = Mute/Solo/Mon/Rec
             for i, btn in enumerate(BUTTONS_LOWER_ROW):
                 if button_name == btn:
                     if i == 0:
@@ -957,6 +1069,8 @@ class Push2Controller:
                             time.sleep(0.01)
                             self.nuendo_link.send_note(80 + rel, 0)
                             print(f"  Instrument UI toggle (Device mode)")
+                    elif 4 <= i <= 7:
+                        self._toggle_selected_track_function(i - 4)
                     return
             return
         
@@ -992,24 +1106,28 @@ class Push2Controller:
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
                     elif i < len(names) and names[i]:
-                        # Navigate to slot and enter parameters mode
-                        state.selected_insert_slot = i
-                        state.insert_param_names = [''] * 8
-                        state.insert_param_values = [''] * 8
-                        if state.shift_held:
-                            # Shift+Upper = params + open UI
-                            self._insert_action(i, 'params_and_edit')
-                        else:
-                            # Upper = params only
-                            self._insert_action(i, 'params')
-                        state.insert_params_mode = True
-                        self._update_upper_row_leds()
-                        self._update_lower_row_leds()
+                        # Record timestamp for long press detection
+                        self._upper_row_press_time[button_name] = time.time()
+                        
+                        # Long press timer: open UI without entering params
+                        import threading
+                        def _inserts_long_press(btn_name=button_name, slot=i):
+                            time.sleep(0.5)
+                            if btn_name in self._upper_row_press_time and self._upper_row_press_time[btn_name] > 0:
+                                # Long press: open plugin UI only
+                                self._insert_action(slot, 'edit')
+                                print(f"  Long press: Open insert UI slot {slot}")
+                                self._upper_row_press_time[btn_name] = -1  # mark handled
+                        threading.Thread(target=_inserts_long_press, daemon=True).start()
                     return
             
             # Lower row
             for i, btn in enumerate(BUTTONS_LOWER_ROW):
                 if button_name == btn:
+                    # Buttons 5-8 = Mute/Solo/Mon/Rec (both list and params view)
+                    if 4 <= i <= 7:
+                        self._toggle_selected_track_function(i - 4)
+                        return
                     if state.insert_params_mode:
                         # In parameters mode, lower row = actions
                         slot = state.selected_insert_slot
@@ -1038,36 +1156,112 @@ class Push2Controller:
         # ── Mode buttons Mute/Monitor (CC 60) ──
         if button_name == Push2Constants.BUTTON_MUTE:
             if state.shift_held:
-                # Shift+Mute = Deactivate All Mute States
-                self.nuendo_link.send_cc(75, 127)
-                time.sleep(0.05)
-                self.nuendo_link.send_cc(75, 0)
+                if state.lower_mode == LOWER_MODE_MONITOR:
+                    # Shift+Mute in Monitor mode = Clear all monitors (all tracks)
+                    import threading
+                    def _clear_all_monitors():
+                        current_bank = self.state.bank_offset
+                        current_bank_idx = current_bank // 8
+                        num_banks = (self.state.total_tracks + 7) // 8
+                        # Navigate to bank 0
+                        for _ in range(current_bank_idx):
+                            self.nuendo_link.send_cc(9, 127)
+                            time.sleep(0.02)
+                            self.nuendo_link.send_cc(9, 0)
+                            time.sleep(0.08)
+                        self.state.bank_offset = 0
+                        time.sleep(0.1)
+                        # Iterate all banks forward
+                        for bank_idx in range(num_banks):
+                            for t in range(8):
+                                abs_idx = bank_idx * 8 + t
+                                if abs_idx < len(self.state.tracks):
+                                    self.state.tracks[abs_idx].is_monitored = False
+                                    self.nuendo_link.send_monitor_toggle(t, False)
+                            if bank_idx < num_banks - 1:
+                                self.nuendo_link.send_cc(8, 127)
+                                time.sleep(0.02)
+                                self.nuendo_link.send_cc(8, 0)
+                                time.sleep(0.08)
+                        # Navigate back to original bank
+                        target_bank_idx = current_bank // 8
+                        current_pos = num_banks - 1
+                        for _ in range(current_pos - target_bank_idx):
+                            self.nuendo_link.send_cc(9, 127)
+                            time.sleep(0.02)
+                            self.nuendo_link.send_cc(9, 0)
+                            time.sleep(0.08)
+                        self.state.bank_offset = current_bank
+                        self._update_lower_row_leds()
+                    threading.Thread(target=_clear_all_monitors, daemon=True).start()
+                else:
+                    # Shift+Mute = Deactivate All Mute States
+                    self.nuendo_link.send_cc(75, 127)
+                    time.sleep(0.05)
+                    self.nuendo_link.send_cc(75, 0)
                 return
             if state.lower_mode == LOWER_MODE_MUTE:
                 state.lower_mode = LOWER_MODE_MONITOR
             else:
                 state.lower_mode = LOWER_MODE_MUTE
-
             self._update_lower_row_leds()
             return
         
         # ── Mode buttons Solo/Rec (CC 61) ──
         if button_name == Push2Constants.BUTTON_SOLO:
             if state.shift_held:
-                # Shift+Solo = Deactivate All Solo States
-                self.nuendo_link.send_cc(74, 127)
-                time.sleep(0.05)
-                self.nuendo_link.send_cc(74, 0)
+                if state.lower_mode == LOWER_MODE_REC:
+                    # Shift+Solo in Rec mode = Clear all rec arms (all tracks)
+                    import threading
+                    def _clear_all_rec():
+                        current_bank = self.state.bank_offset
+                        current_bank_idx = current_bank // 8
+                        num_banks = (self.state.total_tracks + 7) // 8
+                        # Navigate to bank 0
+                        for _ in range(current_bank_idx):
+                            self.nuendo_link.send_cc(9, 127)
+                            time.sleep(0.02)
+                            self.nuendo_link.send_cc(9, 0)
+                            time.sleep(0.08)
+                        self.state.bank_offset = 0
+                        time.sleep(0.1)
+                        # Iterate all banks forward
+                        for bank_idx in range(num_banks):
+                            for t in range(8):
+                                abs_idx = bank_idx * 8 + t
+                                if abs_idx < len(self.state.tracks):
+                                    self.state.tracks[abs_idx].is_armed = False
+                                    self.nuendo_link.send_rec_toggle(t, False)
+                            if bank_idx < num_banks - 1:
+                                self.nuendo_link.send_cc(8, 127)
+                                time.sleep(0.02)
+                                self.nuendo_link.send_cc(8, 0)
+                                time.sleep(0.08)
+                        # Navigate back to original bank
+                        target_bank_idx = current_bank // 8
+                        current_pos = num_banks - 1
+                        for _ in range(current_pos - target_bank_idx):
+                            self.nuendo_link.send_cc(9, 127)
+                            time.sleep(0.02)
+                            self.nuendo_link.send_cc(9, 0)
+                            time.sleep(0.08)
+                        self.state.bank_offset = current_bank
+                        self._update_lower_row_leds()
+                    threading.Thread(target=_clear_all_rec, daemon=True).start()
+                else:
+                    # Shift+Solo = Deactivate All Solo States
+                    self.nuendo_link.send_cc(74, 127)
+                    time.sleep(0.05)
+                    self.nuendo_link.send_cc(74, 0)
                 return
             if state.lower_mode == LOWER_MODE_SOLO:
                 state.lower_mode = LOWER_MODE_REC
             else:
                 state.lower_mode = LOWER_MODE_SOLO
-
             self._update_lower_row_leds()
             return
         
-        # ── Boutons du bas (lower row 1-8) : Mute/Solo/Monitor/Rec ──
+        # ── Lower row buttons (1-8): Mute/Solo (short), Monitor/Rec (long press) ──
         for i, btn in enumerate(BUTTONS_LOWER_ROW):
             if button_name == btn:
                 track_in_bank = i
@@ -1075,23 +1269,44 @@ class Push2Controller:
                 if abs_index >= state.total_tracks:
                     return
                 
-                track = state.tracks[abs_index]
-                mode = state.lower_mode
+                # Record press time for long press detection
+                self._lower_row_press_time[button_name] = time.time()
+                self._lower_row_handled[button_name] = False
+                press_id = self._lower_row_press_id.get(button_name, 0) + 1
+                self._lower_row_press_id[button_name] = press_id
                 
-                if mode == LOWER_MODE_MUTE:
-                    track.is_muted = not track.is_muted
-                    self.nuendo_link.send_mute_toggle(track_in_bank, track.is_muted)
-                elif mode == LOWER_MODE_SOLO:
-                    track.is_solo = not track.is_solo
-                    self.nuendo_link.send_solo_toggle(track_in_bank, track.is_solo)
-                elif mode == LOWER_MODE_MONITOR:
-                    track.is_monitored = not track.is_monitored
-                    self.nuendo_link.send_monitor_toggle(track_in_bank, track.is_monitored)
-                elif mode == LOWER_MODE_REC:
-                    track.is_armed = not track.is_armed
-                    self.nuendo_link.send_rec_toggle(track_in_bank, track.is_armed)
-                
-                self._update_lower_row_leds()
+                # Launch long press timer
+                import threading
+                def _lower_long_press(btn_name=button_name, idx=i, my_id=press_id):
+                    time.sleep(0.5)
+                    # Only act if this press is still the current one (not superseded by a new press)
+                    if self._lower_row_press_id.get(btn_name, 0) != my_id:
+                        return
+                    # If still pressed and not yet handled
+                    if btn_name in self._lower_row_press_time and not self._lower_row_handled.get(btn_name, True):
+                        self._lower_row_handled[btn_name] = True
+                        abs_idx = self.state.bank_offset + idx
+                        if abs_idx < self.state.total_tracks:
+                            trk = self.state.tracks[abs_idx]
+                            mode = self.state.lower_mode
+                            if mode == LOWER_MODE_MUTE:
+                                # Long press in Mute mode = Monitor toggle
+                                trk.is_monitored = not trk.is_monitored
+                                self.nuendo_link.send_monitor_toggle(idx, trk.is_monitored)
+                            elif mode == LOWER_MODE_SOLO:
+                                # Long press in Solo mode = Rec Arm toggle
+                                trk.is_armed = not trk.is_armed
+                                self.nuendo_link.send_rec_toggle(idx, trk.is_armed)
+                            elif mode == LOWER_MODE_MONITOR:
+                                # Long press in Monitor mode = Mute toggle
+                                trk.is_muted = not trk.is_muted
+                                self.nuendo_link.send_mute_toggle(idx, trk.is_muted)
+                            elif mode == LOWER_MODE_REC:
+                                # Long press in Rec mode = Solo toggle
+                                trk.is_solo = not trk.is_solo
+                                self.nuendo_link.send_solo_toggle(idx, trk.is_solo)
+                            self._update_lower_row_leds()
+                threading.Thread(target=_lower_long_press, daemon=True).start()
                 return
         
         # ── Track selection buttons (upper row) ──
@@ -1104,16 +1319,32 @@ class Push2Controller:
                     state.tracks[abs_index].peak_clipped = False
                     return
                 
-                # Record timestamp for long press detection
-                self._upper_row_press_time[button_name] = time.time()
+                now = time.time()
                 
-                # Timer for long press : open instrument UI after 1.5s
+                # Double press detection in Volume/Pan/Track modes
+                if state.mode in (MODE_VOLUME, MODE_PAN, MODE_TRACK):
+                    last = self._upper_row_last_press.get(button_name, 0)
+                    if now - last < 0.4:  # double press within 400ms
+                        # Toggle Edit Channel Settings
+                        if abs_index < state.total_tracks:
+                            self.nuendo_link.send_note(70 + i, 127)
+                            time.sleep(0.01)
+                            self.nuendo_link.send_note(70 + i, 0)
+                            print(f"  Double press: Edit Channel Settings track {abs_index}")
+                        self._upper_row_last_press[button_name] = 0
+                        return
+                self._upper_row_last_press[button_name] = now
+                
+                # Record timestamp for long press detection
+                self._upper_row_press_time[button_name] = now
+                
+                # Timer for long press : open instrument UI after 1.0s
                 if state.mode not in (MODE_INSERTS, MODE_CR, MODE_SENDS):
                     import threading
                     def _long_press_check(btn_name=button_name, idx=i):
                         time.sleep(1.0)
                         # Check that the button is still pressed
-                        if btn_name in self._upper_row_press_time:
+                        if btn_name in self._upper_row_press_time and self._upper_row_press_time[btn_name] > 0:
                             abs_idx = self.state.bank_offset + idx
                             if abs_idx < self.state.total_tracks:
                                 self.nuendo_link.send_note(80 + idx, 127)
@@ -1153,7 +1384,53 @@ class Push2Controller:
         
         # Long press on upper row: clean up tracking
         if button_name in self._upper_row_press_time:
+            was_long_press = (self._upper_row_press_time[button_name] < 0)
             self._upper_row_press_time.pop(button_name)
+            
+            # Short press in Inserts mode = enter params
+            if not was_long_press and self.state.mode == MODE_INSERTS and not self.state.insert_params_mode:
+                for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                    if button_name == btn:
+                        names = self.state.current_insert_names
+                        if i < len(names) and names[i]:
+                            self.state.selected_insert_slot = i
+                            self.state.insert_param_names = [''] * 8
+                            self.state.insert_param_values = [''] * 8
+                            if self.state.shift_held:
+                                self._insert_action(i, 'params_and_edit')
+                            else:
+                                self._insert_action(i, 'params')
+                            self.state.insert_params_mode = True
+                            self._update_upper_row_leds()
+                            self._update_lower_row_leds()
+                        break
+        
+        # Lower row release: short press = mute/solo action
+        if button_name in self._lower_row_press_time:
+            self._lower_row_press_time.pop(button_name)
+            if not self._lower_row_handled.get(button_name, True):
+                # Not handled by long press → short press action
+                self._lower_row_handled[button_name] = True
+                for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                    if button_name == btn:
+                        abs_index = self.state.bank_offset + i
+                        if abs_index < self.state.total_tracks:
+                            track = self.state.tracks[abs_index]
+                            mode = self.state.lower_mode
+                            if mode == LOWER_MODE_MUTE:
+                                track.is_muted = not track.is_muted
+                                self.nuendo_link.send_mute_toggle(i, track.is_muted)
+                            elif mode == LOWER_MODE_SOLO:
+                                track.is_solo = not track.is_solo
+                                self.nuendo_link.send_solo_toggle(i, track.is_solo)
+                            elif mode == LOWER_MODE_MONITOR:
+                                track.is_monitored = not track.is_monitored
+                                self.nuendo_link.send_monitor_toggle(i, track.is_monitored)
+                            elif mode == LOWER_MODE_REC:
+                                track.is_armed = not track.is_armed
+                                self.nuendo_link.send_rec_toggle(i, track.is_armed)
+                            self._update_lower_row_leds()
+                        break
 
     # ─────────────────────────────────────────
     # Pad handling
@@ -1249,16 +1526,36 @@ class Push2Controller:
                             pass
 
     def _handle_pad_aftertouch(self, pad_n, pad_ij, velocity):
-        """Called when pad pressure changes (aftertouch)."""
+        """Called when pad pressure changes (aftertouch).
+        
+        Push 2 hardware always sends polyphonic AT (0xA0).
+        We convert based on aftertouch_mode:
+        - poly: forward as-is (0xA0 per note)
+        - channel: send max pressure across all pads as 0xD0
+        - off: ignore
+        """
         row, col = pad_ij
         if row is None:
+            return
+        if self.state.aftertouch_mode == AT_OFF:
             return
         if self.state.mode == MODE_OVERVIEW or self.pad_grid.scale_mode:
             return
         midi_note = self.pad_grid.pad_to_note(row, col)
         if midi_note < 0:
             return
-        self.nuendo_link.send_aftertouch(midi_note, velocity)
+        if self.state.aftertouch_mode == AT_CHANNEL:
+            # Track per-pad pressure and send the max as channel AT
+            if not hasattr(self, '_pad_pressures'):
+                self._pad_pressures = {}
+            if velocity > 0:
+                self._pad_pressures[pad_n] = velocity
+            else:
+                self._pad_pressures.pop(pad_n, None)
+            max_pressure = max(self._pad_pressures.values()) if self._pad_pressures else 0
+            self.nuendo_link.send_channel_aftertouch(max_pressure)
+        else:
+            self.nuendo_link.send_aftertouch(midi_note, velocity)
         if self.note_repeat.enabled and velocity > 0:
             self.note_repeat.update_velocity(midi_note, velocity)
 
@@ -1604,8 +1901,88 @@ class Push2Controller:
         """
         if not self.push:
             return
+        self._apply_aftertouch_mode()
+
+    def _apply_aftertouch_mode(self):
+        """Apply the current aftertouch mode setting.
+        
+        The Push 2 hardware is always kept in polyphonic mode (0x01).
+        Conversion to channel AT or suppression is done in _handle_pad_aftertouch.
+        This avoids issues with push2-python not receiving channel AT callbacks.
+        """
+        if not self.push:
+            return
+        # Always keep Push 2 in poly mode — conversion happens in software
         self._send_midi_to_push([0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x1E, 0x01, 0xF7])
-        print("  ✓ Push 2 aftertouch → polyphonic")
+        mode = self.state.aftertouch_mode
+        if mode == AT_POLY:
+            print("  Aftertouch → Polyphonic")
+        elif mode == AT_CHANNEL:
+            print("  Aftertouch → Channel (converted from poly)")
+        elif mode == AT_OFF:
+            print("  Aftertouch → Off")
+
+    def _toggle_selected_track_function(self, function_index):
+        """Toggle Mute/Solo/Mon/Rec on the selected track.
+        
+        function_index: 0=Mute, 1=Solo, 2=Monitor, 3=Rec
+        Used by Device and Inserts modes on lower row buttons 5-8.
+        """
+        state = self.state
+        sel = state.selected_track_index
+        if sel < 0 or sel >= len(state.tracks):
+            return
+        track = state.tracks[sel]
+        rel = sel - state.bank_offset
+        if rel < 0 or rel >= 8:
+            return
+        
+        if function_index == 0:  # Mute
+            track.is_muted = not track.is_muted
+            self.nuendo_link.send_mute_toggle(rel, track.is_muted)
+        elif function_index == 1:  # Solo
+            track.is_solo = not track.is_solo
+            self.nuendo_link.send_solo_toggle(rel, track.is_solo)
+        elif function_index == 2:  # Monitor
+            track.is_monitored = not track.is_monitored
+            self.nuendo_link.send_monitor_toggle(rel, track.is_monitored)
+        elif function_index == 3:  # Rec
+            track.is_armed = not track.is_armed
+            self.nuendo_link.send_rec_toggle(rel, track.is_armed)
+        self._update_lower_row_leds()
+
+    def _apply_velocity_curve(self):
+        """Apply the current velocity curve preset to the Push 2 pads."""
+        if not self.push:
+            return
+        import math
+        mode = self.state.velocity_curve
+        fixed_vel = self.state.accent_velocity  # synced with Accent
+        curve = []
+        for i in range(128):
+            t = i / 127.0  # normalized 0..1
+            if mode == VC_LINEAR:
+                v = t
+            elif mode == VC_LOG:
+                v = math.log1p(t * 3) / math.log1p(3)
+            elif mode == VC_EXP:
+                v = (math.exp(t * 3) - 1) / (math.exp(3) - 1)
+            elif mode == VC_SCURVE:
+                v = 0.5 * (1 + math.tanh(4 * (t - 0.5)) / math.tanh(2))
+            elif mode == VC_FIXED:
+                v = fixed_vel / 127.0 if i > 0 else 0
+            else:
+                v = t
+            curve.append(max(0, min(127, int(v * 127))))
+        curve[0] = 0  # ensure 0→0
+        try:
+            self.push.pads.set_velocity_curve(curve)
+            if mode == VC_FIXED:
+                print(f"  Velocity curve → {mode} (vel={fixed_vel})")
+            else:
+                print(f"  Velocity curve → {mode}")
+        except Exception as e:
+            print(f"  Velocity curve error: {e}")
 
     # ─────────────────────────────────────────
     # Sending MIDI to Push
@@ -1655,6 +2032,8 @@ class Push2Controller:
         self.state.mode = new_mode
         self.state.insert_params_mode = False  # Always reset when changing mode
         self.nuendo_link.send_mode_change(new_mode)
+        # Ignore VU peak clips briefly after mode change to avoid false triggers
+        self.nuendo_link._vu_ignore_until = time.time() + 3.0
         self._update_all_leds()
         
         if new_mode == MODE_OVERVIEW:
@@ -1771,6 +2150,9 @@ class Push2Controller:
             
             # Delete (CC 118, monochrome) : lit at all times
             self._send_midi_to_push([0xB0, 118, 127])
+            
+            # Setup (CC 30, monochrome) : bright when in Setup mode
+            self._send_midi_to_push([0xB0, 30, 127 if self.state.mode == MODE_SETUP else 40])
         except Exception:
             pass
 
@@ -1786,6 +2168,7 @@ class Push2Controller:
             BTN_DEVICE:       [MODE_DEVICE],
             BTN_MODE_INSERTS: [MODE_INSERTS],
             BTN_MODE_OVERVIEW: [MODE_OVERVIEW],
+            BTN_MODE_NOTE:    [MODE_MIDICC],
         }
         
         for btn, modes in buttons_modes.items():
@@ -1811,6 +2194,31 @@ class Push2Controller:
             return
         
         state = self.state
+        
+        # ── Setup mode: upper row = page tabs ──
+        if state.mode == MODE_SETUP:
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+            for i in range(8):
+                cc = 102 + i
+                try:
+                    if i < len(SETUP_PAGES) and SETUP_PAGES[i] is not None:
+                        color = BTN_WHITE if i == state.setup_page else BTN_DIM
+                    else:
+                        color = LED_OFF
+                    self._send_midi_to_push([0xB0, cc, color])
+                except Exception:
+                    pass
+            return
+        
+        # ── MIDI CC mode: upper row = edit mode indicator ──
+        if state.mode == MODE_MIDICC:
+            for i in range(8):
+                cc = 102 + i
+                try:
+                    self._send_midi_to_push([0xB0, cc, BTN_WHITE if state.cc_edit_mode else BTN_DIM])
+                except Exception:
+                    pass
+            return
         
         # ── Sends mode: upper row = send on/off ──
         if state.mode == MODE_SENDS:
@@ -1976,13 +2384,61 @@ class Push2Controller:
         
         state = self.state
         
-        # ── Device mode: button 1 = OPEN UI, rest off ──
+        # ── Setup mode: lower row = option buttons ──
+        if state.mode == MODE_SETUP:
+            AT_OPTIONS = [AT_POLY, AT_CHANNEL, AT_OFF]
+            VC_OPTIONS = [VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED]
+            for i in range(8):
+                cc = 20 + i
+                try:
+                    if state.setup_page == 0:
+                        if i < 3:
+                            is_sel = (state.aftertouch_mode == AT_OPTIONS[i])
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.setup_page == 1:
+                        if i < len(VC_OPTIONS):
+                            is_sel = (state.velocity_curve == VC_OPTIONS[i])
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    else:
+                        self._send_midi_to_push([0xB0, cc, LED_OFF])
+                except Exception:
+                    pass
+            return
+        
+        # ── MIDI CC mode: lower row = toggle on/off ──
+        if state.mode == MODE_MIDICC:
+            for i in range(8):
+                cc = 20 + i
+                try:
+                    if state.cc_values[i] > 0:
+                        self._send_midi_to_push([0xB0, cc, BTN_WHITE])
+                    else:
+                        self._send_midi_to_push([0xB0, cc, BTN_DIM])
+                except Exception:
+                    pass
+            return
+        
+        # ── Device mode: button 1 = OPEN UI, buttons 5-8 = M/S/Mon/R ──
         if state.mode == MODE_DEVICE:
+            sel = state.selected_track_index
+            track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
             for i in range(8):
                 cc = 20 + i
                 try:
                     if i == 0:
                         self._send_midi_to_push([0xB0, cc, BTN_WHITE])
+                    elif i == 4 and track:
+                        self._send_midi_to_push([0xB0, cc, BTN_YELLOW if track.is_muted else BTN_DIM])
+                    elif i == 5 and track:
+                        self._send_midi_to_push([0xB0, cc, BTN_BLUE if track.is_solo else BTN_DIM])
+                    elif i == 6 and track:
+                        self._send_midi_to_push([0xB0, cc, BTN_ORANGE if track.is_monitored else BTN_DIM])
+                    elif i == 7 and track:
+                        self._send_midi_to_push([0xB0, cc, BTN_RED if track.is_armed else BTN_DIM])
                     else:
                         self._send_midi_to_push([0xB0, cc, LED_OFF])
                 except Exception:
@@ -2006,8 +2462,10 @@ class Push2Controller:
         
         # ── Inserts mode: LEDs = bypass state or actions in params mode ──
         if state.mode == MODE_INSERTS:
+            sel = state.selected_track_index
+            track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
             if state.insert_params_mode:
-                # Parameters mode: action buttons
+                # Parameters mode: action buttons 1-3, then M/S/Mon/R on 5-8
                 slot = state.selected_insert_slot
                 is_active = state.current_insert_active[slot] if slot < len(state.current_insert_active) else False
                 for i in range(8):
@@ -2019,23 +2477,42 @@ class Push2Controller:
                             self._send_midi_to_push([0xB0, cc, BTN_BLUE if is_active else BTN_ORANGE])  # BYPASS
                         elif i == 2:
                             self._send_midi_to_push([0xB0, cc, BTN_RED])     # DEACTIVATE
+                        elif i == 4 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_YELLOW if track.is_muted else BTN_DIM])
+                        elif i == 5 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_BLUE if track.is_solo else BTN_DIM])
+                        elif i == 6 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_ORANGE if track.is_monitored else BTN_DIM])
+                        elif i == 7 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_RED if track.is_armed else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
                     except Exception:
                         pass
             else:
-                # List view: bypass state
+                # List view: bypass 1-4, then M/S/Mon/R on 5-8
                 for i in range(8):
                     cc = 20 + i
                     try:
-                        name = state.current_insert_names[i] if i < len(state.current_insert_names) else ''
-                        active = state.current_insert_active[i] if i < len(state.current_insert_active) else False
-                        if not name:
-                            self._send_midi_to_push([0xB0, cc, LED_OFF])
-                        elif active:
-                            self._send_midi_to_push([0xB0, cc, BTN_BLUE])
+                        if i < 4:
+                            name = state.current_insert_names[i] if i < len(state.current_insert_names) else ''
+                            active = state.current_insert_active[i] if i < len(state.current_insert_active) else False
+                            if not name:
+                                self._send_midi_to_push([0xB0, cc, LED_OFF])
+                            elif active:
+                                self._send_midi_to_push([0xB0, cc, BTN_BLUE])
+                            else:
+                                self._send_midi_to_push([0xB0, cc, BTN_DIM])
+                        elif i == 4 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_YELLOW if track.is_muted else BTN_DIM])
+                        elif i == 5 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_BLUE if track.is_solo else BTN_DIM])
+                        elif i == 6 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_ORANGE if track.is_monitored else BTN_DIM])
+                        elif i == 7 and track:
+                            self._send_midi_to_push([0xB0, cc, BTN_RED if track.is_armed else BTN_DIM])
                         else:
-                            self._send_midi_to_push([0xB0, cc, BTN_DIM])
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
                     except Exception:
                         pass
             return

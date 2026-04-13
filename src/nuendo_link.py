@@ -90,6 +90,7 @@ class NuendoLink:
         self._watchdog_thread = None
         self._running = False
         self._on_connected_callback = None
+        self._da_available = False  # True when JS reports DirectAccess is active
         
         # MTC (MIDI Time Code)
         self._mtc_pieces = [0] * 8  # 8 quarter frame pieces
@@ -376,9 +377,17 @@ class NuendoLink:
             if abs_index < len(state.tracks):
                 vu_val = value / 127.0
                 state.tracks[abs_index].vu_meter = vu_val
-                # Peak clip: ignore for 1s after connection or bank change
+                # Peak clip: require 2 consecutive max readings to avoid false triggers
                 if value >= 126 and time.time() > getattr(self, '_vu_ignore_until', 0):
-                    state.tracks[abs_index].peak_clipped = True
+                    prev = getattr(self, '_vu_prev_max', {})
+                    if prev.get(track_in_bank, 0) >= 126:
+                        state.tracks[abs_index].peak_clipped = True
+                    prev[track_in_bank] = value
+                    self._vu_prev_max = prev
+                else:
+                    prev = getattr(self, '_vu_prev_max', {})
+                    prev[track_in_bank] = value
+                    self._vu_prev_max = prev
         
         # ── Send enable feedback (CC 24-31) ──
         elif 24 <= cc_num <= 31:
@@ -389,6 +398,22 @@ class NuendoLink:
                 state.tracks[abs_index].send_enabled[send_idx] = (value > 64)
                 if hasattr(self, '_on_selection_changed'):
                     self._on_selection_changed()
+        
+        # ── DirectAccess status feedback (CC 68) ──
+        elif cc_num == 68:
+            if value == 1:
+                self._da_available = True
+                print("  ✓ DirectAccess available (API 1.2+)")
+            elif value == 2:
+                # DA cleared all monitors — sync local state
+                for t in state.tracks:
+                    t.is_monitored = False
+                print("  DA: All monitors cleared")
+            elif value == 3:
+                # DA cleared all rec arms — sync local state
+                for t in state.tracks:
+                    t.is_armed = False
+                print("  DA: All rec arms cleared")
         
         # ── Volumes of the 8 visible tracks (CC 20-27) ──
         elif 20 <= cc_num <= 27:
@@ -820,6 +845,15 @@ class NuendoLink:
             selected = self.state.selected_track
             if qc_index < len(selected.quick_controls):
                 selected.quick_controls[qc_index].value = norm_val
+        
+        # ── JS Script version (type 0x10) ──
+        elif msg_type == 0x10 and len(payload) >= 1:
+            try:
+                ver = bytes(payload).decode('utf-8').rstrip('\x00')
+                self.state.js_version = ver
+                print(f"  ✓ JS Script version: {ver}")
+            except UnicodeDecodeError:
+                pass
 
     # ─────────────────────────────────────────────
     # Sending messages to Nuendo
@@ -893,6 +927,18 @@ class NuendoLink:
         port = self._midi_notes_out or self._midi_out
         if port and self._running:
             port.send_message([0xA0, note & 0x7F, pressure & 0x7F])
+
+    def send_channel_aftertouch(self, pressure):
+        """Send a Channel Aftertouch via the notes port (channel 1)."""
+        port = self._midi_notes_out or self._midi_out
+        if port and self._running:
+            port.send_message([0xD0, pressure & 0x7F])
+
+    def send_midi_cc_to_notes(self, cc_number, value):
+        """Send a MIDI CC message via the notes port (channel 1)."""
+        port = self._midi_notes_out or self._midi_out
+        if port and self._running:
+            port.send_message([0xB0, cc_number & 0x7F, value & 0x7F])
 
     def _on_notes_received(self, event, data=None):
         """Receive playback MIDI notes from Nuendo to light up pads."""
