@@ -15,7 +15,7 @@ import sys; sys.path.insert(0, '$SRC_DIR')
 from state import BRIDGE_VERSION; print(BRIDGE_VERSION)
 ")
 
-APP_NAME="Push2 Nuendo Bridge v${VERSION}"
+APP_NAME="Push2 Nuendo Bridge_v${VERSION}"
 
 echo ""
 echo "Building ${APP_NAME}..."
@@ -32,6 +32,8 @@ cd "$SRC_DIR"
 # Build the .app
 # Note: push2-python includes a Flask/SocketIO simulator that requires
 # engineio.async_drivers to be bundled, otherwise it crashes at import.
+# The mapper/ folder is bundled but its dependencies (fastapi, uvicorn,
+# pedalboard) must be installed separately by the user.
 pyinstaller \
     --name "$APP_NAME" \
     --onedir \
@@ -48,6 +50,7 @@ pyinstaller \
     --add-data "repeat.py:." \
     --add-data "overview.py:." \
     --add-data "main_macos.py:." \
+    --add-data "mapper:mapper" \
     --hidden-import rumps \
     --hidden-import push2_python \
     --hidden-import push2_python.constants \
@@ -57,10 +60,6 @@ pyinstaller \
     --hidden-import mido \
     --hidden-import mido.backends \
     --hidden-import mido.backends.rtmidi \
-    --hidden-import PIL \
-    --hidden-import PIL.Image \
-    --hidden-import PIL.ImageDraw \
-    --hidden-import PIL.ImageFont \
     --collect-submodules PIL \
     --collect-submodules push2_python \
     --collect-submodules engineio \
@@ -86,10 +85,13 @@ rm -rf build *.spec
 cp "$PROJECT_DIR/Ableton_Push2.js" "$PROJECT_DIR/dist/"
 
 # Copy docs if they exist
-[ -f "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_User_Guide.pdf" ] && \
-    cp "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_User_Guide.pdf" "$PROJECT_DIR/dist/"
-[ -f "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_Release_Notes.pdf" ] && \
-    cp "$PROJECT_DIR/docs/Push2_Nuendo_Bridge_Release_Notes.pdf" "$PROJECT_DIR/dist/"
+for pdf in \
+    "Push2_Nuendo_Bridge_User_Guide_v1_0_3.pdf" \
+    "Push2_Nuendo_Bridge_Release_Notes_v1_0_3.pdf" \
+    "Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf" \
+    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_2.pdf"; do
+    [ -f "$PROJECT_DIR/docs/$pdf" ] && cp "$PROJECT_DIR/docs/$pdf" "$PROJECT_DIR/dist/"
+done
 
 # Add LSUIElement to Info.plist (hide from Dock, show only in menu bar)
 PLIST="$PROJECT_DIR/dist/${APP_NAME}.app/Contents/Info.plist"
@@ -102,9 +104,7 @@ fi
 # Create zip for GitHub release
 cd "$PROJECT_DIR/dist"
 ZIP_NAME="Push2NuendoBridge-v${VERSION}-macOS.zip"
-zip -r "$ZIP_NAME" "${APP_NAME}.app" Ableton_Push2.js \
-    Push2_Nuendo_Bridge_User_Guide.pdf Push2_Nuendo_Bridge_Release_Notes.pdf \
-    2>/dev/null
+zip -r "$ZIP_NAME" "${APP_NAME}.app" Ableton_Push2.js *.pdf 2>/dev/null
 cd "$PROJECT_DIR"
 
 echo ""

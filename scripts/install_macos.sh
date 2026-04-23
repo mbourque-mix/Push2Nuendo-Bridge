@@ -14,8 +14,16 @@ echo "║   Push 2 / Nuendo Bridge — macOS Installer    ║"
 echo "╚═══════════════════════════════════════════════╝"
 echo ""
 
+# ── Check Homebrew ──
+echo "[1/5] Checking Homebrew..."
+if ! command -v brew &> /dev/null; then
+    echo "  Homebrew not found. Installing..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+echo "  ✓ Homebrew available"
+
 # ── Check Python ──
-echo "[1/5] Checking Python..."
+echo "[2/5] Checking Python..."
 if ! command -v python3 &> /dev/null; then
     echo "  ✗ Python 3 not found. Install it from https://python.org"
     exit 1
@@ -24,72 +32,71 @@ PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.versi
 echo "  ✓ Python $PY_VERSION found"
 
 # ── Check libusb ──
-echo "[2/5] Checking libusb..."
+echo "[3/5] Checking libusb..."
 if ! brew list libusb &> /dev/null 2>&1; then
     echo "  libusb not found. Installing via Homebrew..."
-    if ! command -v brew &> /dev/null; then
-        echo "  ✗ Homebrew not found. Install it from https://brew.sh"
-        echo "  Then run: brew install libusb"
-        exit 1
-    fi
     brew install libusb
 fi
 echo "  ✓ libusb installed"
 
 # ── Install Python dependencies ──
-echo "[3/5] Installing Python dependencies..."
+echo "[4/5] Installing Python dependencies..."
 pip3 install -r "$PROJECT_DIR/requirements.txt"
-echo "  ✓ Dependencies installed"
+echo "  ✓ Core dependencies installed"
 
-# ── Set up IAC ports ──
-echo "[4/5] IAC Driver setup..."
 echo ""
-echo "  You need to create two IAC ports manually:"
-echo "  1. Open Audio MIDI Setup (Applications → Utilities)"
-echo "  2. Menu: Window → Show MIDI Studio"
-echo "  3. Double-click 'IAC Driver'"
-echo "  4. Check 'Device is online'"
-echo "  5. Add two ports:"
-echo "     • Push2-To-Nuendo"
-echo "     • Nuendo-To-Push2"
+echo "  Plugin Mapper (optional):"
+echo "  To enable the Plugin Mapper, install additional dependencies:"
+echo "    pip3 install fastapi uvicorn pedalboard"
 echo ""
-read -p "  Press Enter when done (or 's' to skip)... " REPLY
-if [[ "$REPLY" == "s" ]]; then
-    echo "  ⚠ Skipped — remember to set up IAC ports before running!"
+read -p "  Install Plugin Mapper dependencies now? (y/n) " REPLY
+if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    pip3 install fastapi uvicorn pedalboard
+    echo "  ✓ Plugin Mapper dependencies installed"
 fi
 
 # ── Install MIDI Remote script ──
 echo "[5/5] Installing Nuendo MIDI Remote script..."
-MIDI_REMOTE_DIR="$HOME/Documents/Steinberg/Nuendo 14/MIDI Remote/Driver Scripts/Local"
-
-# Also try Cubase
-CUBASE_DIR="$HOME/Documents/Steinberg/Cubase 14/MIDI Remote/Driver Scripts/Local"
 
 install_js() {
     local dir="$1"
     local name="$2"
-    mkdir -p "$dir"
-    cp "$PROJECT_DIR/Ableton_Push2.js" "$dir/"
+    mkdir -p "$dir/Ableton/Push2"
+    cp "$PROJECT_DIR/Ableton_Push2.js" "$dir/Ableton/Push2/"
     echo "  ✓ Script installed to $name"
 }
 
-if [ -d "$HOME/Documents/Steinberg/Nuendo 14" ]; then
-    install_js "$MIDI_REMOTE_DIR" "Nuendo 14"
-fi
+# Try common Nuendo/Cubase versions
+INSTALLED=false
+for DAW in "Nuendo" "Cubase"; do
+    for VER in 15 14; do
+        DAW_DIR="$HOME/Documents/Steinberg/${DAW} ${VER}/MIDI Remote/Driver Scripts/Local"
+        BASE_DIR="$HOME/Documents/Steinberg/${DAW} ${VER}"
+        if [ -d "$HOME/Documents/Steinberg/${DAW} ${VER}" ] || [ -d "$HOME/Documents/Steinberg/${DAW}" ]; then
+            install_js "$DAW_DIR" "${DAW} ${VER}"
+            INSTALLED=true
+        fi
+    done
+    # Try without version number
+    DAW_DIR="$HOME/Documents/Steinberg/${DAW}/MIDI Remote/Driver Scripts/Local"
+    if [ -d "$HOME/Documents/Steinberg/${DAW}" ] && [ "$INSTALLED" = false ]; then
+        install_js "$DAW_DIR" "${DAW}"
+        INSTALLED=true
+    fi
+done
 
-if [ -d "$HOME/Documents/Steinberg/Cubase 14" ]; then
-    install_js "$CUBASE_DIR" "Cubase 14"
-fi
-
-if [ ! -d "$HOME/Documents/Steinberg/Nuendo 14" ] && [ ! -d "$HOME/Documents/Steinberg/Cubase 14" ]; then
-    echo "  ⚠ Nuendo/Cubase 14 folder not found"
+if [ "$INSTALLED" = false ]; then
+    echo "  ⚠ Nuendo/Cubase folder not found"
     echo "  Copy Ableton_Push2.js manually to:"
-    echo "  ~/Documents/Steinberg/<DAW>/MIDI Remote/Driver Scripts/Local/"
+    echo "  ~/Documents/Steinberg/<DAW>/MIDI Remote/Driver Scripts/Local/Ableton/Push2/"
 fi
 
 echo ""
 echo "═══════════════════════════════════════════════"
 echo "  Installation complete!"
+echo ""
+echo "  The bridge creates virtual MIDI ports automatically."
+echo "  No IAC Driver configuration needed."
 echo ""
 echo "  To run the bridge:"
 echo "    cd $PROJECT_DIR/src"
@@ -97,6 +104,6 @@ echo "    python3 main.py"
 echo ""
 echo "  To configure Nuendo:"
 echo "    Studio → Studio Setup → MIDI Remote"
-echo "    Input: Push2-To-Nuendo"
-echo "    Output: Nuendo-To-Push2"
+echo "    Input:  NuendoBridge Out"
+echo "    Output: NuendoBridge In"
 echo "═══════════════════════════════════════════════"
