@@ -88,6 +88,8 @@ class PrintToLog:
                 self._guard = False
     def flush(self):
         pass
+    def isatty(self):
+        return False
 
 sys.stdout = PrintToLog()
 
@@ -131,6 +133,119 @@ def set_auto_start(enabled):
 
 
 # ─────────────────────────────────────────────
+# Plugin Mapper server (optional)
+# ─────────────────────────────────────────────
+
+def _start_plugin_mapper():
+    """Start the Plugin Mapper web server in a daemon thread.
+    
+    Returns a status string for display.
+    Dependencies are optional — the bridge works without them.
+    """
+    import threading
+    import sys as _sys
+    
+    # ── In a frozen .app, add system site-packages so pip-installed
+    #    packages (fastapi, uvicorn, pedalboard) can be found ──
+    if getattr(_sys, 'frozen', False):
+        import glob, os
+        site_paths = []
+        # Python.org framework installs
+        site_paths += glob.glob('/Library/Frameworks/Python.framework/Versions/3.*/lib/python3.*/site-packages')
+        # Homebrew (Apple Silicon)
+        site_paths += glob.glob('/opt/homebrew/lib/python3.*/site-packages')
+        # Homebrew (Intel)
+        site_paths += glob.glob('/usr/local/lib/python3.*/site-packages')
+        # User site-packages
+        site_paths += glob.glob(os.path.expanduser('~/Library/Python/3.*/lib/python/site-packages'))
+        
+        for p in sorted(site_paths, reverse=True):  # Newest version first
+            if p not in _sys.path and os.path.isdir(p):
+                _sys.path.insert(0, p)
+                blog(f"  Added site-packages: {p}")
+    
+    # ── In a frozen .app, mapper files are in sys._MEIPASS ──
+    if getattr(_sys, 'frozen', False):
+        base = getattr(_sys, '_MEIPASS', '')
+        if base and base not in _sys.path:
+            _sys.path.insert(0, base)
+    
+    try:
+        import uvicorn
+    except ImportError:
+        return "not available (install: pip install fastapi uvicorn)"
+    
+    try:
+        import fastapi
+    except ImportError:
+        return "not available (install: pip install fastapi)"
+    
+    # Find the mapper server module
+    mapper_app = None
+    try:
+        from mapper.server import app as mapper_app
+    except ImportError:
+        pass
+    
+    if mapper_app is None:
+        from pathlib import Path
+        standalone_path = Path(__file__).parent.parent / "plugin-mapper" / "backend"
+        if standalone_path.exists():
+            _sys.path.insert(0, str(standalone_path))
+            try:
+                from server import app as mapper_app
+            except ImportError:
+                pass
+            finally:
+                if str(standalone_path) in _sys.path:
+                    _sys.path.remove(str(standalone_path))
+    
+    if mapper_app is None:
+        return "not available (mapper files not found)"
+    
+    pedalboard_status = ""
+    try:
+        import pedalboard
+        pedalboard_status = ", scanner ready"
+    except ImportError:
+        pedalboard_status = ", scanner unavailable (install: pip install pedalboard)"
+    
+    def _run_server():
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            config = uvicorn.Config(
+                mapper_app, host="127.0.0.1", port=8100,
+                log_level="warning", log_config=None
+            )
+            server = uvicorn.Server(config)
+            server.install_signal_handlers = False
+            loop.run_until_complete(server.serve())
+        except Exception as e:
+            blog(f"Plugin Mapper server error: {e}")
+    
+    server_thread = threading.Thread(target=_run_server, daemon=True)
+    server_thread.start()
+    
+    import time as _t
+    for _ in range(20):
+        _t.sleep(0.1)
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.1)
+            result = s.connect_ex(('127.0.0.1', 8100))
+            s.close()
+            if result == 0:
+                return f"running at http://localhost:8100{pedalboard_status}"
+        except Exception:
+            pass
+    
+    return f"failed to start (check logs){pedalboard_status}"
+
+
+# ─────────────────────────────────────────────
 # Menu Bar App
 # ─────────────────────────────────────────────
 
@@ -168,6 +283,9 @@ class Push2BridgeApp(rumps.App):
         
         self.show_logs_item = rumps.MenuItem("Show Logs", callback=self.on_show_logs)
         
+        self.mapper_item = rumps.MenuItem("Plugin Mapper", callback=self.on_open_mapper)
+        self._mapper_status = "not started"
+        
         self.auto_start_item = rumps.MenuItem("Start at Login", callback=self.on_toggle_auto_start)
         self.auto_start_item.state = is_auto_start_enabled()
         
@@ -180,6 +298,7 @@ class Push2BridgeApp(rumps.App):
             None,
             self.start_stop_item,
             self.show_logs_item,
+            self.mapper_item,
             None,
             self.auto_start_item,
             None,
@@ -201,6 +320,10 @@ class Push2BridgeApp(rumps.App):
         """Runs in background thread. No UI calls here."""
         self._dbg("Worker: starting...")
         try:
+            # Start Plugin Mapper server (optional)
+            self._mapper_status = _start_plugin_mapper()
+            self._dbg(f"Worker: Plugin Mapper: {self._mapper_status}")
+            
             # Small delay to let old ports fully release on restart
             time.sleep(0.5)
             
@@ -379,6 +502,19 @@ class Push2BridgeApp(rumps.App):
         if len(lines) > 20:
             text = "\n".join(lines[-20:])
         rumps.alert(title="Push 2 Bridge — Logs", message=text, ok="Close")
+    
+    def on_open_mapper(self, sender):
+        if "running" in self._mapper_status:
+            import webbrowser
+            webbrowser.open("http://localhost:8100")
+        else:
+            rumps.alert(
+                title="Plugin Mapper",
+                message=f"Status: {self._mapper_status}\n\n"
+                        "Install dependencies with:\n"
+                        "pip install fastapi uvicorn pedalboard",
+                ok="OK"
+            )
     
     def on_toggle_auto_start(self, sender):
         sender.state = not sender.state

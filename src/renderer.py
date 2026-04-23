@@ -17,8 +17,9 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 from state import (
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, AT_POLY, AT_CHANNEL, AT_OFF,
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
+    CC_ABSOLUTE, CC_PICKUP,
     BRIDGE_VERSION, BANK_SIZE, AppState
 )
 from control_room import (
@@ -71,10 +72,24 @@ def _load_fonts():
         font_large  = ImageFont.load_default()
         font_medium = ImageFont.load_default()
         font_small  = ImageFont.load_default()
-    return font_large, font_medium, font_small
+    
+    # Try bold variant for headers
+    try:
+        font_medium_bold = ImageFont.truetype("DejaVuSansMono-Bold.ttf", 11)
+    except (IOError, OSError):
+        font_medium_bold = font_medium
+    
+    return font_large, font_medium, font_small, font_medium_bold
 
 
-FONT_LG, FONT_MD, FONT_SM = _load_fonts()
+FONT_LG, FONT_MD, FONT_SM, FONT_MD_BOLD = _load_fonts()
+
+
+def _text_color_for_bg(bg_color):
+    """Return white or dark text color based on background luminance."""
+    r, g, b = bg_color
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return (0, 0, 0) if luminance > 140 else (255, 255, 255)
 
 
 # ─────────────────────────────────────────────
@@ -262,9 +277,9 @@ def _draw_header(draw, cell_x, track, is_selected):
     draw.rectangle([cell_x, 0, cell_x + CELL_WIDTH - 1, 21],
                    fill=header_color)
     
-    # Track name
+    # Track name — adaptive text color based on background
     name = _abbreviate(track.name, 16)
-    text_color = COLOR_TEXT_MAIN
+    text_color = _text_color_for_bg(header_color)
     
     # State indicators: M (mute), S (solo), ● (record)
     indicators = []
@@ -275,7 +290,7 @@ def _draw_header(draw, cell_x, track, is_selected):
     if track.is_armed:
         indicators.append(("●", (220, 40, 40)))       # Red
     
-    draw.text((cell_x + 4, 4), name, font=FONT_SM if len(name) > 10 else FONT_MD, fill=text_color)
+    draw.text((cell_x + 4, 4), name, font=FONT_SM if len(name) > 10 else FONT_MD_BOLD, fill=text_color)
     if indicators:
         ix = cell_x + CELL_WIDTH - 6 * len(indicators) - 2
         for char, icolor in indicators:
@@ -559,24 +574,28 @@ def _render_inserts_screen(state):
         selected = state.selected_track
         names = state.current_insert_names
         active = state.current_insert_active
+        ibo = getattr(state, 'insert_bank_offset', 0)  # 0 or 8
+        page_label = "1-8" if ibo == 0 else "9-16"
         
         # Title at top
         track_name = selected.name if selected else "---"
         r, g, b = selected.color if selected else (150, 150, 150)
-        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(min(r, 150), min(g, 150), min(b, 150)))
-        draw.text((8, 3), f"◄  {track_name}  ·  INSERTS  ►", font=FONT_MD, fill=(255, 255, 255))
+        title_bg = (min(r, 150), min(g, 150), min(b, 150))
+        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=title_bg)
+        draw.text((8, 3), f"◄  {track_name}  ·  INSERTS {page_label}  ►", font=FONT_MD_BOLD, fill=_text_color_for_bg(title_bg))
         
-        # 8 columns = 8 slots
+        # 8 columns = 8 slots (offset by insert_bank_offset)
         for col in range(8):
             cell_x = col * CELL_WIDTH
+            abs_slot = ibo + col
             
             # Separator
             if col > 0:
                 draw.line([(cell_x, 22), (cell_x, 141)], fill=COLOR_SEPARATOR)
             
-            name = names[col] if col < len(names) else ''
-            is_active = active[col] if col < len(active) else False
-            is_sel = (col == state.selected_insert_slot)
+            name = names[abs_slot] if abs_slot < len(names) else ''
+            is_active = active[abs_slot] if abs_slot < len(active) else False
+            is_sel = (abs_slot == state.selected_insert_slot)
             
             if not name:
                 draw.text((cell_x + 8, 70), "No Insert", font=FONT_SM, fill=(50, 50, 50))
@@ -590,7 +609,7 @@ def _render_inserts_screen(state):
                                outline=COLOR_ACCENT, width=1)
             
             # Slot number + EDIT label
-            draw.text((cell_x + 4, 26), f"#{col + 1}", font=FONT_SM, fill=COLOR_TEXT_DIM)
+            draw.text((cell_x + 4, 26), f"#{abs_slot + 1}", font=FONT_SM, fill=COLOR_TEXT_DIM)
             draw.text((cell_x + CELL_WIDTH - 36, 26), "EDIT", font=FONT_SM, fill=(100, 100, 100))
             
             # Plugin name (on 2-3 lines)
@@ -615,29 +634,15 @@ def _render_inserts_screen(state):
         # Bottom separator
         draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
         
-        # Button labels: bypass on 1-4
-        for col in range(4):
+        # Button labels: bypass on all 8 visible slots
+        for col in range(8):
             cell_x = col * CELL_WIDTH
-            name = names[col] if col < len(names) else ''
+            abs_slot = ibo + col
+            name = names[abs_slot] if abs_slot < len(names) else ''
             if name:
-                is_active = active[col] if col < len(active) else False
+                is_active = active[abs_slot] if abs_slot < len(active) else False
                 bypass_color = (0, 160, 80) if is_active else (200, 120, 0)
                 draw.text((cell_x + 4, 147), "BYPASS", font=FONT_SM, fill=bypass_color)
-        
-        # Buttons 5-8: Mute/Solo/Mon/Rec labels
-        sel = state.selected_track_index
-        track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
-        if track:
-            msrm = [
-                ("MUTE", (220, 200, 0) if track.is_muted else (80, 80, 80)),
-                ("SOLO", (0, 100, 220) if track.is_solo else (80, 80, 80)),
-                ("MON",  (220, 140, 0) if track.is_monitored else (80, 80, 80)),
-                ("REC",  (220, 40, 40) if track.is_armed else (80, 80, 80)),
-            ]
-            for j, (label, color) in enumerate(msrm):
-                x = (4 + j) * CELL_WIDTH
-                tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
-                draw.text((x + (CELL_WIDTH - tw) // 2, 147), label, font=FONT_SM, fill=color)
         
         return _to_push2_frame(img)
     except Exception as e:
@@ -657,8 +662,14 @@ def _render_insert_params_screen(state):
         
         # Title at top: plugin name + navigation
         r, g, b = selected.color if selected else (150, 150, 150)
-        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(min(r, 150), min(g, 150), min(b, 150)))
-        draw.text((8, 3), f"◄ {plugin_name} ►", font=FONT_MD, fill=(255, 255, 255))
+        title_bg = (min(r, 150), min(g, 150), min(b, 150))
+        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=title_bg)
+        title = f"◄ {plugin_name} ►"
+        title_text_color = _text_color_for_bg(title_bg)
+        draw.text((8, 3), title, font=FONT_MD_BOLD, fill=title_text_color)
+        # Mapping indicator
+        if state.active_mapping:
+            draw.text((SCREEN_WIDTH - 110, 5), "★ MAPPED", font=FONT_SM, fill=(0, 255, 160))
         # BACK label at top right
         draw.text((SCREEN_WIDTH - 50, 5), "BACK", font=FONT_SM, fill=(200, 200, 200))
         
@@ -732,6 +743,248 @@ def _render_insert_params_screen(state):
         return _render_empty_frame()
 
 
+def _render_browser_screen(state):
+    """Browser mode: slot selection, plugin list, or collection picker."""
+    try:
+        if state.browser_phase == "plugin_list":
+            return _render_browser_plugin_list(state)
+        elif state.browser_phase == "collection_select":
+            return _render_browser_collection_select(state)
+        return _render_browser_slot_select(state)
+    except Exception as e:
+        print(f"  ✗ Browser screen error: {e}")
+        return _render_empty_frame()
+
+
+def _render_browser_collection_select(state):
+    """Browser: collection picker — select which collection to browse."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+    
+    # Title bar
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(20, 50, 80))
+    draw.text((8, 3), "SELECT COLLECTION", font=FONT_MD_BOLD, fill=(255, 255, 255))
+    
+    collections = state.browser_collections
+    
+    if not state.browser_collections_ready or len(collections) == 0:
+        draw.text((SCREEN_WIDTH // 2 - 50, 70), "Loading...", font=FONT_LG, fill=COLOR_TEXT_DIM)
+        return _to_push2_frame(img)
+    
+    selected = state.browser_coll_scroll
+    total = len(collections)
+    
+    # Render collection list (vertically, max ~7 visible)
+    y_start = 28
+    line_height = 16
+    max_visible = 7
+    
+    # Calculate scroll offset to keep selected item visible
+    scroll_offset = 0
+    if selected >= max_visible:
+        scroll_offset = selected - max_visible + 1
+    
+    for i in range(max_visible):
+        idx = scroll_offset + i
+        if idx >= total:
+            break
+        
+        coll = collections[idx]
+        y = y_start + i * line_height
+        is_sel = (idx == selected)
+        
+        if is_sel:
+            # Highlight bar
+            draw.rectangle([4, y - 1, SCREEN_WIDTH - 4, y + line_height - 2],
+                           fill=(25, 45, 70))
+            draw.rectangle([4, y - 1, SCREEN_WIDTH - 4, y + line_height - 2],
+                           outline=(0, 150, 220), width=1)
+        
+        # Collection name
+        name = coll['name'] or f"Collection {idx}"
+        name_color = (255, 255, 255) if is_sel else COLOR_TEXT_MAIN
+        draw.text((12, y), name, font=FONT_MD_BOLD if is_sel else FONT_MD, fill=name_color)
+        
+        # Plugin count
+        count_text = f"{coll['count']} plugins"
+        count_color = (0, 180, 220) if is_sel else COLOR_TEXT_DIM
+        draw.text((SCREEN_WIDTH - 120, y), count_text, font=FONT_SM, fill=count_color)
+        
+        # Active indicator
+        if idx == state.browser_collection_index:
+            draw.text((SCREEN_WIDTH - 30, y), "●", font=FONT_SM, fill=(0, 200, 80))
+    
+    # Scroll indicator
+    if total > max_visible:
+        draw.text((SCREEN_WIDTH - 30, 3), f"{selected + 1}/{total}", font=FONT_SM, fill=(180, 180, 180))
+    
+    # Bottom bar
+    draw.rectangle([0, 142, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(10, 10, 10))
+    draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
+    draw.text((6, 147), "SELECT", font=FONT_SM, fill=(0, 200, 120))
+    draw.text((200, 147), "Enc: Browse", font=FONT_SM, fill=COLOR_TEXT_DIM)
+    draw.text((7 * CELL_WIDTH + 8, 147), "BACK", font=FONT_SM, fill=(200, 100, 100))
+    
+    return _to_push2_frame(img)
+
+
+def _render_browser_slot_select(state):
+    """Browser Phase 1: select which insert slot to load into."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+    
+    selected = state.selected_track
+    track_name = selected.name if selected else "---"
+    r, g, b = selected.color if selected else (150, 150, 150)
+    ibo = state.insert_bank_offset  # 0 or 8
+    page_label = "1-8" if ibo == 0 else "9-16"
+    
+    # Title bar
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(20, 50, 80))
+    draw.text((8, 3), f"ADD DEVICE  ·  {track_name}  ·  Slots {page_label}",
+              font=FONT_MD, fill=(255, 255, 255))
+    
+    names = state.current_insert_names
+    active = state.current_insert_active
+    
+    for col in range(8):
+        cell_x = col * CELL_WIDTH
+        abs_slot = ibo + col
+        
+        if col > 0:
+            draw.line([(cell_x, 22), (cell_x, 141)], fill=COLOR_SEPARATOR)
+        
+        name = names[abs_slot] if abs_slot < len(names) else ''
+        
+        # Slot number
+        draw.text((cell_x + 4, 26), f"Slot {abs_slot + 1}", font=FONT_SM, fill=COLOR_TEXT_DIM)
+        
+        if name:
+            # Occupied slot — show plugin name
+            is_act = active[abs_slot] if abs_slot < len(active) else False
+            
+            lines = []
+            n = name
+            while n:
+                lines.append(n[:11])
+                n = n[11:]
+            y = 50
+            for line in lines[:3]:
+                draw.text((cell_x + 4, y), line, font=FONT_MD, fill=COLOR_TEXT_MAIN)
+                y += 16
+            
+            # Active/bypassed indicator
+            if is_act:
+                draw.ellipse([cell_x + 4, 112, cell_x + 14, 122], fill=(0, 200, 80))
+                draw.text((cell_x + 18, 112), "ON", font=FONT_SM, fill=(0, 200, 80))
+            else:
+                draw.ellipse([cell_x + 4, 112, cell_x + 14, 122], fill=(200, 120, 0))
+                draw.text((cell_x + 18, 112), "BYP", font=FONT_SM, fill=(200, 120, 0))
+        else:
+            # Empty slot — invite to add
+            draw.text((cell_x + 14, 65), "Empty", font=FONT_MD, fill=(60, 60, 60))
+            draw.text((cell_x + 16, 85), "▲ Add", font=FONT_SM, fill=(80, 120, 160))
+    
+    # Bottom bar
+    draw.rectangle([0, 142, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(10, 10, 10))
+    draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
+    draw.text((6, 147), "SELECT SLOT", font=FONT_SM, fill=(0, 180, 220))
+    draw.text((7 * CELL_WIDTH + 8, 147), "CANCEL", font=FONT_SM, fill=(200, 100, 100))
+    draw.text((SCREEN_WIDTH - 80, 3), "◄► SLOTS", font=FONT_SM, fill=(180, 180, 180))
+    
+    return _to_push2_frame(img)
+
+
+def _render_browser_plugin_list(state):
+    """Browser Phase 2: scrollable plugin list."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+    
+    slot_num = state.browser_target_slot + 1
+    coll_name = state.browser_collection_name or "Plugins"
+    total = len(state.browser_plugins)
+    
+    # Title bar
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(20, 50, 80))
+    title = f"SLOT {slot_num}  ·  {coll_name}  ({total})"
+    draw.text((8, 3), title, font=FONT_MD, fill=(255, 255, 255))
+    
+    # Show position indicator
+    if total > 0:
+        pos_text = f"{state.browser_scroll + 1}-{min(state.browser_scroll + 8, total)}/{total}"
+        draw.text((SCREEN_WIDTH - 100, 5), pos_text, font=FONT_SM, fill=(180, 180, 180))
+    
+    if not state.browser_list_ready or total == 0:
+        draw.text((SCREEN_WIDTH // 2 - 50, 70), "Loading...", font=FONT_LG, fill=COLOR_TEXT_DIM)
+        return _to_push2_frame(img)
+    
+    # 8 columns = 8 visible plugins
+    scroll = state.browser_scroll
+    
+    for col in range(8):
+        cell_x = col * CELL_WIDTH
+        plugin_idx = scroll + col
+        
+        if col > 0:
+            draw.line([(cell_x, 22), (cell_x, 141)], fill=COLOR_SEPARATOR)
+        
+        if plugin_idx >= total:
+            continue
+        
+        plugin = state.browser_plugins[plugin_idx]
+        if not plugin:
+            continue
+        
+        is_selected = (plugin_idx == state.browser_selected)
+        
+        # Background for selected plugin
+        if is_selected:
+            draw.rectangle([cell_x + 1, 24, cell_x + CELL_WIDTH - 2, 140],
+                           fill=(25, 40, 60))
+            draw.rectangle([cell_x + 1, 24, cell_x + CELL_WIDTH - 2, 140],
+                           outline=(0, 150, 220), width=1)
+        
+        # Plugin name (2-3 lines)
+        name = plugin['name']
+        lines = []
+        while name:
+            lines.append(name[:11])
+            name = name[11:]
+        y = 30
+        name_color = (255, 255, 255) if is_selected else COLOR_TEXT_MAIN
+        for line in lines[:3]:
+            draw.text((cell_x + 4, y), line, font=FONT_MD, fill=name_color)
+            y += 16
+        
+        # Vendor
+        vendor = plugin.get('vendor', '')
+        if vendor:
+            draw.text((cell_x + 4, 90), _truncate(vendor, 12), font=FONT_SM,
+                       fill=(120, 160, 200) if is_selected else COLOR_TEXT_DIM)
+        
+        # Category (extract after "Fx|")
+        sub_cat = plugin.get('sub_categories', '')
+        cat_short = sub_cat.split('|')[-1] if '|' in sub_cat else sub_cat
+        if cat_short:
+            draw.text((cell_x + 4, 108), _truncate(cat_short, 12), font=FONT_SM,
+                       fill=(100, 180, 100) if is_selected else (70, 100, 70))
+        
+        # "LOAD" label for upper row button
+        draw.text((cell_x + CELL_WIDTH // 2 - 14, 126), "LOAD", font=FONT_SM,
+                   fill=(0, 180, 120) if is_selected else (60, 80, 60))
+    
+    # Bottom bar
+    draw.rectangle([0, 142, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(10, 10, 10))
+    draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
+    draw.text((6, 147), "COLL ►", font=FONT_SM, fill=(220, 160, 0))
+    draw.text((200, 147), "Enc1: Page  Enc2: Fine", font=FONT_SM, fill=COLOR_TEXT_DIM)
+    
+    # Cancel label on last lower button
+    draw.text((7 * CELL_WIDTH + 8, 147), "BACK", font=FONT_SM, fill=(200, 100, 100))
+    
+    return _to_push2_frame(img)
+
+
 def _render_device_screen(state):
     """Dedicated screen for Device: 8 Quick Controls of the selected track."""
     try:
@@ -743,8 +996,9 @@ def _render_device_screen(state):
         r, g, b = selected.color if selected else (150, 150, 150)
         
         # Title at top
-        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(min(r, 150), min(g, 150), min(b, 150)))
-        draw.text((8, 3), f"◄  {track_name}  ·  QUICK CONTROLS  ►", font=FONT_MD, fill=(255, 255, 255))
+        title_bg = (min(r, 150), min(g, 150), min(b, 150))
+        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=title_bg)
+        draw.text((8, 3), f"◄  {track_name}  ·  QUICK CONTROLS  ►", font=FONT_MD_BOLD, fill=_text_color_for_bg(title_bg))
         
         qcs = selected.quick_controls if selected else []
         
@@ -822,8 +1076,9 @@ def _render_sends_screen(state):
         r, g, b = selected.color if selected else (150, 150, 150)
         
         # Title at top
-        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(min(r, 150), min(g, 150), min(b, 150)))
-        draw.text((8, 3), f"◄  {track_name}  ·  SENDS  ►", font=FONT_MD, fill=(255, 255, 255))
+        title_bg = (min(r, 150), min(g, 150), min(b, 150))
+        draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=title_bg)
+        draw.text((8, 3), f"◄  {track_name}  ·  SENDS  ►", font=FONT_MD_BOLD, fill=_text_color_for_bg(title_bg))
         
         send_names = state.send_names
         send_levels = state.send_levels
@@ -1067,7 +1322,7 @@ def _render_midicc_screen(state):
 # ─────────────────────────────────────────────
 
 # Setup page definitions
-SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
 
 # Per-page options: list of (label, value) for lower row buttons
 SETUP_PAGE_OPTIONS = {
@@ -1082,6 +1337,10 @@ SETUP_PAGE_OPTIONS = {
         ('Exp',     VC_EXP),
         ('S-Curve', VC_SCURVE),
         ('Fixed',   VC_FIXED),
+    ],
+    2: [  # CC Mode page
+        ('Absolute', CC_ABSOLUTE),
+        ('Pick-up',  CC_PICKUP),
     ],
 }
 
@@ -1166,6 +1425,23 @@ def _render_setup_screen(state):
             # Separator
             draw.line([(x, 42), (x, 140)], fill=COLOR_SEPARATOR)
     
+    elif page_idx == 2:
+        # ── Page 2: CC Mode ──
+        draw.text((20, 50), "MIDI CC Encoder Mode", fill=(200, 200, 200), font=FONT_MD)
+        
+        if state.cc_mode == CC_ABSOLUTE:
+            mode_name = "Absolute"
+            desc = "Encoder value sent immediately"
+            desc2 = "May cause parameter jumps"
+        else:
+            mode_name = "Pick-up"
+            desc = "Encoder catches up to current value"
+            desc2 = "No jumps, smoother transitions"
+        
+        draw.text((20, 75), mode_name, fill=COLOR_ACCENT, font=FONT_LG)
+        draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
+        draw.text((20, 116), desc2, fill=(80, 80, 80), font=FONT_SM)
+    
     elif page_idx == 7:
         # ── Page 7: About ──
         # Bridge version
@@ -1193,6 +1469,8 @@ def _render_setup_screen(state):
                 is_selected = (state.aftertouch_mode == value)
             elif page_idx == 1:
                 is_selected = (state.velocity_curve == value)
+            elif page_idx == 2:
+                is_selected = (state.cc_mode == value)
             else:
                 is_selected = False
             
@@ -1256,8 +1534,8 @@ def render_splash_screen():
               font=FONT_MD, fill=COLOR_TEXT_DIM)
     
     # Instructions
-    draw.text((SCREEN_WIDTH // 2 - 90, 100),
-              "Make sure IAC ports are active",
+    draw.text((SCREEN_WIDTH // 2 - 110, 100),
+              "Load the MIDI Remote script in Nuendo",
               font=FONT_SM, fill=(70, 70, 70))
     
     return _to_push2_frame(img)
@@ -1270,8 +1548,8 @@ def render_disconnect_screen():
     draw.text((SCREEN_WIDTH // 2 - 90, 60),
               "Nuendo connection lost",
               font=FONT_LG, fill=COLOR_WARNING)
-    draw.text((SCREEN_WIDTH // 2 - 80, 90),
-              "Restart the bridge or check IAC ports",
+    draw.text((SCREEN_WIDTH // 2 - 100, 90),
+              "Restart the bridge or reload the script",
               font=FONT_SM, fill=COLOR_TEXT_DIM)
     return _to_push2_frame(img)
 
@@ -1301,6 +1579,9 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
     
     if state.mode == MODE_MIDICC:
         return _render_midicc_screen(state)
+    
+    if state.mode == MODE_BROWSER:
+        return _render_browser_screen(state)
     
     if state.mode == MODE_INSERTS:
         return _render_inserts_screen(state)

@@ -21,8 +21,9 @@ import time
 from state import (
     AppState, BANK_SIZE,
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, AT_POLY, AT_CHANNEL, AT_OFF,
-    VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, AT_POLY, AT_CHANNEL, AT_OFF,
+    VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
+    CC_ABSOLUTE, CC_PICKUP
 )
 from pad_grid import PadGrid
 from overview import compute_overview_layout, get_pad_color_for_overview
@@ -137,6 +138,9 @@ BTN_USER          = getattr(Push2Constants, 'BUTTON_USER', 'User')
 # Setup button (CC 30, monochrome)
 BTN_SETUP         = getattr(Push2Constants, 'BUTTON_SETUP', 'Setup')
 
+# Add Device button (monochrome, for Plugin Browser)
+BTN_ADD_DEVICE    = getattr(Push2Constants, 'BUTTON_ADD_DEVICE', 'Add Device')
+
 # "Select" buttons above encoders (upper row)
 BUTTONS_UPPER_ROW = [
     Push2Constants.BUTTON_UPPER_ROW_1,
@@ -197,6 +201,7 @@ MODE_COLORS = {
     MODE_INSERTS: LED_BLUE,
     MODE_TRACK:   LED_WHITE,
     MODE_OVERVIEW: LED_PURPLE,
+    MODE_BROWSER: LED_BLUE,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,6 +309,7 @@ class Push2Controller:
         self._configure_touchstrip_mode()
         self._configure_aftertouch()
         self._setup_button_palette()
+        self._load_plugin_mappings()
         
         # Register callback for playback notes
         self.nuendo_link._note_display_callback = self._on_playback_note
@@ -452,12 +458,34 @@ class Push2Controller:
                 cc = self.state.cc_numbers[encoder_index]
                 cc = max(0, min(127, cc + increment))
                 self.state.cc_numbers[encoder_index] = cc
+                # Reset pick-up when CC number changes
+                self.state.cc_picked_up[encoder_index] = False
+                self.state.cc_pickup_direction[encoder_index] = 0
+                self.state.cc_nuendo_values[encoder_index] = -1
             else:
-                # Normal mode: encoder changes CC value and sends it
-                val = self.state.cc_values[encoder_index]
-                val = max(0, min(127, val + increment))
-                self.state.cc_values[encoder_index] = val
-                self.nuendo_link.send_midi_cc_to_notes(self.state.cc_numbers[encoder_index], val)
+                # Normal mode: encoder changes CC value
+                old_val = self.state.cc_values[encoder_index]
+                new_val = max(0, min(127, old_val + increment))
+                self.state.cc_values[encoder_index] = new_val
+                
+                if self.state.cc_mode == CC_PICKUP and not self.state.cc_picked_up[encoder_index]:
+                    # Pick-up mode: don't send until direction reverses
+                    direction = 1 if increment > 0 else -1
+                    prev_dir = self.state.cc_pickup_direction[encoder_index]
+                    
+                    if prev_dir == 0:
+                        # First movement — record direction, don't send
+                        self.state.cc_pickup_direction[encoder_index] = direction
+                    elif direction != prev_dir:
+                        # Direction changed — pick up and start sending
+                        self.state.cc_picked_up[encoder_index] = True
+                        self.nuendo_link.send_midi_cc_to_notes(
+                            self.state.cc_numbers[encoder_index], new_val)
+                    # else: same direction, keep moving but don't send
+                else:
+                    # Absolute mode or already picked up: send immediately
+                    self.nuendo_link.send_midi_cc_to_notes(
+                        self.state.cc_numbers[encoder_index], new_val)
             return
         
         # Control Room mode: redirect encoders to CR CCs
@@ -523,13 +551,60 @@ class Push2Controller:
             self.nuendo_link.send_quick_control_change(encoder_index, new_val)
         
         elif mode == MODE_INSERTS and state.insert_params_mode:
-            # Send CC on channel 2 for insert parameters
-            if increment > 0:
-                midi_val = min(63, abs(increment))
+            if getattr(self.nuendo_link, '_da_mapping_active', False) and state.active_mapping:
+                # Mapping active: send relative encoder to DA via channel 9
+                if increment > 0:
+                    midi_val = min(63, abs(increment))
+                else:
+                    midi_val = 64 + min(63, abs(increment))
+                self.nuendo_link.send_da_encoder_value(encoder_index, midi_val)
             else:
-                midi_val = 64 + min(63, abs(increment))
-            self.nuendo_link.send_cc_ch2(20 + encoder_index, midi_val)
-            return  # No local update, feedback comes from JS
+                # No mapping: send CC on channel 2 for insert parameters
+                if increment > 0:
+                    midi_val = min(63, abs(increment))
+                else:
+                    midi_val = 64 + min(63, abs(increment))
+                self.nuendo_link.send_cc_ch2(20 + encoder_index, midi_val)
+            return  # Feedback comes from JS
+        
+        elif mode == MODE_BROWSER and state.browser_phase == "collection_select":
+            # Collection picker: encoder 1 scrolls through collections
+            if encoder_index == 0 or encoder_index == 1:
+                total = len(state.browser_collections)
+                if total > 0:
+                    state.browser_coll_scroll += increment
+                    state.browser_coll_scroll = max(0, min(total - 1, state.browser_coll_scroll))
+            return
+        
+        elif mode == MODE_BROWSER and state.browser_phase == "plugin_list":
+            # Browser mode: encoders scroll the plugin list
+            total = len(state.browser_plugins)
+            if total == 0:
+                return
+            if encoder_index == 0:
+                # Encoder 1: page scroll (8 per notch)
+                state.browser_scroll += increment * 8
+                # Snap to multiples of 8
+                state.browser_scroll = (state.browser_scroll // 8) * 8
+                max_scroll = max(0, ((total - 1) // 8) * 8)
+                state.browser_scroll = max(0, min(max_scroll, state.browser_scroll))
+                # Keep selection within visible range
+                if state.browser_selected < state.browser_scroll:
+                    state.browser_selected = state.browser_scroll
+                elif state.browser_selected >= state.browser_scroll + 8:
+                    state.browser_selected = state.browser_scroll
+            elif encoder_index == 1:
+                # Encoder 2: fine scroll — move highlight only, page when hitting edge
+                state.browser_selected += increment
+                state.browser_selected = max(0, min(total - 1, state.browser_selected))
+                # If selection goes out of visible range, jump to next/prev page
+                if state.browser_selected < state.browser_scroll:
+                    state.browser_scroll = (state.browser_selected // 8) * 8
+                elif state.browser_selected >= state.browser_scroll + 8:
+                    state.browser_scroll = (state.browser_selected // 8) * 8
+            else:
+                return
+            return
         
         elif mode == MODE_TRACK:
             # Combined mode: all encoders control the selected track
@@ -598,6 +673,13 @@ class Push2Controller:
         
         # ── Setup (toggle Setup page) ──
         if button_name == BTN_SETUP:
+            if state.shift_held:
+                # Shift+Setup = trigger DirectAccess diagnostic
+                print("  → Triggering DA diagnostic...")
+                self.nuendo_link.send_cc(15, 127)
+                time.sleep(0.02)
+                self.nuendo_link.send_cc(15, 0)
+                return
             if state.mode == MODE_SETUP:
                 self._set_mode(MODE_VOLUME)
             else:
@@ -765,10 +847,28 @@ class Push2Controller:
         # ── Bank navigation (or track navigation in Inserts/Sends mode) ──
         if button_name == BTN_LEFT:
             if state.mode == MODE_INSERTS and state.insert_params_mode:
-                # In parameters mode : Left = previous bank
-                self.nuendo_link.send_cc_ch2(3, 127)
-                time.sleep(0.01)
-                self.nuendo_link.send_cc_ch2(3, 0)
+                if getattr(self.nuendo_link, '_da_mapping_active', False) and state.active_mapping:
+                    # Mapping active: navigate mapping pages
+                    page_idx = getattr(self, '_current_mapping_page', 0)
+                    if page_idx > 0:
+                        page_idx -= 1
+                        self._current_mapping_page = page_idx
+                        pages = state.active_mapping.get("pages", [])
+                        self._apply_mapping_page(page_idx, pages)
+                        self._update_nav_leds()
+                else:
+                    # No mapping: use viewer parameter bank navigation
+                    self.nuendo_link.send_cc_ch2(3, 127)
+                    time.sleep(0.01)
+                    self.nuendo_link.send_cc_ch2(3, 0)
+                return
+            if state.mode == MODE_INSERTS and not state.insert_params_mode and state.shift_held:
+                # Shift+Left in insert list mode: bank left (8-15 → 0-7)
+                if state.insert_bank_offset > 0:
+                    state.insert_bank_offset = 0
+                    self._update_upper_row_leds()
+                    self._update_lower_row_leds()
+                    self._update_nav_leds()
                 return
             if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE):
                 if state.selected_track_index > 0:
@@ -793,11 +893,22 @@ class Push2Controller:
                         self.nuendo_link._ignore_selection_until = time.time() + 5.0
                         time.sleep(0.5)
                         if current_mode == MODE_INSERTS:
+                            state.insert_bank_offset = 0
                             self._scan_inserts()
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
                         self._update_nav_leds()
                     threading.Thread(target=_nav_left, daemon=True).start()
+                return
+            # Shift+Left in Volume/Pan: nudge bank by 1 track
+            if state.shift_held and state.mode in (MODE_VOLUME, MODE_PAN):
+                if state.bank_offset > 0:
+                    state.bank_offset -= 1
+                    self.nuendo_link.send_cc(39, 127)
+                    time.sleep(0.02)
+                    self.nuendo_link.send_cc(39, 0)
+                    self.nuendo_link._ignore_selection_until = time.time() + 2.0
+                self._update_nav_leds()
                 return
             if state.bank_offset > 0:
                 state.bank_offset = max(0, state.bank_offset - BANK_SIZE)
@@ -810,9 +921,28 @@ class Push2Controller:
         
         if button_name == BTN_RIGHT:
             if state.mode == MODE_INSERTS and state.insert_params_mode:
-                self.nuendo_link.send_cc_ch2(2, 127)
-                time.sleep(0.01)
-                self.nuendo_link.send_cc_ch2(2, 0)
+                if getattr(self.nuendo_link, '_da_mapping_active', False) and state.active_mapping:
+                    # Mapping active: navigate mapping pages
+                    page_idx = getattr(self, '_current_mapping_page', 0)
+                    pages = state.active_mapping.get("pages", [])
+                    if page_idx < len(pages) - 1:
+                        page_idx += 1
+                        self._current_mapping_page = page_idx
+                        self._apply_mapping_page(page_idx, pages)
+                        self._update_nav_leds()
+                else:
+                    # No mapping: use viewer parameter bank navigation
+                    self.nuendo_link.send_cc_ch2(2, 127)
+                    time.sleep(0.01)
+                    self.nuendo_link.send_cc_ch2(2, 0)
+                return
+            if state.mode == MODE_INSERTS and not state.insert_params_mode and state.shift_held:
+                # Shift+Right in insert list mode: bank right (0-7 → 8-15)
+                if state.insert_bank_offset == 0:
+                    state.insert_bank_offset = 8
+                    self._update_upper_row_leds()
+                    self._update_lower_row_leds()
+                    self._update_nav_leds()
                 return
             if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE):
                 if state.selected_track_index < state.total_tracks - 1:
@@ -837,11 +967,22 @@ class Push2Controller:
                         self.nuendo_link._ignore_selection_until = time.time() + 5.0
                         time.sleep(0.5)
                         if current_mode == MODE_INSERTS:
+                            state.insert_bank_offset = 0
                             self._scan_inserts()
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
                         self._update_nav_leds()
                     threading.Thread(target=_nav_right, daemon=True).start()
+                return
+            # Shift+Right in Volume/Pan: nudge bank by 1 track
+            if state.shift_held and state.mode in (MODE_VOLUME, MODE_PAN):
+                if state.bank_offset + BANK_SIZE < state.total_tracks:
+                    state.bank_offset += 1
+                    self.nuendo_link.send_cc(38, 127)
+                    time.sleep(0.02)
+                    self.nuendo_link.send_cc(38, 0)
+                    self.nuendo_link._ignore_selection_until = time.time() + 2.0
+                self._update_nav_leds()
                 return
             max_offset = max(0, (state.total_tracks - 1) // BANK_SIZE) * BANK_SIZE
             if state.bank_offset < max_offset:
@@ -912,18 +1053,74 @@ class Push2Controller:
             return
         
         if button_name == BTN_MODE_INSERTS:
+            if state.mode == MODE_BROWSER:
+                # Browse pressed in browser mode → cancel, return to inserts
+                self._set_mode(MODE_INSERTS)
+                self._scan_inserts()
+                return
             if state.mode != MODE_INSERTS:
                 self._set_mode(MODE_INSERTS)
             state.selected_insert_slot = 0
+            state.insert_bank_offset = 0
             self.nuendo_link._insert_current_slot = 0
             self._scan_inserts()
             return
         
-        # ── Overview mode (disabled for now) ──
-        # if button_name == BTN_MODE_OVERVIEW:
-        #     ...
+        # ── Add Device → Plugin Browser ──
+        if button_name == BTN_ADD_DEVICE:
+            if state.mode == MODE_BROWSER:
+                # Already in browser → cancel
+                self._set_mode(MODE_INSERTS)
+                self._scan_inserts()
+            else:
+                # Enter browser mode (slot selection phase)
+                state.browser_prev_mode = state.mode
+                state.browser_phase = "slot_select"
+                state.insert_bank_offset = 0
+                self._set_mode(MODE_BROWSER)
+                # Ensure inserts are scanned if coming from a non-insert mode
+                if not self.nuendo_link._da_inserts_ready:
+                    self._scan_inserts()
+            return
         
-        # ── Page ◄/► (inactive without Overview) ──
+        # ── Overview mode ──
+        if button_name == BTN_MODE_OVERVIEW:
+            if state.mode == MODE_OVERVIEW:
+                self._set_mode(MODE_VOLUME)
+                # Reset modified palette entries to black
+                for idx in getattr(self, '_modified_palette', set()):
+                    self._send_midi_to_push([
+                        0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x03,
+                        idx & 0x7F,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0xF7
+                    ])
+                self._modified_palette = set()
+                # Flush palette reset
+                self._send_midi_to_push([0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x05, 0xF7])
+                # Turn off all pads then restore normal colors
+                for note in range(36, 100):
+                    self._send_midi_to_push([0x90, note, 0])
+                self._update_pad_colors()
+            else:
+                state.overview_page = 0
+                self._set_mode(MODE_OVERVIEW)
+                self._update_overview_pads()
+            return
+        
+        # ── Page ◄/► for Overview pagination ──
+        if state.mode == MODE_OVERVIEW:
+            if BTN_PAGE_LEFT and button_name == BTN_PAGE_LEFT:
+                if state.overview_page > 0:
+                    state.overview_page -= 1
+                    self._update_overview_pads()
+                return
+            if BTN_PAGE_RIGHT and button_name == BTN_PAGE_RIGHT:
+                _, _, total_rows = compute_overview_layout(state.tracks, state.total_tracks, state.overview_page)
+                max_pages = (total_rows + 7) // 8
+                if state.overview_page < max_pages - 1:
+                    state.overview_page += 1
+                    self._update_overview_pads()
+                return
         
         # ── Rescan (Shift + 7th lower row button) ──
         if button_name == BTN_RESCAN and state.shift_held:
@@ -956,7 +1153,7 @@ class Push2Controller:
         
         # ── Mode Setup : intercepter les boutons ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
             
             # Upper row → select setup page
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
@@ -986,6 +1183,17 @@ class Push2Controller:
                         if i < len(VC_LIST):
                             state.velocity_curve = VC_LIST[i]
                             self._apply_velocity_curve()
+                    elif state.setup_page == 2:
+                        # Page 2: CC Mode (buttons 1-2)
+                        CC_LIST = [CC_ABSOLUTE, CC_PICKUP]
+                        if i < len(CC_LIST):
+                            state.cc_mode = CC_LIST[i]
+                            # Reset pick-up state when switching modes
+                            if state.cc_mode == CC_ABSOLUTE:
+                                state.cc_picked_up = [True] * 8
+                            else:
+                                state.cc_picked_up = [False] * 8
+                            state.cc_pickup_direction = [0] * 8
                     self._update_all_leds()
                     return
             return
@@ -1093,9 +1301,117 @@ class Push2Controller:
                     return
             return
         
+        # ── Browser mode: intercept buttons ──
+        if state.mode == MODE_BROWSER:
+            # ◄► arrows: switch insert bank (slot_select) or do nothing (plugin_list)
+            if button_name == BTN_LEFT:
+                if state.browser_phase == "slot_select" and state.insert_bank_offset > 0:
+                    state.insert_bank_offset = 0
+                return
+            if button_name == BTN_RIGHT:
+                if state.browser_phase == "slot_select" and state.insert_bank_offset == 0:
+                    state.insert_bank_offset = 8
+                return
+            
+            if state.browser_phase == "slot_select":
+                # Upper row → select slot, go to plugin list
+                for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                    if button_name == btn:
+                        abs_slot = state.insert_bank_offset + i
+                        state.browser_target_slot = abs_slot
+                        state.browser_phase = "plugin_list"
+                        state.browser_scroll = 0
+                        state.browser_selected = 0
+                        # Request plugin list if not already loaded
+                        if not state.browser_list_ready:
+                            self.nuendo_link.request_da_plugin_list(
+                                state.browser_collection_index)
+                        print(f"  Browser: selected slot {abs_slot + 1}, browsing plugins")
+                        self._update_upper_row_leds()
+                        self._update_lower_row_leds()
+                        return
+                
+                # Lower row → button 8 = cancel
+                for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                    if button_name == btn:
+                        if i == 7:
+                            self._set_mode(MODE_INSERTS)
+                            self._scan_inserts()
+                        return
+            
+            elif state.browser_phase == "plugin_list":
+                # Upper row → load plugin from that column
+                for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                    if button_name == btn:
+                        plugin_idx = state.browser_scroll + i
+                        if plugin_idx < len(state.browser_plugins):
+                            plugin = state.browser_plugins[plugin_idx]
+                            if plugin:
+                                self._browser_load_plugin(
+                                    state.browser_target_slot,
+                                    plugin_idx,
+                                    state.browser_collection_index)
+                        return
+                
+                # Lower row
+                for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                    if button_name == btn:
+                        if i == 0:
+                            # Button 1 = open collection picker
+                            state.browser_phase = "collection_select"
+                            state.browser_coll_scroll = state.browser_collection_index
+                            state.browser_collections_ready = False
+                            self.nuendo_link.request_da_collection_info()
+                            self._update_upper_row_leds()
+                            self._update_lower_row_leds()
+                        elif i == 7:
+                            # Last button = back to slot select
+                            state.browser_phase = "slot_select"
+                            self._update_upper_row_leds()
+                            self._update_lower_row_leds()
+                        return
+            
+            elif state.browser_phase == "collection_select":
+                # Upper row or lower row button 1 = confirm selection
+                confirmed = False
+                for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                    if button_name == btn:
+                        confirmed = True
+                        break
+                if not confirmed:
+                    for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                        if button_name == btn:
+                            if i == 0:
+                                confirmed = True
+                            elif i == 7:
+                                # Back to plugin list (cancel)
+                                state.browser_phase = "plugin_list"
+                                self._update_upper_row_leds()
+                                self._update_lower_row_leds()
+                                return
+                            break
+                
+                if confirmed and state.browser_collections_ready:
+                    selected_coll = state.browser_coll_scroll
+                    if 0 <= selected_coll < len(state.browser_collections):
+                        coll = state.browser_collections[selected_coll]
+                        state.browser_collection_index = coll['index']
+                        state.browser_phase = "plugin_list"
+                        state.browser_scroll = 0
+                        state.browser_selected = 0
+                        state.browser_list_ready = False
+                        self.nuendo_link.request_da_plugin_list(coll['index'])
+                        print(f"  Browser: Selected collection \"{coll['name']}\" ({coll['count']} plugins)")
+                        self._update_upper_row_leds()
+                        self._update_lower_row_leds()
+                return
+            
+            return
+        
         # ── Inserts mode: intercept buttons ──
         if state.mode == MODE_INSERTS:
             names = state.current_insert_names
+            ibo = state.insert_bank_offset  # 0 or 8
             
             # Upper row
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
@@ -1103,47 +1419,51 @@ class Push2Controller:
                     if state.insert_params_mode:
                         # In parameters mode, upper row = back to list
                         state.insert_params_mode = False
+                        self.nuendo_link._da_mapping_active = False
+                        self.state.active_mapping = None
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
-                    elif i < len(names) and names[i]:
-                        # Record timestamp for long press detection
-                        self._upper_row_press_time[button_name] = time.time()
-                        
-                        # Long press timer: open UI without entering params
-                        import threading
-                        def _inserts_long_press(btn_name=button_name, slot=i):
-                            time.sleep(0.5)
-                            if btn_name in self._upper_row_press_time and self._upper_row_press_time[btn_name] > 0:
-                                # Long press: open plugin UI only
-                                self._insert_action(slot, 'edit')
-                                print(f"  Long press: Open insert UI slot {slot}")
-                                self._upper_row_press_time[btn_name] = -1  # mark handled
-                        threading.Thread(target=_inserts_long_press, daemon=True).start()
+                    else:
+                        abs_slot = ibo + i
+                        if abs_slot < len(names) and names[abs_slot]:
+                            # Record timestamp for long press detection
+                            self._upper_row_press_time[button_name] = time.time()
+                            
+                            # Long press timer: open UI without entering params
+                            import threading
+                            def _inserts_long_press(btn_name=button_name, slot=abs_slot):
+                                time.sleep(0.5)
+                                if btn_name in self._upper_row_press_time and self._upper_row_press_time[btn_name] > 0:
+                                    # Long press: open plugin UI only
+                                    self._insert_action(slot, 'edit')
+                                    print(f"  Long press: Open insert UI slot {slot}")
+                                    self._upper_row_press_time[btn_name] = -1  # mark handled
+                            threading.Thread(target=_inserts_long_press, daemon=True).start()
                     return
             
             # Lower row
             for i, btn in enumerate(BUTTONS_LOWER_ROW):
                 if button_name == btn:
-                    # Buttons 5-8 = Mute/Solo/Mon/Rec (both list and params view)
-                    if 4 <= i <= 7:
-                        self._toggle_selected_track_function(i - 4)
-                        return
                     if state.insert_params_mode:
-                        # In parameters mode, lower row = actions
-                        slot = state.selected_insert_slot
+                        # In parameters mode:
+                        # Buttons 1 = Open/Close UI, 2 = Bypass, 3 = Deactivate
+                        # Buttons 5-8 = Mute/Solo/Mon/Rec on selected track
                         if i == 0:
-                            # Button 1 = Open/Close UI
+                            slot = state.selected_insert_slot
                             self._insert_action(slot, 'edit')
                         elif i == 1:
-                            # Button 2 = Bypass toggle
+                            slot = state.selected_insert_slot
                             self._insert_action(slot, 'bypass')
                         elif i == 2:
-                            # Button 3 = Deactivate (mOn)
+                            slot = state.selected_insert_slot
                             self._insert_action(slot, 'deactivate')
+                        elif 4 <= i <= 7:
+                            self._toggle_selected_track_function(i - 4)
                     else:
-                        # List view : bypass
-                        if i < len(names) and names[i]:
-                            self._insert_action(i, 'bypass')
+                        # List view: all 8 buttons = bypass per slot
+                        abs_slot = ibo + i
+                        if abs_slot < len(names) and names[abs_slot]:
+                            self._insert_action(abs_slot, 'bypass')
                     return
             
             # Browse → re-scan (refresh after adding insert)
@@ -1158,42 +1478,47 @@ class Push2Controller:
             if state.shift_held:
                 if state.lower_mode == LOWER_MODE_MONITOR:
                     # Shift+Mute in Monitor mode = Clear all monitors (all tracks)
-                    import threading
-                    def _clear_all_monitors():
-                        current_bank = self.state.bank_offset
-                        current_bank_idx = current_bank // 8
-                        num_banks = (self.state.total_tracks + 7) // 8
-                        # Navigate to bank 0
-                        for _ in range(current_bank_idx):
-                            self.nuendo_link.send_cc(9, 127)
-                            time.sleep(0.02)
-                            self.nuendo_link.send_cc(9, 0)
-                            time.sleep(0.08)
-                        self.state.bank_offset = 0
-                        time.sleep(0.1)
-                        # Iterate all banks forward
-                        for bank_idx in range(num_banks):
-                            for t in range(8):
-                                abs_idx = bank_idx * 8 + t
-                                if abs_idx < len(self.state.tracks):
-                                    self.state.tracks[abs_idx].is_monitored = False
-                                    self.nuendo_link.send_monitor_toggle(t, False)
-                            if bank_idx < num_banks - 1:
-                                self.nuendo_link.send_cc(8, 127)
+                    if self.nuendo_link._da_available:
+                        # DirectAccess path: JS clears all monitors instantly
+                        self.nuendo_link.send_cc(66, 127)
+                        time.sleep(0.02)
+                        self.nuendo_link.send_cc(66, 0)
+                        self.nuendo_link._vu_ignore_until = time.time() + 3.0
+                    else:
+                        # Fallback: iterate banks via CC 8/9
+                        import threading
+                        def _clear_all_monitors():
+                            current_bank = self.state.bank_offset
+                            current_bank_idx = current_bank // 8
+                            num_banks = (self.state.total_tracks + 7) // 8
+                            for _ in range(current_bank_idx):
+                                self.nuendo_link.send_cc(9, 127)
                                 time.sleep(0.02)
-                                self.nuendo_link.send_cc(8, 0)
+                                self.nuendo_link.send_cc(9, 0)
                                 time.sleep(0.08)
-                        # Navigate back to original bank
-                        target_bank_idx = current_bank // 8
-                        current_pos = num_banks - 1
-                        for _ in range(current_pos - target_bank_idx):
-                            self.nuendo_link.send_cc(9, 127)
-                            time.sleep(0.02)
-                            self.nuendo_link.send_cc(9, 0)
-                            time.sleep(0.08)
-                        self.state.bank_offset = current_bank
-                        self._update_lower_row_leds()
-                    threading.Thread(target=_clear_all_monitors, daemon=True).start()
+                            self.state.bank_offset = 0
+                            time.sleep(0.1)
+                            for bank_idx in range(num_banks):
+                                for t in range(8):
+                                    abs_idx = bank_idx * 8 + t
+                                    if abs_idx < len(self.state.tracks):
+                                        self.state.tracks[abs_idx].is_monitored = False
+                                        self.nuendo_link.send_monitor_toggle(t, False)
+                                if bank_idx < num_banks - 1:
+                                    self.nuendo_link.send_cc(8, 127)
+                                    time.sleep(0.02)
+                                    self.nuendo_link.send_cc(8, 0)
+                                    time.sleep(0.08)
+                            target_bank_idx = current_bank // 8
+                            current_pos = num_banks - 1
+                            for _ in range(current_pos - target_bank_idx):
+                                self.nuendo_link.send_cc(9, 127)
+                                time.sleep(0.02)
+                                self.nuendo_link.send_cc(9, 0)
+                                time.sleep(0.08)
+                            self.state.bank_offset = current_bank
+                            self._update_lower_row_leds()
+                        threading.Thread(target=_clear_all_monitors, daemon=True).start()
                 else:
                     # Shift+Mute = Deactivate All Mute States
                     self.nuendo_link.send_cc(75, 127)
@@ -1212,42 +1537,47 @@ class Push2Controller:
             if state.shift_held:
                 if state.lower_mode == LOWER_MODE_REC:
                     # Shift+Solo in Rec mode = Clear all rec arms (all tracks)
-                    import threading
-                    def _clear_all_rec():
-                        current_bank = self.state.bank_offset
-                        current_bank_idx = current_bank // 8
-                        num_banks = (self.state.total_tracks + 7) // 8
-                        # Navigate to bank 0
-                        for _ in range(current_bank_idx):
-                            self.nuendo_link.send_cc(9, 127)
-                            time.sleep(0.02)
-                            self.nuendo_link.send_cc(9, 0)
-                            time.sleep(0.08)
-                        self.state.bank_offset = 0
-                        time.sleep(0.1)
-                        # Iterate all banks forward
-                        for bank_idx in range(num_banks):
-                            for t in range(8):
-                                abs_idx = bank_idx * 8 + t
-                                if abs_idx < len(self.state.tracks):
-                                    self.state.tracks[abs_idx].is_armed = False
-                                    self.nuendo_link.send_rec_toggle(t, False)
-                            if bank_idx < num_banks - 1:
-                                self.nuendo_link.send_cc(8, 127)
+                    if self.nuendo_link._da_available:
+                        # DirectAccess path: JS clears all rec arms instantly
+                        self.nuendo_link.send_cc(67, 127)
+                        time.sleep(0.02)
+                        self.nuendo_link.send_cc(67, 0)
+                        self.nuendo_link._vu_ignore_until = time.time() + 3.0
+                    else:
+                        # Fallback: iterate banks via CC 8/9
+                        import threading
+                        def _clear_all_rec():
+                            current_bank = self.state.bank_offset
+                            current_bank_idx = current_bank // 8
+                            num_banks = (self.state.total_tracks + 7) // 8
+                            for _ in range(current_bank_idx):
+                                self.nuendo_link.send_cc(9, 127)
                                 time.sleep(0.02)
-                                self.nuendo_link.send_cc(8, 0)
+                                self.nuendo_link.send_cc(9, 0)
                                 time.sleep(0.08)
-                        # Navigate back to original bank
-                        target_bank_idx = current_bank // 8
-                        current_pos = num_banks - 1
-                        for _ in range(current_pos - target_bank_idx):
-                            self.nuendo_link.send_cc(9, 127)
-                            time.sleep(0.02)
-                            self.nuendo_link.send_cc(9, 0)
-                            time.sleep(0.08)
-                        self.state.bank_offset = current_bank
-                        self._update_lower_row_leds()
-                    threading.Thread(target=_clear_all_rec, daemon=True).start()
+                            self.state.bank_offset = 0
+                            time.sleep(0.1)
+                            for bank_idx in range(num_banks):
+                                for t in range(8):
+                                    abs_idx = bank_idx * 8 + t
+                                    if abs_idx < len(self.state.tracks):
+                                        self.state.tracks[abs_idx].is_armed = False
+                                        self.nuendo_link.send_rec_toggle(t, False)
+                                if bank_idx < num_banks - 1:
+                                    self.nuendo_link.send_cc(8, 127)
+                                    time.sleep(0.02)
+                                    self.nuendo_link.send_cc(8, 0)
+                                    time.sleep(0.08)
+                            target_bank_idx = current_bank // 8
+                            current_pos = num_banks - 1
+                            for _ in range(current_pos - target_bank_idx):
+                                self.nuendo_link.send_cc(9, 127)
+                                time.sleep(0.02)
+                                self.nuendo_link.send_cc(9, 0)
+                                time.sleep(0.08)
+                            self.state.bank_offset = current_bank
+                            self._update_lower_row_leds()
+                        threading.Thread(target=_clear_all_rec, daemon=True).start()
                 else:
                     # Shift+Solo = Deactivate All Solo States
                     self.nuendo_link.send_cc(74, 127)
@@ -1392,14 +1722,25 @@ class Push2Controller:
                 for i, btn in enumerate(BUTTONS_UPPER_ROW):
                     if button_name == btn:
                         names = self.state.current_insert_names
-                        if i < len(names) and names[i]:
-                            self.state.selected_insert_slot = i
+                        abs_slot = self.state.insert_bank_offset + i
+                        if abs_slot < len(names) and names[abs_slot]:
+                            self.state.selected_insert_slot = abs_slot
                             self.state.insert_param_names = [''] * 8
                             self.state.insert_param_values = [''] * 8
-                            if self.state.shift_held:
-                                self._insert_action(i, 'params_and_edit')
+                            # Check if a plugin mapping exists
+                            self._check_insert_mapping(names[abs_slot])
+                            # If mapping found, request DA param enumeration
+                            if self.state.active_mapping and getattr(self.nuendo_link, '_da_available', False):
+                                self.nuendo_link._da_mapping_active = True
+                                self.nuendo_link._on_da_params_ready = self._on_da_params_ready
+                                self._current_mapping_page = 0
+                                self.nuendo_link.request_da_plugin_params(abs_slot)
                             else:
-                                self._insert_action(i, 'params')
+                                self.nuendo_link._da_mapping_active = False
+                            if self.state.shift_held:
+                                self._insert_action(abs_slot, 'params_and_edit')
+                            else:
+                                self._insert_action(abs_slot, 'params')
                             self.state.insert_params_mode = True
                             self._update_upper_row_leds()
                             self._update_lower_row_leds()
@@ -1684,8 +2025,8 @@ class Push2Controller:
     def _handle_overview_pad(self, row, col):
         """Handle a pad press in Overview mode.
         
-        Only acts on tracks in the current bank (displayed on screen).
-        For tracks in other banks, navigate with ◄/► first.
+        - Select held + pad = select track (and optionally navigate bank)
+        - Otherwise: Mute/Solo/Mon/Rec toggle via DA (any track) or fallback (bank only)
         """
         state = self.state
         pad_map, _, _ = compute_overview_layout(state.tracks, state.total_tracks, state.overview_page)
@@ -1698,53 +2039,95 @@ class Push2Controller:
         target_bank = (track_idx // BANK_SIZE) * BANK_SIZE
         track_in_bank = track_idx - target_bank
         
-        # Only tracks in the current bank
-        if target_bank != state.bank_offset:
+        # Select held = select track (Shift + pad)
+        if state.shift_held:
+            state.selected_track_index = track_idx
+            for j, t in enumerate(state.tracks):
+                t.is_selected = (j == track_idx)
+            # Navigate bank if needed
+            if target_bank != state.bank_offset:
+                banks_diff = (target_bank - state.bank_offset) // BANK_SIZE
+                cc = 8 if banks_diff > 0 else 9
+                import threading
+                def _navigate(diff=abs(banks_diff)):
+                    for _ in range(diff):
+                        self.nuendo_link.send_cc(cc, 127)
+                        time.sleep(0.02)
+                        self.nuendo_link.send_cc(cc, 0)
+                        time.sleep(0.08)
+                    self.state.bank_offset = target_bank
+                threading.Thread(target=_navigate, daemon=True).start()
+            else:
+                self.nuendo_link.send_select_track(track_in_bank)
+                self.nuendo_link._ignore_selection_until = time.time() + 5.0
+            self._update_overview_pads()
             return
         
+        # Toggle Mute/Solo/Mon/Rec
         mode = state.lower_mode
-        if mode == LOWER_MODE_MUTE:
-            track.is_muted = not track.is_muted
-            self.nuendo_link.send_mute_toggle(track_in_bank, track.is_muted)
-        elif mode == LOWER_MODE_SOLO:
-            track.is_solo = not track.is_solo
-            self.nuendo_link.send_solo_toggle(track_in_bank, track.is_solo)
-        elif mode == LOWER_MODE_MONITOR:
-            track.is_monitored = not track.is_monitored
-            self.nuendo_link.send_monitor_toggle(track_in_bank, track.is_monitored)
-        elif mode == LOWER_MODE_REC:
-            track.is_armed = not track.is_armed
-            self.nuendo_link.send_rec_toggle(track_in_bank, track.is_armed)
+        
+        # Try DA for any track (instantaneous, no bank constraint)
+        if self.nuendo_link._da_available:
+            # Send DA toggle command via SysEx
+            # CC 16 = DA toggle, value encodes: track_idx in high bits, function in low bits
+            # Instead, send a SysEx with track_idx and function
+            da_func = {'mute': 0, 'solo': 1, 'monitor': 2, 'rec': 3}.get(mode, 0)
+            self.nuendo_link.send_da_toggle(track_idx, da_func)
+            # Update local state
+            if mode == LOWER_MODE_MUTE:
+                track.is_muted = not track.is_muted
+            elif mode == LOWER_MODE_SOLO:
+                track.is_solo = not track.is_solo
+            elif mode == LOWER_MODE_MONITOR:
+                track.is_monitored = not track.is_monitored
+            elif mode == LOWER_MODE_REC:
+                track.is_armed = not track.is_armed
+        else:
+            # Fallback: only works for tracks in the current bank
+            if target_bank != state.bank_offset:
+                return
+            if mode == LOWER_MODE_MUTE:
+                track.is_muted = not track.is_muted
+                self.nuendo_link.send_mute_toggle(track_in_bank, track.is_muted)
+            elif mode == LOWER_MODE_SOLO:
+                track.is_solo = not track.is_solo
+                self.nuendo_link.send_solo_toggle(track_in_bank, track.is_solo)
+            elif mode == LOWER_MODE_MONITOR:
+                track.is_monitored = not track.is_monitored
+                self.nuendo_link.send_monitor_toggle(track_in_bank, track.is_monitored)
+            elif mode == LOWER_MODE_REC:
+                track.is_armed = not track.is_armed
+                self.nuendo_link.send_rec_toggle(track_in_bank, track.is_armed)
         
         self._update_overview_pads()
 
     def _update_overview_pads(self):
-        """Update pad colors in Overview mode."""
+        """Update pad colors in Overview mode using custom palette entries."""
         if not self.push or self.state.mode != MODE_OVERVIEW:
             return
         
         state = self.state
-        pad_map, _, _ = compute_overview_layout(state.tracks, state.total_tracks, state.overview_page)
+        pad_map, _, total_rows = compute_overview_layout(state.tracks, state.total_tracks, state.overview_page)
         
         any_solo = any(t.is_solo for t in state.tracks if t.name)
         blink_on = getattr(self, '_overview_blink_phase', True)
         
-        pad_count = 0
+        # Use palette indices 1-64, skipping reserved standard colors
         _reserved = {0, 21, 37, 45, 122, 124, 110, 111, 112, 113, 114, 115, 116, 117}
+        palette_idx = 1
         
         for row in range(8):
             for col in range(8):
                 track_idx = pad_map.get((row, col))
                 pad_note = 36 + (7 - row) * 8 + col
                 
-                palette_idx = 1 + pad_count
-                while palette_idx in _reserved:
-                    palette_idx += 1
-                pad_count += 1
-                
                 if track_idx is None:
                     self._send_midi_to_push([0x90, pad_note, 0])
                     continue
+                
+                # Find next non-reserved palette index
+                while palette_idx in _reserved:
+                    palette_idx += 1
                 
                 track = state.tracks[track_idx]
                 r, g, b = track.color
@@ -1773,7 +2156,10 @@ class Push2Controller:
                 else:
                     self._set_palette_entry(palette_idx, r, g, b)
                     self._send_midi_to_push([0x90, pad_note, palette_idx])
+                
+                palette_idx += 1
         
+        # Flush palette
         self._send_midi_to_push([0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x05, 0xF7])
 
     def _set_palette_entry(self, index, r, g, b):
@@ -2031,6 +2417,8 @@ class Push2Controller:
         old_mode = self.state.mode
         self.state.mode = new_mode
         self.state.insert_params_mode = False  # Always reset when changing mode
+        self.nuendo_link._da_mapping_active = False
+        self.state.active_mapping = None
         self.nuendo_link.send_mode_change(new_mode)
         # Ignore VU peak clips briefly after mode change to avoid false triggers
         self.nuendo_link._vu_ignore_until = time.time() + 3.0
@@ -2116,10 +2504,8 @@ class Push2Controller:
             else:
                 self._send_midi_to_push([0xB0, 85, BTN_WHITE])
             
-            # Rec (CC 86, colored): solid red if rec active, blinking otherwise
-            # Push 2 button palette: 5 = dim blink, 7 = bright solid
-            any_armed = any(t.is_armed for t in self.state.tracks if t.name)
-            self._send_midi_to_push([0xB0, 86, 7 if any_armed else 5])
+            # Rec (CC 86, colored): orange=idle, blink red=armed, solid red=recording
+            self._update_rec_led()
             
             if BTN_AUTOMATE:
                 track = self.state.selected_track
@@ -2153,6 +2539,9 @@ class Push2Controller:
             
             # Setup (CC 30, monochrome) : bright when in Setup mode
             self._send_midi_to_push([0xB0, 30, 127 if self.state.mode == MODE_SETUP else 40])
+            
+            # Add Device (monochrome) : lit at all times
+            self._set_mono_led(BTN_ADD_DEVICE, 127)
         except Exception:
             pass
 
@@ -2166,7 +2555,7 @@ class Push2Controller:
             BTN_MODE_VOLUME:  [MODE_VOLUME, MODE_TRACK],
             BTN_MODE_SENDS:   [MODE_SENDS, MODE_PAN],
             BTN_DEVICE:       [MODE_DEVICE],
-            BTN_MODE_INSERTS: [MODE_INSERTS],
+            BTN_MODE_INSERTS: [MODE_INSERTS, MODE_BROWSER],
             BTN_MODE_OVERVIEW: [MODE_OVERVIEW],
             BTN_MODE_NOTE:    [MODE_MIDICC],
         }
@@ -2182,8 +2571,21 @@ class Push2Controller:
         if not self.push:
             return
         
-        left_color  = LED_WHITE if self.state.can_go_bank_left() else LED_DIM_GREY
-        right_color = LED_WHITE if self.state.can_go_bank_right() else LED_DIM_GREY
+        state = self.state
+        
+        # When in insert params mode with a mapping, show page navigation
+        if state.mode == MODE_INSERTS and state.insert_params_mode:
+            if getattr(self.nuendo_link, '_da_mapping_active', False) and state.active_mapping:
+                page_idx = getattr(self, '_current_mapping_page', 0)
+                pages = state.active_mapping.get("pages", [])
+                left_color = LED_WHITE if page_idx > 0 else LED_DIM_GREY
+                right_color = LED_WHITE if page_idx < len(pages) - 1 else LED_DIM_GREY
+                self.push.buttons.set_button_color(BTN_LEFT, left_color)
+                self.push.buttons.set_button_color(BTN_RIGHT, right_color)
+                return
+        
+        left_color  = LED_WHITE if state.can_go_bank_left() else LED_DIM_GREY
+        right_color = LED_WHITE if state.can_go_bank_right() else LED_DIM_GREY
         
         self.push.buttons.set_button_color(BTN_LEFT, left_color)
         self.push.buttons.set_button_color(BTN_RIGHT, right_color)
@@ -2197,7 +2599,7 @@ class Push2Controller:
         
         # ── Setup mode: upper row = page tabs ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
             for i in range(8):
                 cc = 102 + i
                 try:
@@ -2247,11 +2649,38 @@ class Push2Controller:
                         pass
             else:
                 # List view: slots with plugin = white
+                ibo = state.insert_bank_offset
                 for i in range(8):
                     cc = 102 + i
                     try:
-                        name = state.current_insert_names[i] if i < len(state.current_insert_names) else ''
+                        abs_slot = ibo + i
+                        name = state.current_insert_names[abs_slot] if abs_slot < len(state.current_insert_names) else ''
                         if name:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    except Exception:
+                        pass
+            return
+        
+        # ── Browser mode: upper row ──
+        if state.mode == MODE_BROWSER:
+            if state.browser_phase == "slot_select":
+                # All 8 slots are selectable
+                for i in range(8):
+                    cc = 102 + i
+                    try:
+                        self._send_midi_to_push([0xB0, cc, BTN_WHITE])
+                    except Exception:
+                        pass
+            elif state.browser_phase == "plugin_list":
+                # Light buttons for visible plugins
+                total = len(state.browser_plugins)
+                for i in range(8):
+                    cc = 102 + i
+                    try:
+                        plugin_idx = state.browser_scroll + i
+                        if plugin_idx < total:
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
@@ -2322,6 +2751,24 @@ class Push2Controller:
                         self._send_midi_to_push([0xB0, cc, BTN_DIM])
                 else:
                     self._send_midi_to_push([0xB0, cc, LED_OFF])
+
+    def _update_rec_led(self):
+        """Update Record button LED: orange=idle, blink red=armed, solid red=recording."""
+        if not self.push:
+            return
+        try:
+            if self.state.is_recording:
+                # Solid red when recording
+                self._send_midi_to_push([0xB0, 86, LED_RED])
+            elif any(t.is_armed for t in self.state.tracks if t.name):
+                # Blink red when armed but not recording
+                phase = getattr(self, '_rec_blink_phase', False)
+                self._send_midi_to_push([0xB0, 86, LED_RED if phase else LED_DIM_GREY])
+            else:
+                # Orange when idle
+                self._send_midi_to_push([0xB0, 86, LED_ORANGE])
+        except Exception:
+            pass
 
     def _update_accent_led(self):
         """Update Accent button LED."""
@@ -2400,6 +2847,13 @@ class Push2Controller:
                     elif state.setup_page == 1:
                         if i < len(VC_OPTIONS):
                             is_sel = (state.velocity_curve == VC_OPTIONS[i])
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.setup_page == 2:
+                        CC_OPTIONS = [CC_ABSOLUTE, CC_PICKUP]
+                        if i < len(CC_OPTIONS):
+                            is_sel = (state.cc_mode == CC_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
@@ -2490,31 +2944,45 @@ class Push2Controller:
                     except Exception:
                         pass
             else:
-                # List view: bypass 1-4, then M/S/Mon/R on 5-8
+                # List view: bypass on all 8 slots
+                ibo = state.insert_bank_offset
                 for i in range(8):
                     cc = 20 + i
                     try:
-                        if i < 4:
-                            name = state.current_insert_names[i] if i < len(state.current_insert_names) else ''
-                            active = state.current_insert_active[i] if i < len(state.current_insert_active) else False
-                            if not name:
-                                self._send_midi_to_push([0xB0, cc, LED_OFF])
-                            elif active:
-                                self._send_midi_to_push([0xB0, cc, BTN_BLUE])
-                            else:
-                                self._send_midi_to_push([0xB0, cc, BTN_DIM])
-                        elif i == 4 and track:
-                            self._send_midi_to_push([0xB0, cc, BTN_YELLOW if track.is_muted else BTN_DIM])
-                        elif i == 5 and track:
-                            self._send_midi_to_push([0xB0, cc, BTN_BLUE if track.is_solo else BTN_DIM])
-                        elif i == 6 and track:
-                            self._send_midi_to_push([0xB0, cc, BTN_ORANGE if track.is_monitored else BTN_DIM])
-                        elif i == 7 and track:
-                            self._send_midi_to_push([0xB0, cc, BTN_RED if track.is_armed else BTN_DIM])
-                        else:
+                        abs_slot = ibo + i
+                        name = state.current_insert_names[abs_slot] if abs_slot < len(state.current_insert_names) else ''
+                        active = state.current_insert_active[abs_slot] if abs_slot < len(state.current_insert_active) else False
+                        if not name:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
+                        elif active:
+                            self._send_midi_to_push([0xB0, cc, BTN_BLUE])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, BTN_DIM])
                     except Exception:
                         pass
+            return
+        
+        # ── Browser mode: LEDs ──
+        if state.mode == MODE_BROWSER:
+            for i in range(8):
+                cc = 20 + i
+                try:
+                    if state.browser_phase == "slot_select":
+                        if i == 7:
+                            self._send_midi_to_push([0xB0, cc, BTN_RED])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.browser_phase == "plugin_list":
+                        if i == 0:
+                            # Collection cycle button
+                            self._send_midi_to_push([0xB0, cc, BTN_YELLOW])
+                        elif i == 7:
+                            # Back button
+                            self._send_midi_to_push([0xB0, cc, BTN_RED])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                except Exception:
+                    pass
             return
         
         mode = state.lower_mode
@@ -2631,6 +3099,17 @@ class Push2Controller:
                         self._overview_blink_phase = not getattr(self, '_overview_blink_phase', True)
                         self._update_overview_pads()
 
+                # Blink for Record button (~2Hz) when armed
+                if not hasattr(self, '_rec_blink_counter'):
+                    self._rec_blink_counter = 0
+                self._rec_blink_counter += 1
+                if self._rec_blink_counter >= 15:  # ~2Hz at 30fps
+                    self._rec_blink_counter = 0
+                    self._rec_blink_phase = not getattr(self, '_rec_blink_phase', False)
+                    if not self.state.is_recording and any(
+                            t.is_armed for t in self.state.tracks if t.name):
+                        self._update_rec_led()
+
                 if _display_ok:
                     frame = render_frame(self.state, self.pad_grid, self.cr_state)
                     self.push.display.display_frame(
@@ -2664,15 +3143,51 @@ class Push2Controller:
         """Execute an action on an insert slot."""
         import threading
         
+        # Bypass lock: prevent concurrent bypass actions
+        if not hasattr(self, '_bypass_lock'):
+            self._bypass_lock = threading.Lock()
+        
         def _do():
             if action == 'bypass':
-                # CC 20+slot channel 4 to toggle the dedicated viewer bypass
-                self.nuendo_link.send_cc_ch4(20 + target_slot, 127)
-                time.sleep(0.01)
-                self.nuendo_link.send_cc_ch4(20 + target_slot, 0)
-                print(f"  Bypass toggle slot {target_slot}")
+                # ── Try DirectAccess bypass (instant) ──
+                is_active = self.state.current_insert_active[target_slot]
+                want_bypass = is_active  # Active → bypass ON; Bypassed → bypass OFF
+                if self.nuendo_link.send_da_bypass(target_slot, want_bypass):
+                    print(f"  Bypass {'ON' if want_bypass else 'OFF'} slot {target_slot} [DA]")
+                    return
+                
+                # ── Fallback: viewer-based bypass (slow) ──
+                # Only one bypass at a time — drop if busy
+                if not self._bypass_lock.acquire(blocking=False):
+                    return
+                try:
+                    self.nuendo_link._bypass_navigating = True
+                    # 1. Reset main viewer to slot 0
+                    self.nuendo_link.send_cc(89, 127)
+                    time.sleep(0.01)
+                    self.nuendo_link.send_cc(89, 0)
+                    time.sleep(0.15)
+                    # 2. Advance to target slot (same timing as edit action)
+                    for _ in range(target_slot):
+                        self.nuendo_link.send_cc(1, 127)
+                        time.sleep(0.01)
+                        self.nuendo_link.send_cc(1, 0)
+                        time.sleep(0.15)
+                    # 3. Settling delay — let the binding sync with the new slot
+                    time.sleep(0.15)
+                    self.nuendo_link._bypass_navigating = False
+                    # 4. Set bypass: 127 = bypass ON, 0 = bypass OFF
+                    if is_active:
+                        self.nuendo_link.send_cc_ch4(20, 127)
+                    else:
+                        self.nuendo_link.send_cc_ch4(20, 0)
+                    print(f"  Bypass {'ON' if is_active else 'OFF'} slot {target_slot} [viewer]")
+                finally:
+                    self.nuendo_link._bypass_navigating = False
+                    self._bypass_lock.release()
             elif action == 'edit':
-                # Navigate the main viewer to the correct slot
+                # Open/close plugin UI via viewer navigation
+                # (DA "Edit" param is read-only state, can't trigger UI open)
                 self.nuendo_link.send_cc(89, 127)  # Reset
                 time.sleep(0.01)
                 self.nuendo_link.send_cc(89, 0)
@@ -2682,9 +3197,6 @@ class Push2Controller:
                     time.sleep(0.01)
                     self.nuendo_link.send_cc(1, 0)
                     time.sleep(0.15)
-                # Toggle edit via CC 99 (bound to mEdit via custom var)
-                # We use the same mechanism as the bypass viewer
-                # but for edit, there is only one viewer
                 time.sleep(0.1)
                 self.nuendo_link.send_cc(99, 127)
                 time.sleep(0.01)
@@ -2703,7 +3215,7 @@ class Push2Controller:
                     time.sleep(0.15)
                 print(f"  Params mode slot {target_slot}")
             elif action == 'params_and_edit':
-                # Navigate + open UI
+                # Navigate + open UI (viewer-based)
                 self.nuendo_link.send_cc(89, 127)
                 time.sleep(0.01)
                 self.nuendo_link.send_cc(89, 0)
@@ -2762,10 +3274,72 @@ class Push2Controller:
                 self.nuendo_link.send_cc(1, 0)
                 time.sleep(0.05)
 
+    def _browser_load_plugin(self, target_slot, entry_index, collection_index):
+        """Load a plugin from the browser into an insert slot."""
+        state = self.state
+        plugin = state.browser_plugins[entry_index] if entry_index < len(state.browser_plugins) else None
+        if not plugin:
+            return
+        
+        print(f"  Browser: Loading \"{plugin['name']}\" into slot {target_slot + 1}...")
+        
+        # Send load command to JS via CC sequence on ch8
+        success = self.nuendo_link.send_da_load_plugin(
+            target_slot, entry_index, collection_index)
+        
+        if success:
+            # Exit browser mode and return to inserts after a short delay
+            import threading
+            def _after_load():
+                time.sleep(1.0)  # Wait for Nuendo to load the plugin
+                self._set_mode(MODE_INSERTS)
+                state.selected_insert_slot = target_slot
+                state.insert_bank_offset = 0 if target_slot < 8 else 8
+                self._scan_inserts()
+                print(f"  Browser: \"{plugin['name']}\" loaded ✓")
+            threading.Thread(target=_after_load, daemon=True).start()
+        else:
+            print(f"  Browser: Load failed — DA not available")
+
+    def _browser_cycle_collection(self):
+        """Cycle to the next plugin collection and reload the list."""
+        state = self.state
+        coll_count = state.browser_collection_count
+        if coll_count <= 1:
+            # Only one collection (or unknown), nothing to cycle
+            return
+        next_idx = (state.browser_collection_index + 1) % coll_count
+        state.browser_collection_index = next_idx
+        state.browser_scroll = 0
+        state.browser_selected = 0
+        state.browser_list_ready = False
+        self.nuendo_link.request_da_plugin_list(next_idx)
+        print(f"  Browser: Switching to collection {next_idx}/{coll_count}")
+
+    def _browser_clear_slot(self, slot_index):
+        """Attempt to clear (remove plugin from) an insert slot."""
+        print(f"  Browser: Clearing slot {slot_index + 1}...")
+        success = self.nuendo_link.send_da_clear_slot(slot_index)
+        if success:
+            import threading
+            def _after_clear():
+                time.sleep(0.5)
+                self._scan_inserts()
+            threading.Thread(target=_after_clear, daemon=True).start()
+        else:
+            print(f"  Browser: Clear failed — DA not available")
+
     def _scan_inserts(self):
-        """Scan 8 inserts by navigating the viewer slot by slot."""
+        """Scan 16 inserts — uses DirectAccess if available, otherwise viewer navigation."""
         import threading
         
+        # ── Try DirectAccess first (instant) ──
+        if getattr(self.nuendo_link, '_da_available', False):
+            self.nuendo_link.request_da_insert_exploration()
+            print("  Inserts: DA exploration requested (instant)")
+            return
+        
+        # ── Fallback: viewer-based scan (slow) ──
         self._insert_scan_version += 1
         my_version = self._insert_scan_version
         
@@ -2775,7 +3349,7 @@ class Push2Controller:
             self.state.current_insert_active = [False] * 16
             
             track_name = self.state.selected_track.name if self.state.selected_track else '?'
-            print(f"  Inserts: scan v{my_version} (track='{track_name}')")
+            print(f"  Inserts: scan v{my_version} (track='{track_name}') [viewer-based]")
             
             # Reset to slot 0
             self.nuendo_link.send_cc(89, 127)
@@ -2783,7 +3357,7 @@ class Push2Controller:
             self.nuendo_link.send_cc(89, 0)
             time.sleep(0.3)
             
-            for slot in range(1, 8):
+            for slot in range(1, 16):
                 if my_version != self._insert_scan_version:
                     print(f"  Inserts: scan cancelled")
                     return
@@ -2803,15 +3377,14 @@ class Push2Controller:
             self.state.selected_insert_slot = 0
             
             scanned_names = list(self.state.current_insert_names)
-            print(f"  ✓ Inserts scan v{my_version}: {scanned_names[:8]}")
+            page1 = scanned_names[:8]
+            page2 = scanned_names[8:16]
+            print(f"  ✓ Inserts scan v{my_version}: {page1}")
+            if any(page2):
+                print(f"    Page 2: {page2}")
             
             if my_version != self._insert_scan_version:
                 return
-            
-            # Position the bypass viewers
-            self.nuendo_link._insert_positioning = True
-            self._position_bypass_viewers()
-            self.nuendo_link._insert_positioning = False
             
             # Restore scanned names
             self.state.current_insert_names = scanned_names
@@ -2820,29 +3393,6 @@ class Push2Controller:
             self._update_upper_row_leds()
         
         threading.Thread(target=_scan, daemon=True).start()
-
-    def _position_bypass_viewers(self):
-        """Position the 8 bypass viewers, each on its slot."""
-        names = self.state.current_insert_names
-        count = sum(1 for n in names[:8] if n)
-        if count == 0:
-            return
-        print(f"  Positioning {count} bypass viewers...")
-        for slot in range(8):
-            # Reset viewer N : Note 60+N
-            self.nuendo_link.send_note(60 + slot, 127)
-            time.sleep(0.01)
-            self.nuendo_link.send_note(60 + slot, 0)
-            time.sleep(0.03)
-            
-            # Next viewer N : Note 70+N, N fois
-            for _ in range(slot):
-                self.nuendo_link.send_note(70 + slot, 127)
-                time.sleep(0.01)
-                self.nuendo_link.send_note(70 + slot, 0)
-                time.sleep(0.03)
-        
-        print("  ✓ Bypass viewers positioned")
 
     def _initial_bank_refresh(self):
         """Initial refresh: loads names/colors for the current bank."""
@@ -2951,6 +3501,254 @@ class Push2Controller:
             print(f"  ✓ Scan complete")
         
         threading.Thread(target=_scan_thread, daemon=True).start()
+
+    def _load_plugin_mappings(self):
+        """Load all plugin mappings from ~/.push2bridge/mappings/."""
+        from pathlib import Path
+        import json
+        
+        mappings_dir = Path.home() / ".push2bridge" / "mappings"
+        if not mappings_dir.exists():
+            print("  No plugin mappings found")
+            return
+        
+        count = 0
+        for f in mappings_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                plugin_name = data.get("plugin", f.stem)
+                self.state.plugin_mappings[plugin_name] = data
+                count += 1
+            except (json.JSONDecodeError, IOError):
+                pass
+        
+        if count > 0:
+            print(f"  ✓ Loaded {count} plugin mapping(s)")
+
+    def _check_insert_mapping(self, plugin_name):
+        """Check if a mapping exists for the given plugin and activate it.
+        
+        Matching strategy (in order):
+        1. Exact match
+        2. Case-insensitive exact match
+        3. Nuendo name starts with mapping name (catches "Pro-Q 4 Mono" → "Pro-Q 4")
+        4. Mapping name starts with Nuendo name (catches truncated names)
+        5. Substring match (one contains the other)
+        """
+        mappings = self.state.plugin_mappings
+        if not mappings:
+            self.state.active_mapping = None
+            return None
+        
+        # 1. Exact match
+        mapping = mappings.get(plugin_name)
+        if mapping:
+            self.state.active_mapping = mapping
+            pages = mapping.get("pages", [])
+            print(f"  ✓ Mapping found for '{plugin_name}': {len(pages)} page(s)")
+            return mapping
+        
+        # 2-5. Fuzzy matching
+        plugin_lower = plugin_name.lower().strip()
+        best_match = None
+        best_name = None
+        
+        for name, m in mappings.items():
+            name_lower = name.lower().strip()
+            
+            # 2. Case-insensitive exact
+            if name_lower == plugin_lower:
+                best_match = m
+                best_name = name
+                break
+            
+            # 3. Nuendo name starts with mapping name (most common: "Pro-Q 4 Mono" → "Pro-Q 4")
+            if plugin_lower.startswith(name_lower) and len(name_lower) >= 4:
+                if not best_match or len(name) > len(best_name):  # prefer longest match
+                    best_match = m
+                    best_name = name
+            
+            # 4. Mapping name starts with Nuendo name
+            elif name_lower.startswith(plugin_lower) and len(plugin_lower) >= 4:
+                if not best_match or len(name) > len(best_name):
+                    best_match = m
+                    best_name = name
+            
+            # 5. Substring (one contains the other)
+            elif (name_lower in plugin_lower or plugin_lower in name_lower) and len(min(name_lower, plugin_lower, key=len)) >= 4:
+                if not best_match:
+                    best_match = m
+                    best_name = name
+        
+        self.state.active_mapping = best_match
+        if best_match:
+            pages = best_match.get("pages", [])
+            if best_name != plugin_name:
+                print(f"  ✓ Mapping found for '{plugin_name}' (matched '{best_name}'): {len(pages)} page(s)")
+            else:
+                print(f"  ✓ Mapping found for '{plugin_name}': {len(pages)} page(s)")
+        else:
+            available = list(mappings.keys())[:5]
+            suffix = f" (+{len(mappings)-5} more)" if len(mappings) > 5 else ""
+            print(f"  ✗ No mapping for '{plugin_name}' — available: {available}{suffix}")
+        return best_match
+
+    def _on_da_params_ready(self, slot_index):
+        """Called when DA param enumeration is complete. Applies the active mapping."""
+        import json
+        from pathlib import Path
+        
+        mapping = self.state.active_mapping
+        if not mapping:
+            return
+        
+        da_params = getattr(self.nuendo_link, '_da_plugin_params', {})
+        if not da_params:
+            print("  ✗ DA params empty — cannot apply mapping")
+            return
+        
+        # Load pedalboard cache
+        cache_file = Path.home() / ".push2bridge" / "plugin_cache.json"
+        pb_params = []
+        if cache_file.exists():
+            try:
+                cache = json.loads(cache_file.read_text())
+                plugin_name = mapping.get("plugin", "")
+                pb_plugin = cache.get(plugin_name, {})
+                pb_params = pb_plugin.get("parameters", [])
+            except (json.JSONDecodeError, IOError):
+                pass
+        
+        if not pb_params:
+            print(f"  ✗ No pedalboard cache — using direct index")
+            self._param_pb_to_da = {i: i for i in range(len(da_params))}
+        else:
+            self._param_pb_to_da = {}
+            
+            # Build DA index list for searching
+            da_list = [(idx, info['name']) for idx, info in da_params.items()]
+            matched_da = set()  # prevent double-matching
+            
+            for p in pb_params:
+                pb_idx = p['index']
+                pb_name = (p.get('name') or '').strip()
+                pb_label = (p.get('label') or '').strip()
+                
+                # Convert snake_case to words: 'band_1_frequency' → ['band', '1', 'frequency']
+                pb_words = pb_name.lower().replace('_', ' ').split()
+                
+                # Strategy 1: exact name match (normalized)
+                pb_norm = pb_name.lower().replace('_', ' ').strip()
+                for da_idx, da_name in da_list:
+                    if da_idx in matched_da:
+                        continue
+                    if da_name.lower().strip() == pb_norm:
+                        self._param_pb_to_da[pb_idx] = da_idx
+                        matched_da.add(da_idx)
+                        break
+                else:
+                    # Strategy 2: fuzzy word match — all pb words must appear in DA name
+                    if len(pb_words) >= 2:
+                        best_da = None
+                        best_len = 999
+                        for da_idx, da_name in da_list:
+                            if da_idx in matched_da:
+                                continue
+                            da_lower = da_name.lower()
+                            if all(w in da_lower for w in pb_words):
+                                # Prefer shortest DA name (tightest match)
+                                if len(da_name) < best_len:
+                                    best_da = da_idx
+                                    best_len = len(da_name)
+                        if best_da is not None:
+                            self._param_pb_to_da[pb_idx] = best_da
+                            matched_da.add(best_da)
+            
+            matched = len(self._param_pb_to_da)
+            total_pb = len(pb_params)
+            print(f"  Param matching: {matched}/{total_pb} matched")
+            
+            if matched > 0:
+                # Show a few examples
+                examples = []
+                for pb_idx, da_idx in list(self._param_pb_to_da.items())[:3]:
+                    pb_p = next((p for p in pb_params if p['index'] == pb_idx), None)
+                    da_name = da_params[da_idx]['name'] if da_idx in da_params else '?'
+                    pb_n = pb_p['name'] if pb_p else '?'
+                    examples.append(f"'{pb_n}' → '{da_name}'")
+                print(f"    Examples: {', '.join(examples)}")
+            
+            if total_pb > 0 and matched / total_pb < 0.1:
+                # Very poor matching — show diagnostic
+                print(f"  ⚠ Very poor matching — check parameter names")
+                print(f"    Pedalboard (first 3): {[p.get('name','') for p in pb_params[:3]]}")
+                print(f"    DA (first 3): {[da_params[i]['name'] for i in sorted(da_params.keys())[:3]]}")
+        
+        # Apply the first mapping page
+        pages = mapping.get("pages", [])
+        if pages:
+            self._apply_mapping_page(0, pages, da_params)
+
+    @staticmethod
+    def _normalize_param_name(name):
+        """Normalize a parameter name for matching."""
+        return name.lower().strip() if name else ''
+
+    def _apply_mapping_page(self, page_idx, pages, da_params=None):
+        """Apply a specific mapping page to the Push display and configure encoders."""
+        if page_idx >= len(pages):
+            return
+        
+        if da_params is None:
+            da_params = getattr(self.nuendo_link, '_da_plugin_params', {})
+        
+        page = pages[page_idx]
+        param_indices = page.get("params", [])
+        labels = page.get("labels", [])
+        
+        names = [''] * 8
+        values = [''] * 8
+        da_indices_for_encoders = [-1] * 8
+        
+        for enc in range(8):
+            if enc >= len(param_indices):
+                break
+            pb_idx = param_indices[enc]
+            if pb_idx is None or pb_idx < 0:
+                continue
+            
+            # Convert pedalboard index to DA index
+            da_idx = getattr(self, '_param_pb_to_da', {}).get(pb_idx)
+            if da_idx is None:
+                names[enc] = f"P{pb_idx} ?"
+                continue
+            
+            da_info = da_params.get(da_idx)
+            if not da_info:
+                continue
+            
+            da_indices_for_encoders[enc] = da_idx
+            
+            # Use custom label if defined, otherwise DA param name
+            if enc < len(labels) and labels[enc]:
+                names[enc] = labels[enc]
+            else:
+                names[enc] = da_info['name']
+            
+            # Display value
+            val = da_info.get('value', 0.0)
+            values[enc] = f"{val:.2f}"
+        
+        self.state.insert_param_names = names
+        self.state.insert_param_values = values
+        
+        # Configure JS encoders to control the mapped DA params
+        slot = self.state.selected_insert_slot
+        self.nuendo_link.send_da_encoder_setup(slot, da_indices_for_encoders)
+        
+        page_name = page.get("name", "")
+        page_label = f" '{page_name}'" if page_name else ""
+        print(f"  ✓ Mapping page {page_idx + 1}{page_label} applied: {[n for n in names if n]}")
 
 
 # ─────────────────────────────────────────────

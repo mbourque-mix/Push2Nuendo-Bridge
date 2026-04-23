@@ -1,6 +1,6 @@
 // =============================================================================
 // Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
-// Version 1.0.2
+// Version 1.0.3
 //
 // Un seul bank zone de 8 canaux.
 // Banking via mNextBank/mPrevBank (CC 8/9).
@@ -15,7 +15,7 @@
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
 
-var JS_VERSION = '1.0.2';
+var JS_VERSION = '1.0.3';
 
 var midiremote_api = require('midiremote_api_v1');
 
@@ -125,6 +125,12 @@ bankNextBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToContro
 var bankPrevBtn = surface.makeButton(4, 20, 3, 2);
 bankPrevBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 9);
 
+// ── NUDGE NAVIGATION (shift by 1 track) ──
+var shiftRightBtn = surface.makeButton(8, 20, 3, 2);
+shiftRightBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 38);
+var shiftLeftBtn = surface.makeButton(12, 20, 3, 2);
+shiftLeftBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 39);
+
 // ── TRANSPORT ──
 var transportPlay = surface.makeButton(0, 22, 3, 2);
 transportPlay.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 50);
@@ -167,6 +173,15 @@ var bankZone = page.mHostAccess.mMixConsole.makeMixerBankZone()
 
 page.makeActionBinding(bankNextBtn.mSurfaceValue, bankZone.mAction.mNextBank);
 page.makeActionBinding(bankPrevBtn.mSurfaceValue, bankZone.mAction.mPrevBank);
+
+// Nudge by 1 track (mShiftLeft/mShiftRight — API 1.2+)
+try {
+    page.makeActionBinding(shiftRightBtn.mSurfaceValue, bankZone.mAction.mShiftRight);
+    page.makeActionBinding(shiftLeftBtn.mSurfaceValue, bankZone.mAction.mShiftLeft);
+    console.log('Bank shift (nudge ±1) OK');
+} catch(e) {
+    console.log('Bank shift not available: ' + e);
+}
 
 // Send index actif (0-7), changé par CC 46/47 ou CC 19 (set direct)
 var currentSendIndex = 0;
@@ -827,6 +842,11 @@ transportCycle.mSurfaceValue.mOnProcessValueChange = function(activeDevice, valu
     midiOutput_Loop.sendMidi(activeDevice, [0xB0, 53, value > 0.5 ? 127 : 0]);
 };
 
+// Feedback record → bridge (CC 73 = is_recording)
+transportRecord.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+    midiOutput_Loop.sendMidi(activeDevice, [0xB0, 73, value > 0.5 ? 127 : 0]);
+};
+
 // Tempo et position — TODO: trouver le bon chemin API
 // mTransport.mValue.mTempo et mTimeDisplay ne semblent pas exister
 
@@ -856,7 +876,7 @@ nameVar.mOnTitleChange = function(activeDevice, objectTitle, valueTitle) {
             midiOutput_Loop.sendMidi(activeDevice, msg);
             pendingColorForIndex = idx;
         }
-    } else if (scanCooldown <= 0) {
+    } else if (scanCooldown <= 0 && daBypassCooldown <= 0) {
         // Hors scan et hors cooldown : envoyer le nom pour auto-switch
         var selMsg = [0xF0, 0x00, 0x21, 0x09, 0x06];
         for (var c = 0; c < Math.min(objectTitle.length, 24); c++) {
@@ -901,11 +921,1075 @@ stopScanBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, 
 
 // ══════════════════════════════════════════════════
 // DIRECT ACCESS (API 1.2+ / Nuendo 14+)
-// Reserved for future use (volume calibration, track introspection, etc.)
+// Diagnostic: explore the MixConsole object tree
 // ══════════════════════════════════════════════════
 
+var daAvailable = false;
+var da = null;
+var daDiagDone = false;
+var daMapping = null;  // stored activeMapping from mOnActivate
+var daBypassCooldown = 0;  // Suppress DA insert callbacks after our own bypass
+var pluginListQueue = null;  // Plugin list send queue (used by mOnIdle)
+
+// CC 15 = trigger DA diagnostic dump
+var daDiagBtn = surface.makeButton(92, 22, 2, 2);
+daDiagBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 15);
+
 if (page.mHostAccess.makeDirectAccess) {
-    console.log('DirectAccess available (API 1.2+) — reserved for future features');
+    var hostMixConsole = page.mHostAccess.mMixConsole;
+    da = page.mHostAccess.makeDirectAccess(hostMixConsole);
+
+    // ── DirectAccess #2: Insert Effects (on selected track) ──
+    var daInsHostObj = page.mHostAccess.mTrackSelection.mMixerChannel.mInsertAndStripEffects;
+    var daInserts = page.mHostAccess.makeDirectAccess(daInsHostObj);
+    var daInsActive = false;
+    var daInsSlotCache = [];   // [{objectID, bypassTag, title, bypassed, hasPlugin}]
+    var daInsExplored = false;
+
+    page.mOnActivate = function(activeDevice, activeMapping) {
+        daMapping = activeMapping;
+        daAvailable = false;
+        daInsActive = false;
+        daInsExplored = false;
+        daInsSlotCache = [];
+        midiOutput_Loop.sendMidi(activeDevice, [0xB0, 68, 1]);
+        console.log('DirectAccess ready (lazy activation)');
+    };
+
+    page.mOnDeactivate = function(activeDevice, activeMapping) {
+        da.deactivate(activeMapping);
+        if (daInsActive) {
+            daInserts.deactivate(activeMapping);
+            daInsActive = false;
+        }
+        daMapping = null;
+        daAvailable = false;
+        daInsExplored = false;
+        daInsSlotCache = [];
+    };
+
+    // Send a log line to Python via SysEx 0x20
+    function daLog(context, text) {
+        var msg = [0xF0, 0x00, 0x21, 0x09, 0x20];
+        for (var c = 0; c < Math.min(text.length, 100); c++) {
+            var ch = text.charCodeAt(c) & 0x7F;
+            if (ch > 0) msg.push(ch);
+        }
+        msg.push(0xF7);
+        midiOutput_Loop.sendMidi(context, msg);
+    }
+
+    // Lazy DA activation — only activate when first needed
+    function ensureDA() {
+        if (!daMapping) return false;
+        if (!daAvailable) {
+            da.activate(daMapping);
+            daAvailable = true;
+            console.log('DirectAccess activated (lazy)');
+        }
+        return true;
+    }
+
+    daDiagBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (value < 0.5 || !daMapping || daDiagDone) return;
+        if (!ensureDA()) return;
+        daDiagDone = true;
+
+        try {
+            var m = daMapping;  // use stored activeMapping for all DA calls
+            var mixConsoleID = da.getBaseObjectID(m);
+            var childCount = da.getNumberOfChildObjects(m, mixConsoleID);
+
+            console.log('=== DA DIAGNOSTIC: MixConsole ===');
+            console.log('Base object ID: ' + mixConsoleID);
+            console.log('Children (tracks): ' + childCount);
+            daLog(activeDevice, '=== DA DIAGNOSTIC ===');
+            daLog(activeDevice, 'MixConsole ID: ' + mixConsoleID + ', Children: ' + childCount);
+
+            // Limit to first 16 tracks for readability
+            var maxTracks = Math.min(childCount, 16);
+            for (var i = 0; i < maxTracks; i++) {
+                var childID = da.getChildObjectID(m, mixConsoleID, i);
+                var title = da.getObjectTitle(m, childID);
+                var visible = da.isMixerChannelVisible(m, childID);
+                var position = da.getMixerChannelIndex(m, childID);
+
+                var line = 'Track ' + i + ': "' + title + '" ID=' + childID + ' pos=' + position + ' vis=' + visible;
+                console.log(line);
+                daLog(activeDevice, line);
+
+                // List parameters for the first 3 tracks only (verbose)
+                if (i < 3) {
+                    var paramCount = da.getNumberOfParameters(m, childID);
+                    daLog(activeDevice, '  Params (' + paramCount + '):');
+                    console.log('  Parameters (' + paramCount + '):');
+                    for (var p = 0; p < paramCount; p++) {
+                        var tag = da.getParameterTagByIndex(m, childID, p);
+                        var paramTitle = da.getParameterTitle(m, childID, tag, 30);
+                        var paramValue = da.getParameterProcessValue(m, childID, tag);
+                        var pLine = '    [' + p + '] tag=' + tag + ' "' + paramTitle + '" val=' + paramValue.toFixed(3);
+                        console.log(pLine);
+                        daLog(activeDevice, pLine);
+                    }
+                }
+
+                // Check API 1.3 features
+                if (da.getObjectTypeName) {
+                    var typeName = da.getObjectTypeName(m, childID);
+                    daLog(activeDevice, '  Type: ' + typeName);
+                    console.log('  Type: ' + typeName);
+                }
+            }
+
+            daLog(activeDevice, '=== END DIAGNOSTIC ===');
+            console.log('=== END DA DIAGNOSTIC ===');
+        } catch(e) {
+            console.log('DA Diagnostic error: ' + e);
+            daLog(activeDevice, 'ERROR: ' + e);
+        }
+    };
+
+    // ── DA Clear All Monitor (CC 66) ──
+    var daClearMonBtn = surface.makeButton(86, 22, 2, 2);
+    daClearMonBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 66);
+    daClearMonBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (value < 0.5 || !daMapping) return;
+        if (!ensureDA()) return;
+        try {
+            var m = daMapping;
+            var mixConsoleID = da.getBaseObjectID(m);
+            var childCount = da.getNumberOfChildObjects(m, mixConsoleID);
+            var cleared = 0;
+            for (var i = 0; i < childCount; i++) {
+                var childID = da.getChildObjectID(m, mixConsoleID, i);
+                da.setParameterProcessValue(m, childID, 4001, 0);  // tag 4001 = Monitor
+                cleared++;
+            }
+            // Notify Python: CC 68 val 2 = monitors cleared
+            midiOutput_Loop.sendMidi(activeDevice, [0xB0, 68, 2]);
+            console.log('DA: Cleared all monitors (' + cleared + ' tracks)');
+        } catch(e) {
+            console.log('DA Clear Monitor error: ' + e);
+            // Notify Python to fallback: CC 68 val 0
+            midiOutput_Loop.sendMidi(activeDevice, [0xB0, 68, 0]);
+        }
+    };
+
+    // ── DA Clear All Rec (CC 67) ──
+    var daClearRecBtn = surface.makeButton(89, 22, 2, 2);
+    daClearRecBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 67);
+    daClearRecBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (value < 0.5 || !daMapping) return;
+        if (!ensureDA()) return;
+        try {
+            var m = daMapping;
+            var mixConsoleID = da.getBaseObjectID(m);
+            var childCount = da.getNumberOfChildObjects(m, mixConsoleID);
+            var cleared = 0;
+            for (var i = 0; i < childCount; i++) {
+                var childID = da.getChildObjectID(m, mixConsoleID, i);
+                da.setParameterProcessValue(m, childID, 4002, 0);  // tag 4002 = Record Enable
+                cleared++;
+            }
+            // Notify Python: CC 68 val 3 = rec cleared
+            midiOutput_Loop.sendMidi(activeDevice, [0xB0, 68, 3]);
+            console.log('DA: Cleared all rec arms (' + cleared + ' tracks)');
+        } catch(e) {
+            console.log('DA Clear Rec error: ' + e);
+            midiOutput_Loop.sendMidi(activeDevice, [0xB0, 68, 0]);
+        }
+    };
+
+    // ── DA Toggle Mute/Solo/Mon/Rec on any track ──
+    // CC 17 = set target track index, CC 18 = execute toggle (0=Mute,1=Solo,2=Mon,3=Rec)
+    var daTargetTrack = 0;
+    var daTrackIdxBtn = surface.makeButton(80, 24, 2, 2);
+    daTrackIdxBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 17);
+    daTrackIdxBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        daTargetTrack = Math.round(value * 127);
+    };
+
+    var daToggleBtn = surface.makeButton(83, 24, 2, 2);
+    daToggleBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 18);
+    daToggleBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (!daMapping) return;
+        if (!ensureDA()) return;
+        var func = Math.round(value * 127);  // 0=Mute, 1=Solo, 2=Monitor, 3=Record
+        var tagMap = [1027, 1028, 4001, 4002];  // Mute, Solo, Monitor, Record Enable
+        if (func >= tagMap.length) return;
+        var tag = tagMap[func];
+        // daTargetTrack is the position (1-based, matching getMixerChannelIndex)
+        var targetPos = daTargetTrack + 1;  // Python track 0 = pos 1, track 1 = pos 2, etc.
+        
+        try {
+            var m = daMapping;
+            var mixConsoleID = da.getBaseObjectID(m);
+            var childCount = da.getNumberOfChildObjects(m, mixConsoleID);
+            
+            // Find child with matching position
+            for (var i = 0; i < childCount; i++) {
+                var childID = da.getChildObjectID(m, mixConsoleID, i);
+                var pos = da.getMixerChannelIndex(m, childID);
+                if (pos === targetPos) {
+                    var currentVal = da.getParameterProcessValue(m, childID, tag);
+                    var newVal = (currentVal > 0.5) ? 0 : 1;
+                    da.setParameterProcessValue(m, childID, tag, newVal);
+                    return;
+                }
+            }
+            console.log('DA Toggle: track pos ' + targetPos + ' not found');
+        } catch(e) {
+            console.log('DA Toggle error: ' + e);
+        }
+    };
+
+    console.log('DirectAccess diagnostic ready (Shift+Setup to trigger)');
+
+    // ══════════════════════════════════════════════
+    // DIRECT ACCESS — INSERT BYPASS (targeted)
+    // ══════════════════════════════════════════════
+    // Tree structure discovered by Phase 1 exploration:
+    //   Root (AudioChannel)
+    //     "Inserts" (Inserts) ← find this by typeName
+    //       "1" (Slot) ← bypass = tag 4102, plugin name = first child title
+    //       "2" (Slot)
+    //       ...
+    //       "16" (Slot)
+    //
+    // Bypass tag is ALWAYS 4102 on Slot objects.
+    // Plugin name comes from the Slot's first child (if present).
+
+    var SLOT_BYPASS_TAG = 4102;
+    var SLOT_ON_TAG = 4098;
+    var SLOT_EDIT_TAG = 4101;
+
+    function ensureDAInserts() {
+        if (!daMapping) return false;
+        if (!daInsActive) {
+            daInserts.activate(daMapping);
+            daInsActive = true;
+            console.log('DirectAccess Inserts activated (lazy)');
+        }
+        return true;
+    }
+
+    // CC 88 = trigger insert tree exploration from Python
+    var daInsExploreBtn = surface.makeButton(88, 22, 2, 2);
+    daInsExploreBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 88);
+    daInsExploreBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (value < 0.5 || !daMapping) return;
+        if (!ensureDAInserts()) return;
+        buildInsertCache(activeDevice, daMapping);
+    };
+
+    // CC 85 channel 8 (0xB7) = DA bypass command from Python
+    // Channel 8 avoids conflict with selButtons (CC 80-87 on channel 1)
+    var daBypassBtn = surface.makeButton(85, 22, 2, 2);
+    daBypassBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 85);
+    daBypassBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var raw = Math.round(value * 127);
+        if (raw < 0 || !daMapping) return;
+        if (!ensureDAInserts()) return;
+        var wantBypass = (raw >= 64);
+        var slotIdx = raw & 0x1F;
+        daBypassSlot(activeDevice, daMapping, slotIdx, wantBypass);
+    };
+
+    // CC 86 channel 8 (0xB7) = DA edit (open/close plugin UI) from Python
+    // Value = slot index (0-15)
+    var daEditBtn = surface.makeButton(86, 22, 2, 2);
+    daEditBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 86);
+    daEditBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var slotIdx = Math.round(value * 127);
+        if (slotIdx < 0 || !daMapping) return;
+        if (!ensureDAInserts()) return;
+        daEditSlot(activeDevice, daMapping, slotIdx);
+    };
+
+    function buildInsertCache(activeDevice, activeMapping) {
+        try {
+            var m = activeMapping;
+            var rootID = daInserts.getBaseObjectID(m);
+            if (rootID < 0) {
+                console.log('DA Inserts: No base object');
+                daLog(activeDevice, 'DA Inserts: rootID=-1');
+                return;
+            }
+
+            daInsSlotCache = [];
+            daInsExplored = false;
+
+            // Step 1: Find the "Inserts" container among root's children
+            var rootChildCount = daInserts.getNumberOfChildObjects(m, rootID);
+            var insertsContainerID = -1;
+
+            for (var i = 0; i < rootChildCount; i++) {
+                var childID = daInserts.getChildObjectID(m, rootID, i);
+                var typeName = '';
+                if (daInserts.getObjectTypeName) {
+                    typeName = daInserts.getObjectTypeName(m, childID);
+                }
+                if (typeName === 'Inserts') {
+                    insertsContainerID = childID;
+                    break;
+                }
+            }
+
+            if (insertsContainerID < 0) {
+                console.log('DA Inserts: "Inserts" container not found');
+                daLog(activeDevice, 'DA Inserts: container not found');
+                return;
+            }
+
+            // Step 2: Iterate the 16 Slot children
+            var slotCount = daInserts.getNumberOfChildObjects(m, insertsContainerID);
+            console.log('DA Inserts: Found ' + slotCount + ' slots');
+
+            for (var s = 0; s < slotCount; s++) {
+                var slotID = daInserts.getChildObjectID(m, insertsContainerID, s);
+                var slotTitle = daInserts.getObjectTitle(m, slotID);  // "1", "2", etc.
+
+                // Read bypass state (tag 4102) and On state (tag 4098)
+                var bypassed = (daInserts.getParameterProcessValue(m, slotID, SLOT_BYPASS_TAG) > 0.5);
+                var isOn = (daInserts.getParameterProcessValue(m, slotID, SLOT_ON_TAG) > 0.5);
+
+                // Get plugin name from the Slot's first child (if any)
+                var pluginName = '';
+                var pluginObjID = -1;
+                var pluginChildCount = daInserts.getNumberOfChildObjects(m, slotID);
+                if (pluginChildCount > 0) {
+                    pluginObjID = daInserts.getChildObjectID(m, slotID, 0);
+                    pluginName = daInserts.getObjectTitle(m, pluginObjID);
+                }
+
+                daInsSlotCache.push({
+                    objectID: slotID,
+                    pluginObjectID: pluginObjID,
+                    bypassTag: SLOT_BYPASS_TAG,
+                    title: pluginName,
+                    bypassed: bypassed,
+                    hasPlugin: (pluginName.length > 0 && isOn > 0)
+                });
+
+                if (pluginName) {
+                    console.log('  Slot ' + s + ': "' + pluginName + '" ' + (bypassed ? 'BYPASS' : 'ACTIVE'));
+                }
+            }
+
+            daInsExplored = true;
+            console.log('DA Inserts: ' + daInsSlotCache.length + ' slots cached');
+
+            // Send each cached slot to Python via SysEx 0x24
+            // Format: [F0 00 24 slotIdx tagLo tagHi bypassed ...title_chars F7]
+            for (var s = 0; s < daInsSlotCache.length; s++) {
+                var entry = daInsSlotCache[s];
+                var tagLo = entry.bypassTag & 0x7F;
+                var tagHi = (entry.bypassTag >> 7) & 0x7F;
+                var msg = [0xF0, 0x00, 0x24, s & 0x7F, tagLo, tagHi, entry.bypassed ? 1 : 0];
+                for (var c = 0; c < entry.title.length && c < 24; c++) {
+                    msg.push(entry.title.charCodeAt(c) & 0x7F);
+                }
+                msg.push(0xF7);
+                midiOutput_Loop.sendMidi(activeDevice, msg);
+            }
+
+            // Signal exploration complete: SysEx 0x25
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x25, daInsSlotCache.length & 0x7F, 0xF7]);
+
+        } catch(e) {
+            console.log('DA Inserts build error: ' + e);
+            daLog(activeDevice, 'DA Inserts ERROR: ' + e);
+        }
+    }
+
+    // ── DA Bypass: set bypass on a cached insert slot ──
+    function daBypassSlot(activeDevice, activeMapping, slotIdx, wantBypass) {
+        if (!daInsExplored || slotIdx >= daInsSlotCache.length) {
+            console.log('DA Bypass: cache not ready or slot ' + slotIdx + ' out of range');
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x26, slotIdx & 0x7F, 0x00, 0xF7]);
+            return;
+        }
+        try {
+            var entry = daInsSlotCache[slotIdx];
+            var newVal = wantBypass ? 1.0 : 0.0;
+            daBypassCooldown = 10;  // Suppress callbacks for ~200ms
+            daInserts.setParameterProcessValue(activeMapping, entry.objectID, entry.bypassTag, newVal);
+            entry.bypassed = wantBypass;
+            console.log('DA Bypass slot ' + slotIdx + ' (' + entry.title + '): ' + (wantBypass ? 'BYPASS' : 'ACTIVE'));
+
+            // Confirm to Python: SysEx 0x26 [slotIdx, success=1, bypassed]
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x26, slotIdx & 0x7F, 0x01, wantBypass ? 1 : 0, 0xF7]);
+        } catch(e) {
+            console.log('DA Bypass error: ' + e);
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x26, slotIdx & 0x7F, 0x00, 0xF7]);
+        }
+    }
+
+    // ── DA Edit: toggle plugin UI on a cached insert slot ──
+    function daEditSlot(activeDevice, activeMapping, slotIdx) {
+        if (!daInsExplored || slotIdx >= daInsSlotCache.length) {
+            console.log('DA Edit: cache not ready or slot ' + slotIdx + ' out of range');
+            // Notify Python to fall back: SysEx 0x28 [slotIdx, success=0]
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x28, slotIdx & 0x7F, 0x00, 0xF7]);
+            return;
+        }
+        try {
+            var entry = daInsSlotCache[slotIdx];
+            // Read current Edit value and toggle it
+            var currentVal = daInserts.getParameterProcessValue(activeMapping, entry.objectID, SLOT_EDIT_TAG);
+            var newVal = (currentVal > 0.5) ? 0.0 : 1.0;
+            daBypassCooldown = 10;  // Suppress callbacks
+            daInserts.setParameterProcessValue(activeMapping, entry.objectID, SLOT_EDIT_TAG, newVal);
+            console.log('DA Edit slot ' + slotIdx + ' (' + entry.title + '): ' + (newVal > 0.5 ? 'OPEN' : 'CLOSE'));
+
+            // Confirm to Python: SysEx 0x28 [slotIdx, success=1]
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x28, slotIdx & 0x7F, 0x01, 0xF7]);
+        } catch(e) {
+            console.log('DA Edit error: ' + e);
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x28, slotIdx & 0x7F, 0x00, 0xF7]);
+        }
+    }
+
+    // CC 87 channel 8 (0xB7) = enumerate plugin parameters for a slot
+    // Value = slot index (0-15)
+    var daEnumBtn = surface.makeButton(87, 22, 2, 2);
+    daEnumBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 87);
+    daEnumBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var slotIdx = Math.round(value * 127);
+        if (slotIdx < 0 || !daMapping) return;
+        if (!ensureDAInserts()) return;
+        daEnumPluginParams(activeDevice, daMapping, slotIdx);
+    };
+
+    // ── DA Enumerate Plugin Parameters ──
+    // Iterates all parameters of the plugin child object in a given slot.
+    // Sends each param to Python via SysEx 0x29, then completion via 0x2A.
+    function daEnumPluginParams(activeDevice, activeMapping, slotIdx) {
+        if (!daInsExplored || slotIdx >= daInsSlotCache.length) {
+            console.log('DA Enum: cache not ready or slot ' + slotIdx + ' out of range');
+            return;
+        }
+        var entry = daInsSlotCache[slotIdx];
+        if (entry.pluginObjectID < 0) {
+            console.log('DA Enum: no plugin in slot ' + slotIdx);
+            // Send completion with 0 params
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, slotIdx & 0x7F, 0, 0, 0xF7]);
+            return;
+        }
+
+        try {
+            var m = activeMapping;
+            var pluginID = entry.pluginObjectID;
+            var paramCount = daInserts.getNumberOfParameters(m, pluginID);
+
+            // Cap to avoid flooding — most plugins have <1000 real params
+            var maxParams = Math.min(paramCount, 1024);
+            console.log('DA Enum slot ' + slotIdx + ' (' + entry.title + '): ' + paramCount + ' params (sending ' + maxParams + ')');
+
+            for (var i = 0; i < maxParams; i++) {
+                var tag = daInserts.getParameterTagByIndex(m, pluginID, i);
+                var title = daInserts.getParameterTitle(m, pluginID, tag, 64);
+                var procVal = daInserts.getParameterProcessValue(m, pluginID, tag);
+                var displayVal = '';
+                if (daInserts.getParameterDisplayValue) {
+                    displayVal = daInserts.getParameterDisplayValue(m, pluginID, tag) || '';
+                    var units = daInserts.getParameterDisplayUnits ? daInserts.getParameterDisplayUnits(m, pluginID, tag) : '';
+                    if (units) displayVal += ' ' + units;
+                }
+
+                // SysEx 0x29: [F0 00 29 slotIdx idxLo idxHi val127 tagB0 tagB1 tagB2 tagB3 ...title F7]
+                var idxLo = i & 0x7F;
+                var idxHi = (i >> 7) & 0x7F;
+                var val127 = Math.round(procVal * 127) & 0x7F;
+                // Encode tag as 4 x 7-bit bytes (supports up to 28-bit tags)
+                var tagB0 = tag & 0x7F;
+                var tagB1 = (tag >> 7) & 0x7F;
+                var tagB2 = (tag >> 14) & 0x7F;
+                var tagB3 = (tag >> 21) & 0x7F;
+                var msg = [0xF0, 0x00, 0x29, slotIdx & 0x7F, idxLo, idxHi, val127, tagB0, tagB1, tagB2, tagB3];
+                // Append title (truncated to 20 chars)
+                for (var c = 0; c < title.length && c < 20; c++) {
+                    msg.push(title.charCodeAt(c) & 0x7F);
+                }
+                msg.push(0xF7);
+                midiOutput_Loop.sendMidi(activeDevice, msg);
+            }
+
+            // SysEx 0x2A: enumeration complete [F0 00 2A slotIdx countLo countHi F7]
+            var cntLo = maxParams & 0x7F;
+            var cntHi = (maxParams >> 7) & 0x7F;
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, slotIdx & 0x7F, cntLo, cntHi, 0xF7]);
+
+        } catch(e) {
+            console.log('DA Enum error: ' + e);
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, slotIdx & 0x7F, 0, 0, 0xF7]);
+        }
+    }
+
+    // ══════════════════════════════════════════════
+    // DA PLUGIN MANAGER — explore collections
+    // CC 84 channel 8 = explore plugin collections for a slot
+    // ══════════════════════════════════════════════
+
+    var daPluginMgrBtn = surface.makeButton(84, 22, 2, 2);
+    daPluginMgrBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 84);
+    daPluginMgrBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var slotIdx = Math.round(value * 127);
+        if (slotIdx < 0 || !daMapping) return;
+        if (!ensureDAInserts()) return;
+        daExplorePluginManager(activeDevice, daMapping, slotIdx);
+    };
+
+    function daExplorePluginManager(activeDevice, activeMapping, slotIdx) {
+        if (!daInsExplored || slotIdx >= daInsSlotCache.length) {
+            console.log('DA PluginMgr: cache not ready or slot ' + slotIdx + ' out of range');
+            return;
+        }
+        var entry = daInsSlotCache[slotIdx];
+        var m = activeMapping;
+
+        try {
+            if (!daInserts.mPluginManager) {
+                console.log('DA PluginMgr: mPluginManager not available (API < 1.3?)');
+                daLog(activeDevice, 'PluginMgr: NOT AVAILABLE');
+                return;
+            }
+
+            var slotID = entry.objectID;
+            daLog(activeDevice, '=== PLUGIN MANAGER DEEP EXPLORE ===');
+            daLog(activeDevice, 'Slot ' + slotIdx + ' "' + entry.title + '" objID=' + slotID);
+
+            // ── Step 1: Explore mPluginManager methods ──
+            var pmMethods = '';
+            for (var key in daInserts.mPluginManager) {
+                var typ = typeof daInserts.mPluginManager[key];
+                pmMethods += key + '(' + typ + '), ';
+            }
+            daLog(activeDevice, 'PM methods: ' + pmMethods.substring(0, 90));
+            if (pmMethods.length > 90) {
+                daLog(activeDevice, 'PM methods+: ' + pmMethods.substring(90, 180));
+            }
+
+            // ── Step 2: Check if setActivePluginCollection exists ──
+            if (typeof daInserts.mPluginManager.setActivePluginCollection === 'function') {
+                daLog(activeDevice, 'setActivePluginCollection: EXISTS');
+            } else {
+                daLog(activeDevice, 'setActivePluginCollection: NOT FOUND');
+            }
+
+            // ── Step 3: Collection count and active index ──
+            var collCount = daInserts.mPluginManager.getNumberOfPluginCollections(m, slotID);
+            var activeCollIdx = daInserts.mPluginManager.getIndexOfActivePluginCollection(m, slotID);
+            daLog(activeDevice, 'Collections: ' + collCount + ', active: ' + activeCollIdx);
+
+            // ── Step 4: Explore each collection ──
+            for (var ci = 0; ci < collCount; ci++) {
+                var coll = daInserts.mPluginManager.getPluginCollectionByIndex(m, slotID, ci);
+                if (!coll) {
+                    daLog(activeDevice, 'Coll ' + ci + ': null');
+                    continue;
+                }
+
+                // Collection-level properties
+                var collProps = '';
+                for (var key in coll) {
+                    var val = '';
+                    try {
+                        var v = coll[key];
+                        if (typeof v === 'function') val = '[fn]';
+                        else if (Array.isArray(v)) val = '[arr:' + v.length + ']';
+                        else if (typeof v === 'object' && v !== null) val = '[obj]';
+                        else val = String(v).substring(0, 30);
+                    } catch(pe) { val = '[err]'; }
+                    collProps += key + '=' + val + ', ';
+                }
+                var collName = coll.mName || ('Coll ' + ci);
+                var entryCount = coll.mEntries ? coll.mEntries.length : 0;
+                var marker = (ci === activeCollIdx) ? ' [ACTIVE]' : '';
+                daLog(activeDevice, 'Coll ' + ci + ': "' + collName + '" (' + entryCount + ')' + marker);
+                daLog(activeDevice, '  CollProps: ' + collProps.substring(0, 90));
+
+                // ── Step 5: Deep dump of first entry properties ──
+                if (entryCount > 0) {
+                    var fe = coll.mEntries[0];
+                    daLog(activeDevice, '  --- Entry[0] deep dump ---');
+                    for (var key in fe) {
+                        var val = '';
+                        try {
+                            var v = fe[key];
+                            if (typeof v === 'function') val = '[function]';
+                            else if (typeof v === 'object' && v !== null) {
+                                // Recurse one level into objects
+                                var subKeys = '';
+                                for (var sk in v) subKeys += sk + ',';
+                                val = '{' + subKeys.substring(0, 50) + '}';
+                            } else {
+                                val = String(v).substring(0, 60);
+                            }
+                        } catch(pe) { val = '[error]'; }
+                        daLog(activeDevice, '    ' + key + ' = ' + val);
+                    }
+
+                    // Show first 5 entries with ALL known fields
+                    var showCount = Math.min(entryCount, 5);
+                    for (var ei = 0; ei < showCount; ei++) {
+                        var pe = coll.mEntries[ei];
+                        var pName = pe.mPluginName || '?';
+                        var pVendor = pe.mPluginVendor || '';
+                        var pUID = pe.mPluginUID || '';
+                        var pVer = pe.mPluginVersion || '';
+                        // Try undocumented fields
+                        var pCat = pe.mPluginCategory || pe.mCategory || pe.mSubCategory || pe.mPluginSubCategory || '';
+                        var pType = pe.mPluginType || pe.mType || '';
+                        var pMedia = pe.mMediaType || pe.mPluginMediaType || '';
+                        var line = '  [' + ei + '] "' + pName + '" vendor="' + pVendor + '"';
+                        line += ' ver=' + pVer;
+                        if (pCat) line += ' cat=' + pCat;
+                        if (pType) line += ' type=' + pType;
+                        if (pMedia) line += ' media=' + pMedia;
+                        line += ' uid=' + pUID.substring(0, 20);
+                        daLog(activeDevice, line);
+                    }
+                    if (entryCount > 5) {
+                        daLog(activeDevice, '  ... +' + (entryCount - 5) + ' more');
+                    }
+                }
+            }
+
+            // ── Step 6: Test trySetSlotPlugin existence ──
+            if (typeof daInserts.mPluginManager.trySetSlotPlugin === 'function') {
+                daLog(activeDevice, 'trySetSlotPlugin: EXISTS');
+            } else {
+                daLog(activeDevice, 'trySetSlotPlugin: NOT FOUND');
+            }
+
+            // ── Step 7: Test other potential methods ──
+            var testMethods = ['removeSlotPlugin', 'getSlotPlugin', 'getPluginInfo',
+                               'getNumberOfPluginCategories', 'getPluginCategoryByIndex',
+                               'setActivePluginCollectionByIndex'];
+            for (var ti = 0; ti < testMethods.length; ti++) {
+                if (typeof daInserts.mPluginManager[testMethods[ti]] === 'function') {
+                    daLog(activeDevice, testMethods[ti] + ': EXISTS');
+                }
+            }
+
+            daLog(activeDevice, '=== END DEEP EXPLORE ===');
+
+        } catch(e) {
+            console.log('DA PluginMgr error: ' + e);
+            daLog(activeDevice, 'PluginMgr ERROR: ' + e);
+        }
+    }
+
+    // ══════════════════════════════════════════════
+    // DA PLUGIN LIST — send plugin collection entries to Python
+    // CC 83 channel 8 = request plugin list for a collection index
+    // Entries queued and sent via mOnIdle to avoid blocking
+    // ══════════════════════════════════════════════
+
+    var daPluginListBtn = surface.makeButton(83, 22, 2, 2);
+    daPluginListBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 83);
+    daPluginListBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var collIdx = Math.round(value * 127);
+        if (!daMapping || !ensureDAInserts()) return;
+        if (!daInsExplored || daInsSlotCache.length === 0) return;
+
+        var m = daMapping;
+        var slotID = daInsSlotCache[0].objectID;  // Any valid slot works
+
+        if (!daInserts.mPluginManager) {
+            console.log('DA PluginList: mPluginManager not available');
+            return;
+        }
+
+        var collCount = daInserts.mPluginManager.getNumberOfPluginCollections(m, slotID);
+        if (collIdx >= collCount) collIdx = collCount - 1;
+        if (collIdx < 0) collIdx = 0;
+
+        var coll = daInserts.mPluginManager.getPluginCollectionByIndex(m, slotID, collIdx);
+        if (!coll || !coll.mEntries) {
+            console.log('DA PluginList: collection ' + collIdx + ' is empty');
+            return;
+        }
+
+        pluginListQueue = {
+            coll: coll,
+            collIdx: collIdx,
+            collCount: collCount,
+            sendIdx: 0,
+            total: coll.mEntries.length,
+            collName: coll.mName || ''
+        };
+        console.log('DA PluginList: queued ' + coll.mEntries.length + ' entries from "' + (coll.mName || '?') + '"');
+    };
+
+    console.log('DA Plugin List ready (CC 83 ch8)');
+
+    // ══════════════════════════════════════════════
+    // DA COLLECTION INFO — send all collection names and entry counts
+    // CC 88 channel 8 = request collection info
+    // Response: SysEx 0x2F per collection, then 0x30 completion
+    // ══════════════════════════════════════════════
+
+    var daCollInfoBtn = surface.makeButton(88, 22, 2, 2);
+    daCollInfoBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 88);
+    daCollInfoBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (!daMapping || !ensureDAInserts()) return;
+        if (!daInsExplored || daInsSlotCache.length === 0) return;
+        if (!daInserts.mPluginManager) return;
+
+        var m = daMapping;
+        var slotID = daInsSlotCache[0].objectID;
+        var collCount = daInserts.mPluginManager.getNumberOfPluginCollections(m, slotID);
+
+        for (var ci = 0; ci < collCount; ci++) {
+            try {
+                var coll = daInserts.mPluginManager.getPluginCollectionByIndex(m, slotID, ci);
+                var collName = (coll && coll.mName) ? coll.mName : ('Collection ' + ci);
+                var entryCount = (coll && coll.mEntries) ? coll.mEntries.length : 0;
+                var cntLo = entryCount & 0x7F;
+                var cntHi = (entryCount >> 7) & 0x7F;
+                // SysEx 0x2F: [F0 00 2F collIdx collCount cntLo cntHi ...name F7]
+                var msg = [0xF0, 0x00, 0x2F, ci & 0x7F, collCount & 0x7F, cntLo, cntHi];
+                for (var c = 0; c < collName.length && c < 30; c++) {
+                    msg.push(collName.charCodeAt(c) & 0x7F);
+                }
+                msg.push(0xF7);
+                midiOutput_Loop.sendMidi(activeDevice, msg);
+            } catch(e) {
+                console.log('DA CollInfo error at ' + ci + ': ' + e);
+            }
+        }
+        console.log('DA CollInfo: sent ' + collCount + ' collections');
+    };
+
+    console.log('DA Collection Info ready (CC 88 ch8)');
+
+    // ══════════════════════════════════════════════
+    // DA PLUGIN LOAD — load a plugin into an insert slot
+    // CC 82 ch8 = set target slot
+    // CC 81 ch8 = set entry index low bits
+    // CC 80 ch8 = set entry index high bits + collection index → trigger load
+    // ══════════════════════════════════════════════
+
+    var daLoadSlot = -1;
+    var daLoadEntryLo = 0;
+
+    var daLoadSlotBtn = surface.makeButton(82, 24, 2, 2);
+    daLoadSlotBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 82);
+    daLoadSlotBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        daLoadSlot = Math.round(value * 127);
+    };
+
+    var daLoadEntryLoBtn = surface.makeButton(81, 24, 2, 2);
+    daLoadEntryLoBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 81);
+    daLoadEntryLoBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        daLoadEntryLo = Math.round(value * 127);
+    };
+
+    var daLoadTriggerBtn = surface.makeButton(80, 24, 2, 2);
+    daLoadTriggerBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 80);
+    daLoadTriggerBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var raw = Math.round(value * 127);
+        var entryHi = raw & 0x0F;
+        var collIdx = (raw >> 4) & 0x07;
+        var entryIndex = daLoadEntryLo | (entryHi << 7);
+
+        if (daLoadSlot < 0 || !daMapping || !ensureDAInserts()) {
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
+            return;
+        }
+        if (!daInsExplored || daInsSlotCache.length === 0) {
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
+            return;
+        }
+
+        try {
+            var m = daMapping;
+            var slotID = daInsSlotCache[0].objectID;  // Any valid slot for API call
+            var targetSlotID = -1;
+
+            // Find the target slot's objectID
+            if (daLoadSlot < daInsSlotCache.length) {
+                targetSlotID = daInsSlotCache[daLoadSlot].objectID;
+            } else {
+                console.log('DA Load: slot ' + daLoadSlot + ' not in cache');
+                midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
+                return;
+            }
+
+            // Get the collection and entry
+            var collCount = daInserts.mPluginManager.getNumberOfPluginCollections(m, slotID);
+            if (collIdx >= collCount) collIdx = collCount - 1;
+            var coll = daInserts.mPluginManager.getPluginCollectionByIndex(m, slotID, collIdx);
+            if (!coll || !coll.mEntries || entryIndex >= coll.mEntries.length) {
+                console.log('DA Load: invalid entry ' + entryIndex + ' in coll ' + collIdx);
+                midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
+                return;
+            }
+
+            var pluginUID = coll.mEntries[entryIndex].mPluginUID;
+            var pluginName = coll.mEntries[entryIndex].mPluginName || '?';
+            console.log('DA Load: "' + pluginName + '" (UID=' + pluginUID.substring(0, 16) + '...) into slot ' + daLoadSlot);
+
+            daBypassCooldown = 20;  // Suppress callbacks during load
+            daInserts.mPluginManager.trySetSlotPlugin(m, targetSlotID, pluginUID, true);
+
+            // Success — send result
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x01, 0xF7]);
+            console.log('DA Load: trySetSlotPlugin called OK');
+
+            // Invalidate insert cache — it will be rebuilt on next exploration
+            daInsExplored = false;
+            daInsSlotCache = [];
+
+        } catch(e) {
+            console.log('DA Load error: ' + e);
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
+        }
+    };
+
+    console.log('DA Plugin Load ready (CC 80-82 ch8)');
+
+    // ══════════════════════════════════════════════
+    // DA PLUGIN CLEAR — remove plugin from a slot
+    // CC 79 channel 8 = try multiple strategies to clear a slot
+    // ══════════════════════════════════════════════
+
+    var daClearSlotBtn = surface.makeButton(79, 24, 2, 2);
+    daClearSlotBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 79);
+    daClearSlotBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var slotIdx = Math.round(value * 127);
+        if (!daMapping || !ensureDAInserts()) {
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, slotIdx & 0x7F, 0x00, 0xF7]);
+            return;
+        }
+        if (!daInsExplored || slotIdx >= daInsSlotCache.length) {
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, slotIdx & 0x7F, 0x00, 0xF7]);
+            return;
+        }
+
+        var m = daMapping;
+        var targetSlotID = daInsSlotCache[slotIdx].objectID;
+        var pluginBefore = daInsSlotCache[slotIdx].title || '(empty)';
+        daLog(activeDevice, '=== CLEAR SLOT ' + slotIdx + ' ===');
+        daLog(activeDevice, 'Plugin: "' + pluginBefore + '" objID=' + targetSlotID);
+
+        // Check children before
+        var childsBefore = daInserts.getNumberOfChildObjects(m, targetSlotID);
+        daLog(activeDevice, 'Children before: ' + childsBefore);
+
+        daBypassCooldown = 20;
+        var strategies = [
+            { name: 'zero UID 32', uid: '00000000000000000000000000000000' },
+            { name: 'zero UID 16', uid: '0000000000000000' },
+            { name: 'empty string', uid: '' }
+        ];
+
+        var cleared = false;
+        for (var si = 0; si < strategies.length; si++) {
+            var strat = strategies[si];
+            try {
+                daLog(activeDevice, 'Try: ' + strat.name + ' uid="' + strat.uid + '"');
+                daInserts.mPluginManager.trySetSlotPlugin(m, targetSlotID, strat.uid, true);
+
+                // Check if children changed
+                var childsAfter = daInserts.getNumberOfChildObjects(m, targetSlotID);
+                daLog(activeDevice, 'Children after: ' + childsAfter);
+
+                if (childsAfter < childsBefore) {
+                    daLog(activeDevice, 'SUCCESS: "' + strat.name + '" cleared the slot');
+                    cleared = true;
+                    break;
+                } else {
+                    daLog(activeDevice, 'No change with "' + strat.name + '"');
+                }
+            } catch(e) {
+                daLog(activeDevice, 'Error with "' + strat.name + '": ' + e);
+            }
+        }
+
+        if (cleared) {
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, slotIdx & 0x7F, 0x01, 0xF7]);
+            daInsExplored = false;
+            daInsSlotCache = [];
+        } else {
+            daLog(activeDevice, 'All strategies failed — slot not cleared');
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, slotIdx & 0x7F, 0x00, 0xF7]);
+        }
+        daLog(activeDevice, '=== END CLEAR ===');
+    };
+
+    console.log('DA Plugin Clear ready (CC 79 ch8)');
+
+    // ══════════════════════════════════════════════
+    // DA ENCODER CONTROL — mapped parameter read/write
+    // Protocol on channel 9 (API ch 8, MIDI 0xB8):
+    //   CC 0:    Set target slot index
+    //   CC 1-8:  Set DA paramIdx (low 7 bits) for encoders 0-7
+    //   CC 9-16: Set DA paramIdx (high 7 bits) for encoders 0-7
+    //   CC 20-27: Relative encoder input (signed bit)
+    // ══════════════════════════════════════════════
+
+    var daEncSlot = -1;
+    var daEncParamTag = [0, 0, 0, 0, 0, 0, 0, 0];  // DA param tags for each encoder
+    var daEncParamIdx = [0, 0, 0, 0, 0, 0, 0, 0];  // DA param indices for tag lookup
+
+    // CC 0 ch9: set target slot
+    var daEncSlotBtn = surface.makeButton(0, 100, 2, 2);
+    daEncSlotBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 0);
+    daEncSlotBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        daEncSlot = Math.round(value * 127);
+    };
+
+    // CC 1-8 ch9: param index low bits, CC 9-16 ch9: param index high bits
+    for (var ei = 0; ei < 8; ei++) {
+        // Low bits
+        var loBtn = surface.makeButton(1 + ei, 100, 2, 2);
+        loBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 1 + ei);
+        loBtn.mSurfaceValue.mOnProcessValueChange = (function(idx) {
+            return function(activeDevice, value, diff) {
+                var lo = Math.round(value * 127);
+                daEncParamIdx[idx] = (daEncParamIdx[idx] & 0x3F80) | lo;
+            };
+        })(ei);
+        // High bits
+        var hiBtn = surface.makeButton(9 + ei, 100, 2, 2);
+        hiBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 9 + ei);
+        hiBtn.mSurfaceValue.mOnProcessValueChange = (function(idx) {
+            return function(activeDevice, value, diff) {
+                var hi = Math.round(value * 127);
+                daEncParamIdx[idx] = (daEncParamIdx[idx] & 0x7F) | (hi << 7);
+                // Once high bits received, resolve the DA tag and send display value
+                if (daEncSlot >= 0 && daEncSlot < daInsSlotCache.length) {
+                    var entry = daInsSlotCache[daEncSlot];
+                    if (entry.pluginObjectID >= 0 && daMapping) {
+                        try {
+                            var m = daMapping;
+                            var paramIdx = daEncParamIdx[idx];
+                            var tag = daInserts.getParameterTagByIndex(m, entry.pluginObjectID, paramIdx);
+                            daEncParamTag[idx] = tag;
+                            // Read and send current display value
+                            var procVal = daInserts.getParameterProcessValue(m, entry.pluginObjectID, tag);
+                            var val127 = Math.round(procVal * 127) & 0x7F;
+                            var displayStr = '';
+                            if (daInserts.getParameterDisplayValue) {
+                                displayStr = daInserts.getParameterDisplayValue(m, entry.pluginObjectID, tag) || '';
+                                var units = daInserts.getParameterDisplayUnits ? daInserts.getParameterDisplayUnits(m, entry.pluginObjectID, tag) : '';
+                                if (units && displayStr.indexOf(units) < 0) displayStr += ' ' + units;
+                            }
+                            var msg = [0xF0, 0x00, 0x2B, idx & 0x7F, val127];
+                            for (var c = 0; c < displayStr.length && c < 16; c++) {
+                                msg.push(displayStr.charCodeAt(c) & 0x7F);
+                            }
+                            msg.push(0xF7);
+                            midiOutput_Loop.sendMidi(activeDevice, msg);
+                        } catch(e) {
+                            daEncParamTag[idx] = 0;
+                        }
+                    }
+                }
+            };
+        })(ei);
+    }
+
+    // CC 20-27 ch9: relative encoder input
+    // Uses buttons (not knobs) to avoid surface value accumulation/boundary issues.
+    // Python sends CC=0 (reset) before each delta to ensure value always changes.
+    var DA_ENC_STEP = 0.0075;  // Step size per encoder notch (~1/133)
+    for (var ri = 0; ri < 8; ri++) {
+        var relBtn = surface.makeButton(20 + ri, 100, 2, 2);
+        relBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop)
+            .bindToControlChange(8, 20 + ri);
+        relBtn.mSurfaceValue.mOnProcessValueChange = (function(idx) {
+            return function(activeDevice, value, diff) {
+                // Decode raw CC value (0-127)
+                var raw = Math.round(value * 127);
+                if (raw === 0) return;  // Ignore reset pulse
+
+                if (daEncSlot < 0 || !daMapping || !daInsExplored) return;
+                if (daEncSlot >= daInsSlotCache.length) return;
+                var entry = daInsSlotCache[daEncSlot];
+                if (entry.pluginObjectID < 0) return;
+                var tag = daEncParamTag[idx];
+                if (!tag) return;
+
+                // Decode relative signed bit: 1-63 = positive, 65-127 = negative
+                var delta;
+                if (raw >= 1 && raw <= 63) {
+                    delta = raw * DA_ENC_STEP;
+                } else if (raw >= 65 && raw <= 127) {
+                    delta = -(raw - 64) * DA_ENC_STEP;
+                } else {
+                    return;
+                }
+
+                try {
+                    var m = daMapping;
+                    var pluginID = entry.pluginObjectID;
+                    var current = daInserts.getParameterProcessValue(m, pluginID, tag);
+                    var newVal = Math.max(0.0, Math.min(1.0, current + delta));
+                    daBypassCooldown = 5;
+                    daInserts.setParameterProcessValue(m, pluginID, tag, newVal);
+
+                    // Send feedback to Python: SysEx 0x2B
+                    var val127 = Math.round(newVal * 127) & 0x7F;
+                    var displayStr = '';
+                    if (daInserts.getParameterDisplayValue) {
+                        displayStr = daInserts.getParameterDisplayValue(m, pluginID, tag) || '';
+                        var units = daInserts.getParameterDisplayUnits ? daInserts.getParameterDisplayUnits(m, pluginID, tag) : '';
+                        if (units && displayStr.indexOf(units) < 0) displayStr += ' ' + units;
+                    }
+                    var msg = [0xF0, 0x00, 0x2B, idx & 0x7F, val127];
+                    for (var c = 0; c < displayStr.length && c < 16; c++) {
+                        msg.push(displayStr.charCodeAt(c) & 0x7F);
+                    }
+                    msg.push(0xF7);
+                    midiOutput_Loop.sendMidi(activeDevice, msg);
+                } catch(e) {}
+            };
+        })(ri);
+    }
+
+    console.log('DA Encoder control ready (ch9)');
+
+    // ── DA Callbacks ──
+    // NOTE: mOnObjectChange fires during viewer navigation, parameter changes, etc.
+    // The Slot objectIDs and bypass tags don't change during these events.
+    // Only mOnObjectWillBeRemoved signals actual structural changes (plugin removed).
+    // So we DON'T invalidate the cache on mOnObjectChange — it would break
+    // bypass after entering/leaving the Edit page.
+    daInserts.mOnObjectChange = function(activeDevice, activeMapping, objectID) {
+        // Log only — don't clear the cache
+    };
+
+    daInserts.mOnParameterChange = function(activeDevice, activeMapping, objectID, parameterTag) {
+        if (daBypassCooldown > 0) return;  // Suppress echo from our own bypass
+        // Only care about bypass changes on cached slots
+        if (parameterTag !== SLOT_BYPASS_TAG) return;
+        for (var i = 0; i < daInsSlotCache.length; i++) {
+            if (daInsSlotCache[i].objectID === objectID) {
+                var newVal = daInserts.getParameterProcessValue(activeMapping, objectID, parameterTag);
+                var wasBypassed = daInsSlotCache[i].bypassed;
+                daInsSlotCache[i].bypassed = (newVal > 0.5);
+                if (wasBypassed !== daInsSlotCache[i].bypassed) {
+                    midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x13, i & 0x7F, daInsSlotCache[i].bypassed ? 1 : 0, 0xF7]);
+                    console.log('DA: bypass changed slot ' + i + ' (' + daInsSlotCache[i].title + '): ' + (daInsSlotCache[i].bypassed ? 'BYPASS' : 'ACTIVE'));
+                }
+                return;
+            }
+        }
+    };
+
+    daInserts.mOnObjectWillBeRemoved = function(activeDevice, activeMapping, objectID) {
+        if (daBypassCooldown > 0) return;  // Suppress echo from our own bypass
+        console.log('DA Inserts: object removed ID=' + objectID);
+        daInsExplored = false;
+        daInsSlotCache = [];
+        midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x27, 0xF7]);
+    };
+
+    console.log('DirectAccess Inserts ready (CC 88 to explore)');
 } else {
     console.log('DirectAccess not available (API < 1.2)');
 }
@@ -948,6 +2032,7 @@ deviceDriver.mOnIdle = function(context) {
     }
 
     if (scanCooldown > 0) scanCooldown--;
+    if (daBypassCooldown > 0) daBypassCooldown--;
 
     // Fallback couleur
     if (pendingColorForIndex >= 0) {
@@ -991,6 +2076,62 @@ deviceDriver.mOnIdle = function(context) {
 
     // Scan séquentiel des inserts — DÉSACTIVÉ
     // Les noms sont récupérés au fur et à mesure via mEdit.mOnTitleChange
+
+    // ── Plugin List queue: send entries in batches ──
+    if (pluginListQueue) {
+        var q = pluginListQueue;
+        var batchSize = 10;  // ~10 entries per tick ≈ 500/s → 352 in ~0.7s
+        for (var b = 0; b < batchSize && q.sendIdx < q.total; b++) {
+            try {
+                var pe = q.coll.mEntries[q.sendIdx];
+                var idxLo = q.sendIdx & 0x7F;
+                var idxHi = (q.sendIdx >> 7) & 0x7F;
+                // SysEx 0x2C: [F0 00 2C idxLo idxHi ...name 00 ...vendor 00 ...subCat 00 ...uid F7]
+                var msg = [0xF0, 0x00, 0x2C, idxLo, idxHi];
+                var pName = pe.mPluginName || '';
+                for (var c = 0; c < pName.length && c < 30; c++) {
+                    var ch = pName.charCodeAt(c) & 0x7F;
+                    if (ch > 0) msg.push(ch);
+                }
+                msg.push(0x00);
+                var pVendor = pe.mPluginVendor || '';
+                for (var c = 0; c < pVendor.length && c < 24; c++) {
+                    var ch = pVendor.charCodeAt(c) & 0x7F;
+                    if (ch > 0) msg.push(ch);
+                }
+                msg.push(0x00);
+                var pSubCat = pe.mSubCategories || '';
+                for (var c = 0; c < pSubCat.length && c < 30; c++) {
+                    var ch = pSubCat.charCodeAt(c) & 0x7F;
+                    if (ch > 0) msg.push(ch);
+                }
+                msg.push(0x00);
+                var pUID = pe.mPluginUID || '';
+                for (var c = 0; c < pUID.length && c < 40; c++) {
+                    var ch = pUID.charCodeAt(c) & 0x7F;
+                    if (ch > 0) msg.push(ch);
+                }
+                msg.push(0xF7);
+                midiOutput_Loop.sendMidi(context, msg);
+            } catch(e) {
+                console.log('DA PluginList: error at entry ' + q.sendIdx + ': ' + e);
+            }
+            q.sendIdx++;
+        }
+        if (q.sendIdx >= q.total) {
+            // SysEx 0x2D: completion [F0 00 2D countLo countHi collIdx collCount ...collName F7]
+            var cntLo = q.total & 0x7F;
+            var cntHi = (q.total >> 7) & 0x7F;
+            var complMsg = [0xF0, 0x00, 0x2D, cntLo, cntHi, q.collIdx & 0x7F, q.collCount & 0x7F];
+            for (var c = 0; c < q.collName.length && c < 20; c++) {
+                complMsg.push(q.collName.charCodeAt(c) & 0x7F);
+            }
+            complMsg.push(0xF7);
+            midiOutput_Loop.sendMidi(context, complMsg);
+            console.log('DA PluginList: sent ' + q.total + ' entries from "' + q.collName + '"');
+            pluginListQueue = null;
+        }
+    }
 };
 
 // ══════════════════════════════════════════════
@@ -1005,12 +2146,16 @@ try {
     var insertResetVar = surface.makeCustomValueVariable("insertReset");
     var insertNextVar = surface.makeCustomValueVariable("insertNext");
     var insertEditVar = surface.makeCustomValueVariable("insertEdit");
-    var insertBypassVar = surface.makeCustomValueVariable("insertBypass");
 
     page.makeActionBinding(insertResetVar, insertsViewer.mAction.mReset);
     page.makeActionBinding(insertNextVar, insertsViewer.mAction.mNext);
     page.makeValueBinding(insertEditVar, insertsViewer.mEdit);
-    page.makeValueBinding(insertBypassVar, insertsViewer.mBypass);
+
+    // Bypass on main viewer via CC 20 channel 4 (value binding, NOT toggle)
+    // CC 127 = bypass ON, CC 0 = bypass OFF — Python sends the desired state
+    var insertBypassBtn = surface.makeButton(20, 24, 2, 2);
+    insertBypassBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(3, 20);
+    page.makeValueBinding(insertBypassBtn.mSurfaceValue, insertsViewer.mBypass);
 
     // ── INSERT PLUGIN PARAMETERS (8 paramètres via mParameterBankZone) ──
     var insertParamZone = insertsViewer.mParameterBankZone;
@@ -1086,46 +2231,6 @@ try {
     page.makeActionBinding(insertNextBtn.mSurfaceValue, insertsViewer.mAction.mNext);
     
     var insertCurrentViewerSlot = 0;
-
-    // BYPASS : 8 viewers dédiés
-    // CC 30-37 : toggle bypass slot 0-7
-    // Note 60-67 channel 1 : Reset viewer 0-7
-    // Note 70-77 channel 1 : Next viewer 0-7
-    var insertBypassViewers = [];
-    
-    for (var bv = 0; bv < 8; bv++) {
-        try {
-            var bViewer = page.mHostAccess.mTrackSelection.mMixerChannel.mInsertAndStripEffects.makeInsertEffectViewer("bypassViewer" + bv);
-            
-            // Bypass toggle via CC 20+bv channel 4
-            var bBtn = surface.makeButton(20 + bv, 24 + bv * 2, 2, 2);
-            bBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(3, 20 + bv);
-            page.makeValueBinding(bBtn.mSurfaceValue, bViewer.mBypass).setTypeToggle();
-            
-            // Reset via Note 60+bv
-            var bReset = surface.makeButton(60 + bv, 40 + bv * 2, 2, 2);
-            bReset.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToNote(0, 60 + bv);
-            page.makeActionBinding(bReset.mSurfaceValue, bViewer.mAction.mReset);
-            
-            // Next via Note 70+bv
-            var bNext = surface.makeButton(70 + bv, 56 + bv * 2, 2, 2);
-            bNext.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToNote(0, 70 + bv);
-            page.makeActionBinding(bNext.mSurfaceValue, bViewer.mAction.mNext);
-            
-            insertBypassViewers.push(bViewer);
-            
-            // Feedback bypass : envoyer l'état au bridge
-            bViewer.mBypass.mOnProcessValueChange = (function(slotIdx) {
-                return function(activeDevice, activeMapping, value) {
-                    midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x13, slotIdx & 0x7F, value > 0.5 ? 1 : 0, 0xF7]);
-                };
-            })(bv);
-            
-            console.log('Bypass viewer ' + bv + ' OK (CC' + (30+bv) + '/N' + (60+bv) + '/N' + (70+bv) + ')');
-        } catch(e) {
-            console.log('Bypass viewer ' + bv + ' error: ' + e);
-        }
-    }
 
     // EDIT : CC 99 toggle l'ouverture de l'UI du plugin focusé par le viewer principal
     var insertEditBtn = surface.makeButton(99, 80, 2, 2);

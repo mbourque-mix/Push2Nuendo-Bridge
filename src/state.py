@@ -22,9 +22,10 @@ MODE_OVERVIEW = "overview" # Overview mode: pads = project tracks
 MODE_CR      = "controlroom"  # Control Room mode
 MODE_SETUP   = "setup"    # Setup page (aftertouch mode, etc.)
 MODE_MIDICC  = "midicc"   # MIDI CC controller page
+MODE_BROWSER = "browser"  # Plugin browser (load plugins into insert slots)
 
 # Bridge version
-BRIDGE_VERSION = "1.0.2"
+BRIDGE_VERSION = "1.0.3"
 
 # Aftertouch modes
 AT_POLY    = "poly"       # Polyphonic aftertouch (per-note)
@@ -37,6 +38,10 @@ VC_LOG     = "log"       # Logarithmic (more sensitive at low velocities)
 VC_EXP     = "exp"       # Exponential (more sensitive at high velocities)
 VC_SCURVE  = "s-curve"   # S-curve (compressed extremes, expanded middle)
 VC_FIXED   = "fixed"     # Fixed velocity (always 100)
+
+# MIDI CC encoder modes
+CC_ABSOLUTE = "absolute"  # Encoder value sent immediately (can cause jumps)
+CC_PICKUP   = "pickup"    # Encoder only sends after catching up to Nuendo value
 
 # Number of tracks displayed simultaneously (= number of encoders)
 BANK_SIZE = 8
@@ -171,6 +176,8 @@ class AppState:
         # ── Inserts mode ──
         # Which insert is selected for Device control?
         self.selected_insert_slot = 0
+        # Insert bank: 0 = slots 0-7, 8 = slots 8-15
+        self.insert_bank_offset = 0
         
         # ── Current track inserts (filled by JS) ──
         self.current_insert_names = [''] * 16
@@ -204,6 +211,7 @@ class AppState:
         
         # ── Transport ──
         self.is_playing = False
+        self.is_recording = False
         self.tempo_display = ""
         self.position_display = ""
         self.beats_display = ""
@@ -226,11 +234,19 @@ class AppState:
         
         # ── MIDI CC page ──
         self.cc_numbers = [1, 2, 7, 8, 10, 11, 64, 65]  # default CC assignments
-        self.cc_values = [0] * 8       # current CC values (0-127)
+        self.cc_values = [0] * 8       # current CC values (0-127) — encoder position
         self.cc_edit_mode = False      # True = encoders change CC number instead of value
+        self.cc_mode = CC_ABSOLUTE     # CC_ABSOLUTE or CC_PICKUP
+        self.cc_nuendo_values = [-1] * 8  # last known value from Nuendo (-1 = unknown)
+        self.cc_picked_up = [True] * 8    # whether each encoder has caught up
+        self.cc_pickup_direction = [0] * 8  # initial turn direction (0=none, 1=CW, -1=CCW)
         
         # ── Version info ──
         self.js_version = "?"         # will be set by JS via SysEx
+        
+        # ── Plugin Mappings ──
+        self.plugin_mappings = {}     # {plugin_name: mapping_data} loaded from ~/.push2bridge/mappings/
+        self.active_mapping = None    # current mapping for the active insert plugin
         
         # ── Overview ──
         self.overview_page = 0
@@ -244,6 +260,21 @@ class AppState:
         self.accent_enabled = False
         self.accent_velocity = 127
         self.accent_held = False  # True when the button is held
+        
+        # ── Plugin Browser ──
+        self.browser_plugins = []           # [{name, vendor, sub_categories, uid}, ...]
+        self.browser_collection_index = 1   # Default: "Push" collection
+        self.browser_collection_count = 0   # Total number of collections (from JS)
+        self.browser_collection_name = ""   # Name of the active collection
+        self.browser_collections = []       # [{index, name, count}, ...] all available collections
+        self.browser_collections_ready = False  # True when all collection info received
+        self.browser_coll_scroll = 0        # Selected collection in picker
+        self.browser_list_ready = False     # True when full list received from JS
+        self.browser_scroll = 0             # Index of first visible plugin
+        self.browser_selected = 0           # Index of selected plugin
+        self.browser_target_slot = 0        # Insert slot to load into
+        self.browser_phase = "slot_select"  # "slot_select" or "plugin_list"
+        self.browser_prev_mode = MODE_VOLUME  # Mode to return to on cancel
 
     @property
     def visible_tracks(self):

@@ -91,6 +91,9 @@ class NuendoLink:
         self._running = False
         self._on_connected_callback = None
         self._da_available = False  # True when JS reports DirectAccess is active
+        self._da_inserts_ready = False  # True when JS has explored the insert tree
+        self._da_insert_cache = []  # Mirrored from JS: [{bypass_tag, title, bypassed}]
+        self._da_bypass_fallback_slot = -1  # Slot needing viewer fallback
         
         # MTC (MIDI Time Code)
         self._mtc_pieces = [0] * 8  # 8 quarter frame pieces
@@ -364,6 +367,11 @@ class NuendoLink:
             self.state.cycle_active = (value > 64)
             self._leds_dirty = True
         
+        # ── Record feedback (CC 73) ──
+        elif cc_num == 73:
+            self.state.is_recording = (value > 64)
+            self._leds_dirty = True
+        
         # ── Control Room volume feedback (CC 23) ──
         elif cc_num == 23:
             pass  # Display value comes via SysEx 0x08
@@ -401,7 +409,10 @@ class NuendoLink:
         
         # ── DirectAccess status feedback (CC 68) ──
         elif cc_num == 68:
-            if value == 1:
+            if value == 0:
+                # DA fallback requested — Python should handle it
+                self._da_fallback_needed = True
+            elif value == 1:
                 self._da_available = True
                 print("  ✓ DirectAccess available (API 1.2+)")
             elif value == 2:
@@ -409,11 +420,15 @@ class NuendoLink:
                 for t in state.tracks:
                     t.is_monitored = False
                 print("  DA: All monitors cleared")
+                if hasattr(self, '_on_selection_changed'):
+                    self._on_selection_changed()
             elif value == 3:
                 # DA cleared all rec arms — sync local state
                 for t in state.tracks:
                     t.is_armed = False
                 print("  DA: All rec arms cleared")
+                if hasattr(self, '_on_selection_changed'):
+                    self._on_selection_changed()
         
         # ── Volumes of the 8 visible tracks (CC 20-27) ──
         elif 20 <= cc_num <= 27:
@@ -544,14 +559,13 @@ class NuendoLink:
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x11:
             # Insert slot name : [F0 00 11 slotIndex ...chars F7]
-            # Ignore during bypass viewer positioning
-            if getattr(self, '_insert_positioning', False):
+            if getattr(self, '_bypass_navigating', False):
                 return
             slot = message[3]
             name = ''.join(chr(b) for b in message[4:-1])
             state = self.state
             if slot < len(state.current_insert_names):
-                if name:
+                if name and name != state.current_insert_names[slot]:
                     state.current_insert_names[slot] = name
                     print(f"  Insert slot {slot}: '{name}'")
             return
@@ -570,6 +584,8 @@ class NuendoLink:
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x16:
             # Insert param name : [F0 00 16 paramIndex ...chars F7]
+            if getattr(self, '_da_mapping_active', False):
+                return  # Suppress — DA params are driving the display
             idx = message[3]
             name = ''.join(chr(b) for b in message[4:-1])
             state = self.state
@@ -580,6 +596,8 @@ class NuendoLink:
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x17:
             # Insert param display value : [F0 00 17 paramIndex ...chars F7]
+            if getattr(self, '_da_mapping_active', False):
+                return  # Suppress — DA params are driving the display
             idx = message[3]
             value = ''.join(chr(b) for b in message[4:-1])
             state = self.state
@@ -594,8 +612,11 @@ class NuendoLink:
             bypassed = message[4] > 0
             state = self.state
             if slot < len(state.current_insert_active):
-                state.current_insert_active[slot] = not bypassed
-                print(f"  Insert bypass slot {slot}: {'BYPASS' if bypassed else 'ACTIVE'}")
+                new_active = not bypassed
+                old_active = state.current_insert_active[slot]
+                state.current_insert_active[slot] = new_active
+                if not getattr(self, '_bypass_navigating', False) and new_active != old_active:
+                    print(f"  Insert bypass slot {slot}: {'BYPASS' if bypassed else 'ACTIVE'}")
                 self._leds_dirty = True
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x18:
@@ -604,8 +625,8 @@ class NuendoLink:
             name = ''.join(chr(b) for b in message[4:-1])
             state = self.state
             if idx < 8:
-                state.send_names[idx] = name
-                if name:
+                if name and name != state.send_names[idx]:
+                    state.send_names[idx] = name
                     print(f"  Send {idx}: '{name}'")
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x19:
@@ -636,6 +657,220 @@ class NuendoLink:
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x0A:
             # Diagnostic (keep for debug)
+            return
+        elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x24:
+            # DA Insert slot cache entry : [F0 00 24 slotIdx tagLo tagHi bypassed ...title F7]
+            slot = message[3]
+            if len(message) >= 7:
+                tag_lo = message[4]
+                tag_hi = message[5]
+                bypass_tag = tag_lo | (tag_hi << 7)
+                bypassed = message[6] > 0 if len(message) > 7 else False
+                title = ''.join(chr(b) for b in message[7:-1]) if len(message) > 8 else ''
+                state = self.state
+                # Update state with DA-discovered insert info
+                if slot < len(state.current_insert_names):
+                    state.current_insert_names[slot] = title
+                    state.current_insert_active[slot] = not bypassed
+                # Store DA metadata for bypass commands
+                if not hasattr(self, '_da_insert_cache'):
+                    self._da_insert_cache = []
+                while len(self._da_insert_cache) <= slot:
+                    self._da_insert_cache.append(None)
+                self._da_insert_cache[slot] = {
+                    'bypass_tag': bypass_tag,
+                    'title': title,
+                    'bypassed': bypassed
+                }
+                print(f"  DA slot {slot}: '{title}' bypass_tag={bypass_tag} {'BYPASS' if bypassed else 'ACTIVE'}")
+            return
+        elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x25:
+            # DA exploration complete : [F0 00 25 slotCount F7]
+            count = message[3]
+            self._da_inserts_ready = True
+            # Clear remaining slots beyond what DA found
+            state = self.state
+            for i in range(count, 16):
+                state.current_insert_names[i] = ''
+                state.current_insert_active[i] = False
+            self._leds_dirty = True
+            print(f"  ✓ DA Insert exploration complete: {count} slots cached")
+            # One-time Plugin Manager exploration on the first slot with a plugin
+            if not getattr(self, '_pm_explored', False):
+                self._pm_explored = True  # Set to False in console to re-run
+                # Find first slot with a plugin
+                for i in range(count):
+                    if state.current_insert_names[i]:
+                        self.request_da_plugin_manager_explore(i)
+                        break
+            # One-time plugin list fetch (collection "Push" = index 1)
+            if not getattr(self, '_plugin_list_fetched', False):
+                self._plugin_list_fetched = True
+                import threading
+                def _delayed_fetch():
+                    import time
+                    time.sleep(2.0)  # Wait for PM exploration to finish
+                    self.request_da_plugin_list(1)  # "Push" collection
+                threading.Thread(target=_delayed_fetch, daemon=True).start()
+            return
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x26:
+            # DA bypass result : [F0 00 26 slotIdx success bypassed F7]
+            slot = message[3]
+            success = message[4] > 0
+            if success and len(message) >= 6:
+                bypassed = message[5] > 0
+                state = self.state
+                if slot < len(state.current_insert_active):
+                    state.current_insert_active[slot] = not bypassed
+                    print(f"  DA Bypass slot {slot}: {'BYPASS' if bypassed else 'ACTIVE'} ✓")
+                    self._leds_dirty = True
+            elif not success:
+                # DA bypass failed — Python should fall back to viewer-based
+                self._da_bypass_fallback_slot = slot
+                print(f"  DA Bypass slot {slot}: FAILED — will use viewer fallback")
+            return
+        elif len(message) >= 3 and message[1] == 0x00 and message[2] == 0x27:
+            # DA cache invalidated : [F0 00 27 F7]
+            self._da_inserts_ready = False
+            if hasattr(self, '_da_insert_cache'):
+                self._da_insert_cache = []
+            print("  DA Inserts: cache invalidated (tree changed)")
+            return
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x28:
+            # DA edit result : [F0 00 28 slotIdx success F7]
+            slot = message[3]
+            success = message[4] > 0
+            if success:
+                print(f"  DA Edit slot {slot}: ✓")
+            else:
+                self._da_edit_fallback_slot = slot
+                print(f"  DA Edit slot {slot}: FAILED — will use viewer fallback")
+            return
+        elif len(message) >= 11 and message[1] == 0x00 and message[2] == 0x29:
+            # DA plugin param entry : [F0 00 29 slotIdx idxLo idxHi val127 tagB0-B3 ...title F7]
+            slot = message[3]
+            param_idx = message[4] | (message[5] << 7)
+            val127 = message[6]
+            tag = message[7] | (message[8] << 7) | (message[9] << 14) | (message[10] << 21)
+            title = ''.join(chr(b) for b in message[11:-1]) if len(message) > 12 else ''
+            
+            # Store in DA param cache
+            if not hasattr(self, '_da_plugin_params'):
+                self._da_plugin_params = {}
+            self._da_plugin_params[param_idx] = {
+                'name': title,
+                'tag': tag,
+                'value': val127 / 127.0,
+                'value_display': '',
+            }
+            return
+        elif len(message) >= 6 and message[1] == 0x00 and message[2] == 0x2A:
+            # DA plugin param enum complete : [F0 00 2A slotIdx countLo countHi F7]
+            slot = message[3]
+            count = message[4] | (message[5] << 7)
+            print(f"  ✓ DA Plugin params enumerated: slot {slot}, {count} params")
+            self._da_params_enumerated = True
+            
+            # Notify controller to apply mapping
+            if hasattr(self, '_on_da_params_ready') and self._on_da_params_ready:
+                self._on_da_params_ready(slot)
+            return
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x2B:
+            # DA encoder feedback : [F0 00 2B encIdx val127 ...displayStr F7]
+            enc_idx = message[3]
+            val127 = message[4]
+            display = ''.join(chr(b) for b in message[5:-1]) if len(message) > 6 else ''
+            state = self.state
+            if enc_idx < 8:
+                state.insert_param_values[enc_idx] = display if display else f"{val127/127:.2f}"
+            return
+        elif len(message) >= 6 and message[1] == 0x00 and message[2] == 0x2C:
+            # DA plugin list entry : [F0 00 2C idxLo idxHi ...name 00 ...vendor 00 ...subCat 00 ...uid F7]
+            idx = message[3] | (message[4] << 7)
+            # Parse null-separated fields from message[5:-1]
+            fields = []
+            current = []
+            for b in message[5:-1]:
+                if b == 0x00:
+                    fields.append(''.join(chr(c) for c in current))
+                    current = []
+                else:
+                    current.append(b)
+            # Last field (UID) has no trailing null
+            if current:
+                fields.append(''.join(chr(c) for c in current))
+            
+            name = fields[0] if len(fields) > 0 else ''
+            vendor = fields[1] if len(fields) > 1 else ''
+            sub_cat = fields[2] if len(fields) > 2 else ''
+            uid = fields[3] if len(fields) > 3 else ''
+            
+            state = self.state
+            # Ensure list is large enough
+            while len(state.browser_plugins) <= idx:
+                state.browser_plugins.append(None)
+            state.browser_plugins[idx] = {
+                'name': name,
+                'vendor': vendor,
+                'sub_categories': sub_cat,
+                'uid': uid,
+            }
+            return
+        elif len(message) >= 7 and message[1] == 0x00 and message[2] == 0x2D:
+            # DA plugin list complete : [F0 00 2D countLo countHi collIdx collCount ...collName F7]
+            count = message[3] | (message[4] << 7)
+            coll_idx = message[5]
+            coll_count = message[6] if len(message) > 7 else 0
+            coll_name = ''.join(chr(b) for b in message[7:-1]) if len(message) > 8 else ''
+            state = self.state
+            # Trim to exact count
+            state.browser_plugins = state.browser_plugins[:count]
+            state.browser_collection_index = coll_idx
+            state.browser_collection_count = coll_count
+            state.browser_collection_name = coll_name
+            state.browser_list_ready = True
+            print(f"  ✓ Plugin list received: {count} entries from \"{coll_name}\" (collection {coll_idx}/{coll_count})")
+            # Print first 5 entries as sample
+            for i in range(min(5, count)):
+                p = state.browser_plugins[i]
+                if p:
+                    print(f"    [{i}] {p['name']} ({p['vendor']}) — {p['sub_categories']}")
+            if count > 5:
+                print(f"    ... +{count - 5} more")
+            return
+        elif len(message) >= 7 and message[1] == 0x00 and message[2] == 0x2F:
+            # DA collection info : [F0 00 2F collIdx collCount cntLo cntHi ...name F7]
+            coll_idx = message[3]
+            coll_count = message[4]
+            entry_count = message[5] | (message[6] << 7)
+            coll_name = ''.join(chr(b) for b in message[7:-1]) if len(message) > 8 else ''
+            state = self.state
+            # Initialize or extend list
+            if coll_idx == 0:
+                state.browser_collections = []
+            state.browser_collections.append({
+                'index': coll_idx,
+                'name': coll_name,
+                'count': entry_count
+            })
+            state.browser_collection_count = coll_count
+            print(f"  Collection [{coll_idx}/{coll_count}]: \"{coll_name}\" ({entry_count} plugins)")
+            if len(state.browser_collections) >= coll_count:
+                state.browser_collections_ready = True
+                print(f"  ✓ All {coll_count} collections received")
+            return
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x2E:
+            # DA plugin load result : [F0 00 2E slotIdx success F7]
+            slot = message[3]
+            success = message[4] > 0
+            if success:
+                print(f"  ✓ DA Plugin loaded into slot {slot + 1}")
+                # Invalidate insert cache to force rescan
+                self._da_inserts_ready = False
+                if hasattr(self, '_da_insert_cache'):
+                    self._da_insert_cache = []
+            else:
+                print(f"  ✗ DA Plugin load FAILED for slot {slot + 1}")
             return
         else:
             return
@@ -854,6 +1089,14 @@ class NuendoLink:
                 print(f"  ✓ JS Script version: {ver}")
             except UnicodeDecodeError:
                 pass
+        
+        # ── DirectAccess diagnostic log (type 0x20) ──
+        elif msg_type == 0x20 and len(payload) >= 1:
+            try:
+                log_text = bytes(payload).decode('utf-8').rstrip('\x00')
+                print(f"  [DA] {log_text}")
+            except UnicodeDecodeError:
+                pass
 
     # ─────────────────────────────────────────────
     # Sending messages to Nuendo
@@ -940,6 +1183,243 @@ class NuendoLink:
         if port and self._running:
             port.send_message([0xB0, cc_number & 0x7F, value & 0x7F])
 
+    def send_da_toggle(self, track_index, function):
+        """Send a DA toggle command to JS via CC 16 (track index) + CC 17 (function).
+        
+        track_index: absolute track index in the project (0-127)
+        function: 0=Mute, 1=Solo, 2=Monitor, 3=Record
+        
+        CC 17 = set target track index
+        CC 18 = execute toggle (value = function)
+        """
+        if self._midi_out and self._running:
+            self._midi_out.send_message([0xB0, 17, track_index & 0x7F])
+            import time as _t; _t.sleep(0.005)
+            self._midi_out.send_message([0xB0, 18, function & 0x7F])
+
+    def request_da_insert_exploration(self):
+        """Ask JS to explore the insert tree via DirectAccess (CC 88 = 127).
+        
+        JS will respond with SysEx 0x24 (slot entries) and 0x25 (complete).
+        If DA is not available, nothing happens.
+        """
+        if self._midi_out and self._running and self._da_available:
+            self._da_inserts_ready = False
+            self._midi_out.send_message([0xB0, 88, 127])
+            print("  → DA: Requested insert tree exploration")
+
+    def send_da_bypass(self, slot_index, want_bypass):
+        """Toggle bypass on an insert slot via DirectAccess (CC 85).
+        
+        slot_index: 0-15 (insert slot)
+        want_bypass: True = bypass ON, False = bypass OFF (active)
+        
+        JS will respond with SysEx 0x26 (result).
+        Falls back to viewer-based if DA cache not ready.
+        
+        Returns True if DA command was sent, False if not available.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        # Encode: value = slot_index + (64 if want_bypass)
+        # Send on channel 8 (0xB7) to avoid conflict with selButtons on ch1
+        value = (slot_index & 0x1F) | (0x40 if want_bypass else 0x00)
+        self._midi_out.send_message([0xB7, 85, value & 0x7F])
+        return True
+
+    def send_da_edit(self, slot_index):
+        """Toggle plugin UI on an insert slot via DirectAccess (CC 86 ch8).
+        
+        slot_index: 0-15 (insert slot)
+        
+        JS will respond with SysEx 0x28 (result).
+        Returns True if DA command was sent, False if not available.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        self._midi_out.send_message([0xB7, 86, slot_index & 0x7F])
+        return True
+
+    def request_da_plugin_params(self, slot_index):
+        """Ask JS to enumerate all parameters of the plugin in a slot (CC 87 ch8).
+        
+        JS will respond with SysEx 0x29 (param entries) and 0x2A (complete).
+        Returns True if command was sent.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        self._da_plugin_params = {}  # Clear previous enum
+        self._da_params_enumerated = False
+        self._midi_out.send_message([0xB7, 87, slot_index & 0x7F])
+        print(f"  → DA: Requested param enumeration for slot {slot_index}")
+        return True
+
+    def send_da_encoder_setup(self, slot_index, da_param_indices):
+        """Configure which DA params the 8 encoders control (channel 9).
+        
+        slot_index: 0-15
+        da_param_indices: list of 8 DA param indices (use -1 for unused encoders)
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        
+        # CC 0 ch9: set slot
+        self._midi_out.send_message([0xB8, 0, slot_index & 0x7F])
+        
+        # CC 1-8 ch9: low bits, CC 9-16 ch9: high bits
+        for i in range(8):
+            idx = da_param_indices[i] if i < len(da_param_indices) else -1
+            if idx < 0:
+                idx = 0  # Will have tag 0 which won't match anything
+            lo = idx & 0x7F
+            hi = (idx >> 7) & 0x7F
+            self._midi_out.send_message([0xB8, 1 + i, lo])
+            self._midi_out.send_message([0xB8, 9 + i, hi])
+        
+        return True
+
+    def request_da_plugin_manager_explore(self, slot_index):
+        """Ask JS to explore Plugin Manager collections for a slot (CC 84 ch8).
+        
+        Results come back via daLog (SysEx 0x20).
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        self._midi_out.send_message([0xB7, 84, slot_index & 0x7F])
+        print(f"  → DA: Requested Plugin Manager exploration for slot {slot_index}")
+        return True
+
+    def request_da_plugin_list(self, collection_index=1):
+        """Ask JS to send the full plugin list for a collection (CC 83 ch8).
+        
+        collection_index: 0 = Default (all plugins), 1 = Push (curated), etc.
+        
+        JS will respond with SysEx 0x2C (entries) and 0x2D (complete).
+        Results stored in state.browser_plugins[].
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        # Reset browser state
+        self.state.browser_plugins = []
+        self.state.browser_list_ready = False
+        
+        self._midi_out.send_message([0xB7, 83, collection_index & 0x7F])
+        print(f"  → DA: Requested plugin list for collection {collection_index}")
+        return True
+
+    def request_da_collection_info(self):
+        """Ask JS to send info about all plugin collections (CC 88 ch8).
+        
+        JS will respond with SysEx 0x2F for each collection.
+        Results stored in state.browser_collections[].
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        self.state.browser_collections = []
+        self.state.browser_collections_ready = False
+        
+        self._midi_out.send_message([0xB7, 88, 0])
+        print("  → DA: Requested collection info")
+        return True
+
+    def send_da_load_plugin(self, target_slot, entry_index, collection_index):
+        """Load a plugin into an insert slot via DA Plugin Manager.
+        
+        target_slot: 0-15 (insert slot)
+        entry_index: index into the collection's mEntries array
+        collection_index: which collection (0=Default, 1=Push, etc.)
+        
+        Sends 3 CCs on ch8:
+          CC 82: target slot index
+          CC 81: entry index low 7 bits
+          CC 80: (entry index high bits) | (collection index << 4) → triggers load
+        
+        JS will respond with SysEx 0x2E (result).
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        entry_lo = entry_index & 0x7F
+        entry_hi = (entry_index >> 7) & 0x0F
+        coll_bits = (collection_index & 0x07) << 4
+        
+        self._midi_out.send_message([0xB7, 82, target_slot & 0x7F])
+        import time as _t; _t.sleep(0.005)
+        self._midi_out.send_message([0xB7, 81, entry_lo])
+        _t.sleep(0.005)
+        self._midi_out.send_message([0xB7, 80, entry_hi | coll_bits])
+        
+        print(f"  → DA: Load plugin entry {entry_index} from coll {collection_index} into slot {target_slot}")
+        return True
+
+    def send_da_clear_slot(self, slot_index):
+        """Attempt to clear (remove plugin from) an insert slot via DA (CC 79 ch8).
+        
+        JS will try trySetSlotPlugin with empty UID.
+        Result comes back via SysEx 0x2E.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_inserts_ready', False):
+            return False
+        
+        self._midi_out.send_message([0xB7, 79, slot_index & 0x7F])
+        print(f"  → DA: Clear slot {slot_index}")
+        return True
+
+    def send_da_encoder_value(self, encoder_idx, relative_midi):
+        """Send a relative encoder value to JS for DA param control (CC 20-27 ch9).
+        
+        encoder_idx: 0-7
+        relative_midi: signed bit encoding (1-63=CW, 65-127=CCW)
+        
+        Sends CC=0 first (reset) then the actual delta, so the JS button
+        binding always sees a value change and fires its callback.
+        """
+        if not (self._midi_out and self._running):
+            return
+        cc = 20 + encoder_idx
+        self._midi_out.send_message([0xB8, cc, 0])  # Reset pulse
+        self._midi_out.send_message([0xB8, cc, relative_midi & 0x7F])  # Delta
+
     def _on_notes_received(self, event, data=None):
         """Receive playback MIDI notes from Nuendo to light up pads."""
         message, _ = event
@@ -957,6 +1437,20 @@ class NuendoLink:
             note = message[1]
             if self._note_display_callback:
                 self._note_display_callback(note, False)
+        elif status == 0xB0 and len(message) >= 3:
+            # CC received from Nuendo (automation playback, other controllers)
+            cc_num = message[1]
+            cc_val = message[2]
+            state = self.state
+            for i in range(8):
+                if state.cc_numbers[i] == cc_num:
+                    # Always track the Nuendo value
+                    state.cc_nuendo_values[i] = cc_val
+                    # In absolute mode, also update the encoder position
+                    from state import CC_PICKUP
+                    if state.cc_mode != CC_PICKUP:
+                        state.cc_values[i] = cc_val
+                    break
 
     def send_mode_change(self, mode):
         """Change encoder mode.
@@ -1060,6 +1554,7 @@ class NuendoLink:
                     self._connection_grace_until = time.time() + 5.0
                     # Reset state to avoid stale data
                     self.state.is_playing = False
+                    self.state.is_recording = False
                     self.state.metronome_on = False
                     self.state.cycle_active = False
                     for t in self.state.tracks:

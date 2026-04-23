@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Push2 Plugin Mapper</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0f;
+  --surface: #12121a;
+  --surface-hover: #1a1a25;
+  --card: #16161f;
+  --border: #2a2a3a;
+  --accent: #00b4c8;
+  --accent-dim: #007a8a;
+  --text: #e0e0e8;
+  --text-dim: #6a6a7a;
+  --text-muted: #4a4a5a;
+  --green: #00c878;
+  --red: #ff4060;
+  --orange: #ff8c00;
+  --purple: #a855f7;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Outfit', sans-serif;
+  overflow: hidden;
+  height: 100vh;
+}
+
+/* Header */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.header-title { font-size: 20px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+.header-sub { font-size: 12px; color: var(--text-dim); margin-left: 12px; }
+.btn { border: none; border-radius: 6px; padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
+.btn-accent { background: var(--accent); color: var(--bg); }
+.btn-green { background: var(--green); color: var(--bg); }
+.btn-outline { background: transparent; border: 1px solid; }
+.btn-red { color: var(--red); border-color: rgba(255,64,96,0.3); }
+.btn-accent-outline { color: var(--accent); border-color: rgba(0,180,200,0.3); background: rgba(0,180,200,0.1); }
+
+/* Layout */
+.main { display: flex; height: calc(100vh - 53px); }
+
+/* Sidebar */
+.sidebar {
+  width: 280px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-search { padding: 12px 12px 8px; }
+.sidebar-search input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+  font-family: inherit;
+}
+.sidebar-search input:focus { border-color: var(--accent); }
+.filter-row { display: flex; gap: 4px; margin-top: 8px; }
+.filter-btn {
+  flex: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 0;
+  font-size: 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-transform: capitalize;
+  font-family: inherit;
+}
+.filter-btn.active { background: rgba(0,180,200,0.1); border-color: var(--accent); color: var(--accent); }
+.plugin-list { flex: 1; overflow: auto; padding: 0 8px 8px; }
+.plugin-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  margin-bottom: 2px;
+  transition: all 0.1s;
+}
+.plugin-item:hover { background: var(--surface-hover); }
+.plugin-item.selected { background: rgba(0,180,200,0.09); border-left-color: var(--accent); }
+.plugin-item .name { font-size: 13px; }
+.plugin-item.selected .name { font-weight: 600; }
+.plugin-item .meta { font-size: 10px; color: var(--text-dim); display: flex; gap: 8px; margin-top: 2px; }
+.plugin-item .mapped { color: var(--green); }
+.plugin-item .instrument { color: var(--purple); }
+.sidebar-footer { padding: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
+
+/* Center: params */
+.params-panel {
+  width: 300px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.panel-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+.params-list { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.param-item {
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: border-color 0.15s;
+}
+.param-item:hover { border-color: var(--accent); }
+.param-item.used { opacity: 0.4; }
+.param-idx { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); min-width: 28px; }
+.param-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.param-units { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+.params-footer { padding: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
+
+/* Right: mapping area */
+.mapping-panel { flex: 1; display: flex; flex-direction: column; }
+.mapping-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.mapping-header .plugin-name { color: var(--accent); margin-left: 10px; font-weight: 400; letter-spacing: 0; }
+.mapping-actions { display: flex; gap: 8px; }
+.mapping-body { flex: 1; overflow: auto; padding: 16px; }
+
+/* Page */
+.page {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.page-label { color: var(--accent); font-weight: 700; font-size: 12px; letter-spacing: 1px; }
+.page-name { color: var(--text-dim); font-size: 13px; cursor: pointer; margin-left: 8px; }
+.page-name-input {
+  background: var(--bg); border: 1px solid var(--accent);
+  border-radius: 4px; padding: 2px 8px; font-size: 13px;
+  color: var(--text); outline: none; font-family: inherit;
+}
+.slots-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
+
+/* Slot */
+.slot {
+  padding: 10px 12px;
+  min-height: 62px;
+  background: var(--bg);
+  border: 1px dashed rgba(74,74,90,0.4);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: all 0.15s;
+}
+.slot.filled { background: var(--surface); border-style: solid; border-color: var(--border); }
+.slot.drag-over { border-color: var(--accent); border-style: solid; background: rgba(0,180,200,0.08); }
+.slot-header { display: flex; justify-content: space-between; align-items: center; }
+.slot-enc { font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--accent); font-weight: 700; letter-spacing: 1px; }
+.slot-remove { background: none; border: none; color: var(--red); cursor: pointer; font-size: 14px; padding: 0 4px; }
+.slot-name { font-size: 13px; color: var(--text); font-weight: 500; }
+.slot-empty { font-size: 12px; color: var(--text-muted); font-style: italic; }
+.slot-label-input {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 6px; font-size: 11px;
+  color: var(--text); outline: none; width: 100%;
+  font-family: 'JetBrains Mono', monospace;
+}
+.slot-label-input:focus { border-color: var(--accent); }
+
+/* Empty state */
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); }
+.empty-icon { font-size: 48px; margin-bottom: 16px; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 20px; right: 20px;
+  padding: 10px 20px; border-radius: 8px;
+  font-size: 13px; font-weight: 500; color: #fff;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  z-index: 1000;
+  animation: fadeIn 0.3s ease;
+}
+.toast.success { background: var(--green); }
+.toast.error { background: var(--red); }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <span class="header-title">⬡ Plugin Mapper</span>
+    <span class="header-sub">Push 2 / Nuendo Bridge</span>
+  </div>
+  <div>
+    <button class="btn btn-accent" id="scanBtn" onclick="startScan()">Rescan Plugins</button>
+  </div>
+</div>
+
+<div class="main">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-search">
+      <input type="text" id="searchInput" placeholder="Search plugins..." oninput="filterPlugins()">
+      <div class="filter-row">
+        <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+        <button class="filter-btn" data-filter="mapped" onclick="setFilter('mapped')">Mapped</button>
+        <button class="filter-btn" data-filter="unmapped" onclick="setFilter('unmapped')">Unmapped</button>
+      </div>
+    </div>
+    <div class="plugin-list" id="pluginList"></div>
+    <div class="sidebar-footer" id="pluginCount"></div>
+  </div>
+
+  <!-- Params -->
+  <div class="params-panel">
+    <div class="panel-header">AVAILABLE PARAMETERS</div>
+    <div class="params-list" id="paramsList">
+      <div class="empty-state"><div class="empty-icon">⬡</div><div>Select a plugin</div></div>
+    </div>
+    <div class="params-footer" id="paramsFooter"></div>
+  </div>
+
+  <!-- Mapping -->
+  <div class="mapping-panel">
+    <div class="mapping-header">
+      <div class="panel-header" style="border:none;padding:0">
+        ENCODER MAPPING<span class="plugin-name" id="mappingPluginName"></span>
+      </div>
+      <div class="mapping-actions" id="mappingActions" style="display:none">
+        <button class="btn btn-accent-outline" onclick="addPage()">+ Add Page</button>
+        <button class="btn btn-green" id="saveBtn" onclick="saveMapping()">Save Mapping</button>
+        <button class="btn btn-outline btn-red" onclick="deleteMapping()">Delete</button>
+      </div>
+    </div>
+    <div class="mapping-body" id="mappingBody">
+      <div class="empty-state"><div class="empty-icon">⬡</div><div>Select a plugin from the sidebar</div></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" style="display:none"></div>
+
+<script>
+const API = 'http://localhost:8100/api';
+
+let allPlugins = [];
+let selectedPlugin = null;
+let pluginDetail = null;
+let pages = [];
+let currentFilter = 'all';
+let dragParam = null;
+
+// ── API ──
+async function fetchJson(url) { const r = await fetch(url); return r.json(); }
+async function postJson(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  return r.json();
+}
+
+// ── Init ──
+async function init() {
+  const d = await fetchJson(`${API}/plugins`);
+  allPlugins = d.plugins;
+  renderPluginList();
+}
+
+// ── Toast ──
+function showToast(msg, type='success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + type;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+// ── Scan ──
+async function startScan() {
+  const btn = document.getElementById('scanBtn');
+  btn.textContent = 'Scanning...';
+  btn.disabled = true;
+  await postJson(`${API}/scan`, { force: false });
+  const poll = setInterval(async () => {
+    const s = await fetchJson(`${API}/scan/status`);
+    if (!s.scanning) {
+      clearInterval(poll);
+      btn.textContent = 'Rescan Plugins';
+      btn.disabled = false;
+      const d = await fetchJson(`${API}/plugins`);
+      allPlugins = d.plugins;
+      renderPluginList();
+      showToast(`Scan complete: ${d.total} plugins`);
+    }
+  }, 2000);
+}
+
+// ── Filter ──
+function setFilter(f) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
+  renderPluginList();
+}
+
+function filterPlugins() { renderPluginList(); }
+
+function getFilteredPlugins() {
+  const search = document.getElementById('searchInput').value.toLowerCase();
+  return allPlugins.filter(p => {
+    if (p.error) return false;
+    if (search && !p.name.toLowerCase().includes(search)) return false;
+    if (currentFilter === 'mapped' && !p.has_mapping) return false;
+    if (currentFilter === 'unmapped' && p.has_mapping) return false;
+    return true;
+  });
+}
+
+// ── Render plugin list ──
+function renderPluginList() {
+  const list = document.getElementById('pluginList');
+  const filtered = getFilteredPlugins();
+  list.innerHTML = '';
+  filtered.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'plugin-item' + (selectedPlugin === p.name ? ' selected' : '');
+    div.innerHTML = `
+      <div class="name">${escapeHtml(p.name)}</div>
+      <div class="meta">
+        <span>${p.parameter_count} params</span>
+        ${p.has_mapping ? '<span class="mapped">● mapped</span>' : ''}
+        ${p.is_instrument ? '<span class="instrument">♪ instrument</span>' : ''}
+      </div>
+    `;
+    div.addEventListener('click', () => selectPlugin(p.name));
+    list.appendChild(div);
+  });
+  document.getElementById('pluginCount').textContent = `${filtered.length} / ${allPlugins.length} plugins`;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ── Select plugin ──
+async function selectPlugin(name) {
+  selectedPlugin = name;
+  renderPluginList();
+  document.getElementById('mappingPluginName').textContent = name;
+  document.getElementById('mappingActions').style.display = 'flex';
+  
+  try {
+    const res = await fetch(`${API}/plugins/${encodeURIComponent(name)}`);
+    if (!res.ok) {
+      showToast(`Error loading ${name}: ${res.status}`, 'error');
+      pluginDetail = null;
+      renderParams();
+      renderMapping();
+      return;
+    }
+    pluginDetail = await res.json();
+  } catch(e) {
+    showToast(`Error: ${e.message}`, 'error');
+    pluginDetail = null;
+    renderParams();
+    renderMapping();
+    return;
+  }
+  
+  if (pluginDetail.mapping && pluginDetail.mapping.pages) {
+    pages = pluginDetail.mapping.pages.map(p => ({
+      name: p.name || '',
+      params: [...(p.params || []), ...Array(8).fill(null)].slice(0, 8),
+      labels: [...(p.labels || []), ...Array(8).fill('')].slice(0, 8),
+    }));
+  } else {
+    pages = [];
+  }
+  
+  renderParams();
+  renderMapping();
+}
+
+// ── Render params ──
+function renderParams() {
+  const list = document.getElementById('paramsList');
+  if (!pluginDetail) {
+    list.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div>Select a plugin</div></div>';
+    document.getElementById('paramsFooter').textContent = '';
+    return;
+  }
+  
+  const usedSet = new Set(pages.flatMap(p => p.params.filter(v => v != null)));
+  const params = pluginDetail.plugin.parameters || [];
+  
+  list.innerHTML = params.map(p => {
+    const displayName = p.name || p.label || '?';
+    const hasLabel = p.label && p.label !== p.name;
+    return `
+    <div class="param-item ${usedSet.has(p.index) ? 'used' : ''}" draggable="true"
+         ondragstart="onParamDragStart(event, ${p.index})">
+      <span class="param-idx">${p.index}</span>
+      <span class="param-name">${escapeHtml(displayName)}</span>
+      ${hasLabel ? `<span class="param-units" title="Label: ${escapeHtml(p.label)}">${escapeHtml(p.label)}</span>` : ''}
+      ${p.units && !hasLabel ? `<span class="param-units">${escapeHtml(p.units)}</span>` : ''}
+    </div>
+  `}).join('');
+  
+  const footer = document.getElementById('paramsFooter');
+  footer.textContent = `${params.length} parameters` + (usedSet.size > 0 ? ` · ${usedSet.size} mapped` : '');
+}
+
+// ── Drag & Drop ──
+function onParamDragStart(e, paramIndex) {
+  e.dataTransfer.setData('paramIndex', paramIndex.toString());
+}
+
+function onSlotDragOver(e) {
+  e.preventDefault();
+  e.currentTarget.classList.add('drag-over');
+}
+
+function onSlotDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+
+function onSlotDrop(e, pageIdx, slotIdx) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  const paramIndex = parseInt(e.dataTransfer.getData('paramIndex'));
+  if (isNaN(paramIndex)) return;
+  pages[pageIdx].params[slotIdx] = paramIndex;
+  renderMapping();
+  renderParams();
+}
+
+function removeSlot(pageIdx, slotIdx) {
+  pages[pageIdx].params[slotIdx] = null;
+  pages[pageIdx].labels[slotIdx] = '';
+  renderMapping();
+  renderParams();
+}
+
+function onLabelChange(pageIdx, slotIdx, value) {
+  pages[pageIdx].labels[slotIdx] = value;
+}
+
+// ── Render mapping ──
+function renderMapping() {
+  const body = document.getElementById('mappingBody');
+  
+  if (!selectedPlugin) {
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div>Select a plugin from the sidebar</div></div>';
+    return;
+  }
+  
+  if (pages.length === 0) {
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div style="font-size:15px;margin-bottom:8px">No mapping yet</div><div style="font-size:13px">Click "+ Add Page" to start mapping parameters</div></div>';
+    return;
+  }
+  
+  const paramLookup = {};
+  if (pluginDetail?.plugin?.parameters) {
+    pluginDetail.plugin.parameters.forEach(p => paramLookup[p.index] = p);
+  }
+  
+  body.innerHTML = pages.map((page, pi) => `
+    <div class="page">
+      <div class="page-header">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="page-label">PAGE ${pi + 1}</span>
+          <span class="page-name" onclick="this.style.display='none';this.nextElementSibling.style.display='inline';this.nextElementSibling.focus()">${page.name || 'Unnamed'}</span>
+          <input class="page-name-input" style="display:none" value="${page.name || ''}"
+                 onblur="pages[${pi}].name=this.value;this.style.display='none';this.previousElementSibling.style.display='inline';this.previousElementSibling.textContent=this.value||'Unnamed'"
+                 onkeydown="if(event.key==='Enter')this.blur()">
+        </div>
+        <button class="btn btn-outline btn-red" style="font-size:11px;padding:4px 10px" onclick="removePage(${pi})">Remove Page</button>
+      </div>
+      <div class="slots-grid">
+        ${Array(8).fill(null).map((_, si) => {
+          const paramIdx = page.params[si];
+          const param = paramIdx != null ? paramLookup[paramIdx] : null;
+          const label = page.labels?.[si] || '';
+          return `
+            <div class="slot ${param ? 'filled' : ''}" 
+                 ondragover="onSlotDragOver(event)" ondragleave="onSlotDragLeave(event)"
+                 ondrop="onSlotDrop(event, ${pi}, ${si})">
+              <div class="slot-header">
+                <span class="slot-enc">ENC ${si + 1}</span>
+                ${param ? `<button class="slot-remove" onclick="removeSlot(${pi},${si})">×</button>` : ''}
+              </div>
+              ${param ? `
+                <div class="slot-name">${escapeHtml(param.name || param.label)}</div>
+                <input class="slot-label-input" placeholder="Short label..." value="${label}"
+                       onchange="onLabelChange(${pi},${si},this.value)">
+              ` : `
+                <div class="slot-empty">Drop parameter here</div>
+              `}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Page actions ──
+function addPage() {
+  pages.push({ name: '', params: Array(8).fill(null), labels: Array(8).fill('') });
+  renderMapping();
+}
+
+function removePage(idx) {
+  pages.splice(idx, 1);
+  renderMapping();
+  renderParams();
+}
+
+// ── Save / Delete ──
+async function saveMapping() {
+  if (!selectedPlugin) return;
+  const cleanPages = pages
+    .filter(p => p.params.some(v => v != null))
+    .map(p => ({
+      name: p.name || '',
+      params: p.params.map(v => v != null ? v : -1).filter(v => v >= 0),
+      labels: (p.labels || []).filter((_, i) => p.params[i] != null),
+    }));
+  
+  try {
+    await postJson(`${API}/mappings/${encodeURIComponent(selectedPlugin)}`, { pages: cleanPages });
+    showToast(`Mapping saved for ${selectedPlugin}`);
+    const d = await fetchJson(`${API}/plugins`);
+    allPlugins = d.plugins;
+    renderPluginList();
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+async function deleteMapping() {
+  if (!selectedPlugin || !confirm(`Delete mapping for ${selectedPlugin}?`)) return;
+  try {
+    await fetch(`${API}/mappings/${encodeURIComponent(selectedPlugin)}`, { method: 'DELETE' });
+    pages = [];
+    renderMapping();
+    renderParams();
+    showToast('Mapping deleted');
+    const d = await fetchJson(`${API}/plugins`);
+    allPlugins = d.plugins;
+    renderPluginList();
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+// ── Start ──
+init();
+</script>
+</body>
+</html>
