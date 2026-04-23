@@ -2,7 +2,7 @@
 
 Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
-![Version](https://img.shields.io/badge/version-1.0.2-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.0.3-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 
@@ -17,9 +17,11 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - **Pan** — Panorama control with visual L/C/R feedback
 - **Track** — Combined Vol + Pan + 6 Sends for the selected track
 - **Mute / Solo / Monitor / Record** — Toggle per track with colored LED indicators
+- **Long press** in Mute mode = Monitor toggle, in Solo mode = Record Arm toggle
 - **Clear All** — Shift+Mute/Solo clears all mutes, solos, monitors, or rec arms
 - **Edit Channel Settings** — Double press upper row to open
-- **Bank navigation** — Browse tracks in groups of 8
+- **Bank navigation** — Browse tracks in groups of 8, Shift+◄► nudges by 1 track
+- **Adaptive text color** — Track headers automatically switch between white and black text based on background luminance
 
 ### Sends
 - 8 sends per selected track with destination names and level display
@@ -28,13 +30,32 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - Track navigation with ◄►
 
 ### Inserts
-- Scan and display 8 insert plugins per track
-- Bypass toggle per slot
+- Scan and display up to 16 insert plugins per track (2 banks of 8)
+- Bypass toggle per slot via DirectAccess (instant response)
 - Plugin parameter control with bank navigation
 - Short press = enter parameters, Long press (0.5s) = open plugin UI only
 - Open plugin UI, Deactivate plugin
+- **Plugin Mapper integration** — mapped plugins show ★ MAPPED indicator and use custom parameter pages
 - Mute/Solo/Monitor/Rec on buttons 5-8
 - Track navigation with ◄►
+
+### Plugin Browser *(Nuendo 15+ / API 1.3)*
+- **Add Device** button opens the Plugin Browser
+- Phase 1: Select target insert slot (upper row buttons)
+- Phase 2: Browse plugins with encoders (page scroll + fine scroll)
+- Load plugins directly from the Push 2 display
+- **Collection picker** — browse all available Nuendo plugin collections with a dedicated selection page
+- Auto-return to Inserts mode after loading
+
+### Plugin Mapper *(optional)*
+- Web-based parameter mapping tool at http://localhost:8100
+- **Scanner** — discovers VST3 plugins and extracts parameters using Spotify's pedalboard library (GPL-3.0)
+- **Drag-and-drop UI** — create pages of 8 encoders with custom labels
+- **Fuzzy matching** — pedalboard parameter names matched to Nuendo's DirectAccess parameters automatically
+- Mappings saved in `~/.push2bridge/mappings/` (shareable JSON files)
+- Integrated into the bridge — starts automatically if dependencies are installed
+- Access via macOS menu bar (Plugin Mapper) or directly at http://localhost:8100
+- Install dependencies: `pip install fastapi uvicorn pedalboard`
 
 ### Quick Controls (Device)
 - 8 Quick Controls per selected track
@@ -48,6 +69,7 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - Metronome toggle
 - Undo
 - Play LED: white (stop), green (play), purple (play + loop)
+- Record LED: orange (idle), blinking red (track armed), solid red (recording)
 
 ### Automation
 - Cycle: Off → Read → Read+Write → Write → Off
@@ -65,12 +87,14 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 ### Setup Page
 - **Aftertouch Mode**: Polyphonic, Channel, or Off
 - **Velocity Curve**: Linear, Logarithmic, Exponential, S-Curve, Fixed (with adjustable value)
+- **CC Mode**: Absolute or Pick-up (direction-change detection to prevent parameter jumps)
 - **About**: Bridge version and JS Script version display
 
 ### MIDI CC Controller (Shift+Note)
 - 8 assignable CC faders with real-time value bars
 - CC number editing mode via upper row buttons
 - On/Off toggle via lower row buttons (for sustain, etc.)
+- CC Mode (Absolute/Pick-up) configurable in Setup page
 - Default CCs: Mod Wheel, Breath, Volume, Balance, Pan, Expression, Sustain, Portamento
 
 ### Note Input
@@ -84,7 +108,7 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - Long press upper row (1s) → Open instrument UI
 - Double press upper row → Edit Channel Settings
 - Add Track / New Track Version / Duplicate Track
-- Full 960×160 pixel Push 2 display rendering
+- Full 960×160 pixel Push 2 display rendering with bold headers
 
 ---
 
@@ -95,10 +119,17 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - **macOS 11+** or **Windows 10/11**
 - **libusb** (macOS: `brew install libusb`)
 
+**Nuendo 15+ features:** Plugin Browser (Add Device) and DirectAccess-based insert control require MIDI Remote API 1.3. All other features work with Nuendo 14+.
+
 For Windows, you also need:
 - **Python 3.9+**
 - **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** for virtual MIDI ports
 - **[Zadig](https://zadig.akeo.ie/)** for USB driver
+
+For the Plugin Mapper (optional):
+```bash
+pip install fastapi uvicorn pedalboard
+```
 
 ---
 
@@ -106,14 +137,15 @@ For Windows, you also need:
 
 ### macOS — Standalone App (Recommended)
 
-1. Install libusb: `brew install libusb`
-2. Copy **Push2 Nuendo Bridge v1.0.2.app** to `/Applications`
-3. Copy **Ableton_Push2.js** to:
+1. Install Homebrew (if needed): visit [brew.sh](https://brew.sh)
+2. Install libusb: `brew install libusb`
+3. Copy **Push2 Nuendo Bridge.app** to `/Applications`
+4. Copy **Ableton_Push2.js** to:
    ```
    ~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/
    ```
-4. Launch the app — a **P2** icon appears in the menu bar
-5. Open Nuendo — the MIDI Remote script configures itself automatically
+5. Launch the app — a **P2** icon appears in the menu bar
+6. Open Nuendo — the MIDI Remote script configures itself automatically
 
 ### macOS — From Source
 
@@ -125,7 +157,7 @@ cd src && python3 main.py
 
 ### Windows
 
-See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide.pdf)** for detailed step-by-step instructions including Python, Zadig, loopMIDI, and Nuendo configuration.
+See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_2.pdf)** for detailed step-by-step instructions including Python, Zadig, loopMIDI, and Nuendo configuration.
 
 Quick start:
 ```bash
@@ -144,9 +176,10 @@ python main.py --terminal
 | Clip | Sends mode | Pan mode |
 | Device | Quick Controls | |
 | Browse | Inserts mode | |
+| Add Device | Plugin Browser | |
 | Note | MIDI note pads | MIDI CC controller |
 | Setup | Setup page | |
-| ◄ ► | Bank navigation | Track nav (Sends/Inserts/Device) |
+| ◄ ► | Bank navigation (8) | Nudge ±1 (Vol/Pan) |
 | Play | Start playback | |
 | Record | Record toggle | |
 | Fixed Length | Cycle/Loop toggle | |
@@ -170,6 +203,8 @@ python main.py --terminal
 | 5 (0xB4) | Quick Controls |
 | 6 (0xB5) | Control Room knobs and buttons |
 | 7 (0xB6) | Bank zone sends |
+| 8 (0xB7) | DirectAccess commands (plugin browser, bypass, edit) |
+| 9 (0xB8) | DirectAccess encoder control (mapped plugin parameters) |
 | 16 (0xBF) | Heartbeat (connection monitoring) |
 
 ---
@@ -178,6 +213,8 @@ python main.py --terminal
 
 - **Push 2 not found**: Make sure it's connected via USB, libusb is installed, and Ableton Live is not running
 - **No connection to Nuendo**: Check that the bridge is running and MIDI Remote ports are correctly assigned
+- **Plugin Browser not working**: Requires Nuendo 15+ (API 1.3)
+- **Plugin Mapper not loading**: Install dependencies with `pip install fastapi uvicorn pedalboard`
 - **Peak clip on startup**: Normal — filtered automatically after a 3-second grace period
 - **Track names not loading**: Navigate with ◄► to force a bank refresh
 
@@ -185,9 +222,10 @@ python main.py --terminal
 
 ## Documentation
 
-- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide.pdf)** — Complete installation and usage manual
-- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes.pdf)** — Version history
-- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide.pdf)** — Step-by-step Windows setup
+- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_3.pdf)** — Complete installation and usage manual
+- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_3.pdf)** — Version history
+- **[Plugin Mapper Guide](docs/Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf)** — Plugin Mapper setup and usage
+- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_2.pdf)** — Step-by-step Windows setup
 
 ---
 
