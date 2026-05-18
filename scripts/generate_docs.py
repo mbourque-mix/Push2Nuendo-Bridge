@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate PDF documents for Push2Nuendo-Bridge v1.0.3
+"""Generate PDF documents for Push2Nuendo-Bridge v1.0.4
 
 Usage: python scripts/generate_docs.py
 Output: docs/*.pdf
@@ -53,10 +53,39 @@ def footer(c,d):
     c.drawCentredString(letter[0]/2,0.5*inch,f"Push 2 / Nuendo Bridge \u2014 Page {d.page}"); c.restoreState()
 
 def build_release_notes():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Release_Notes_v1_0_3.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
     s.append(Paragraph("Release Notes", sSub))
+
+    # \u2500\u2500 Version 1.0.4 \u2500\u2500
+    s.append(Paragraph("Version 1.0.4 \u2014 May 2026", sH1))
+    s.append(Paragraph("New Features", sH2))
+    s.append(B("<b>Channel Strip mode</b> (Mix \u2192 Mix again): a dedicated Channel Strip view with an overview page (Gate, Comp, EQ, Tools, Sat, Limiter shown as Cubase-coloured banners) and six drill-down sub-pages \u2014 one per module."))
+    s.append(B("<b>Strip slot extended parameters</b>: parameters that are NOT in Cubase's bank zone are now reachable via DirectAccess on every strip variant \u2014 e.g. VintageCompressor Ratio &amp; Mix, Standard Compressor DryMix &amp; Hold, Tube Compressor Character &amp; High Ratio, DeEsser side-chain filter &amp; Diff, Magneto II Dual &amp; Oversample, Maximizer Release &amp; Recover, Brickwall Link &amp; Oversample, Noise Gate Hold &amp; Analysis, and more."))
+    s.append(B("<b>EQ page (EQ-Eight style)</b>: band selector (Enc 1), Type / Freq / Q / Gain for the selected band, PreFilter Low-Cut / High-Cut frequency and on/off, PreGain, plus a live magnitude curve (4 EQ bands + PreFilter) with numbered band markers. The curve updates in real time from the Push <b>and</b> from changes made in Nuendo."))
+    s.append(B("<b>Edit Channel Settings</b>: now on lower-row button 8 (Channel Strip pages) and Shift+Upper Row (Mix view), in addition to the existing double-press. The button lights white and the on-screen pill turns white while the window is open (bidirectional state feedback)."))
+    s.append(B("<b>Section colours &amp; bold labels</b>: each Channel Strip section uses its Nuendo track-strip colour with bold module names, matching the Cubase/Nuendo GUI."))
+    s.append(B("<b>Amber Bypass indicators</b>: bypass pills/LEDs light amber when the section is bypassed (engaged), matching Nuendo's bypass button behaviour."))
+    s.append(B("<b>Lower-row LED sync</b>: lower-row button LEDs follow the on-screen toggle states on the Channel Strip overview and all sub-pages."))
+    s.append(B("<b>Piano scale mode</b>: a new <i>Piano</i> option in the Scale selector lays the pads out like a piano keyboard — white keys on the lower row of each octave pair, black keys on the upper row, four octaves stacked bottom-to-top, every C highlighted in purple. Rooted at C (root selection is locked in this mode); Octave Up/Down shifts the whole four-octave block."))
+    s.append(Paragraph("Technical", sH2))
+    s.append(B("Strip slot DA exploration (up to 6 slots) with dynamic DA-slot resolution by plugin name \u2014 supports custom Cubase strip layouts where module order differs."))
+    s.append(B("DA param-flip mechanism (CC 73/74 ch8) for binary toggles that Cubase's setTypeToggle handles unreliably (e.g. VintageCompressor Punch, EQ section bypass, EQ band on/off)."))
+    s.append(B("Live host-side parameter feedback via SysEx 0x3D from daInserts.mOnParameterChange, de-duplicated to avoid flooding during mouse drags in Nuendo."))
+    s.append(B("Edit Channel Settings window state via SysEx 0x3E (separate read binding)."))
+    s.append(B("Dedicated read bindings for PreFilter Phase / section bypass and ChannelEQ bypass so the on-screen state stays in sync."))
+    s.append(B("SysEx range 0x34\u20130x3E and ch8 CC 70\u201378 allocated for strip slot cache, bypass, edit, param-flip, variant probe and live feedback."))
+    s.append(Paragraph("Known Limitations", sH2))
+    s.append(B("<b>Windows — IMPORTANT: installing the WinUSB driver with Zadig disables the Push 2 in Ableton Live.</b> Windows binds the Push 2 to a single driver at a time: the bridge needs WinUSB (via Zadig), while Ableton Live needs Ableton's own driver. After the Zadig step the Push 2 will not be recognised by Live until you revert the driver. To go back to Live: Device Manager → right-click the Push 2 → <i>Uninstall device</i> with <i>Delete the driver software</i> ticked → unplug/replug (full step-by-step in the Windows Installation Guide). The bridge and Ableton Live cannot use the Push 2 at the same time. (macOS is unaffected.)"))
+    s.append(B("Channel Strip modules must be <b>activated manually in Nuendo</b> first — an empty or disabled strip slot (Gate, Comp, EQ, Tools, Sat, Limiter) is not exposed to the Push 2. Load/enable the module in the Nuendo channel strip before controlling it from the controller."))
+    s.append(B("Strip slot <b>variant switching from the Push is not possible</b> \u2014 Cubase locks strip-slot plugin selection; the MIDI Remote API (trySetSlotPlugin / the slot 'Effect Type' tag) is silently rejected. Switch variants in Nuendo's strip-slot menu; the on-screen chip mirrors the active variant in real time."))
+    s.append(B("Opening a strip-slot plugin's <b>Edit UI from the Push is not exposed</b> by the MIDI Remote API (mEdit toggles a flag but Nuendo does not open the window). Use the 'e' button in the mixer console."))
+    s.append(B("ChannelEQ <b>bands 2 and 3 are always Peak</b> filters (Cubase restriction) \u2014 the Type encoder has no effect on those bands."))
+    s.append(B("No audio spectrogram behind the EQ curve \u2014 the MIDI Remote API provides no audio stream."))
+    s.append(B("<b>Remove the Push 2 'Live Port' and 'User Port' from Nuendo's \u201cIn All MIDI Inputs\u201d</b> (Studio Setup \u2192 MIDI Port Setup) or pad notes will be doubled (one copy from the bridge's BridgeNotes port, one direct from the hardware)."))
+    s.append(PageBreak())
+
     s.append(Paragraph("Version 1.0.3 \u2014 April 2026", sH1))
     s.append(Paragraph("New Features", sH2))
     s.append(B("<b>Plugin Browser</b> (Add Device button): browse and load plugins directly from the Push 2. Select an insert slot, scroll through your plugin collection, and load with one press. Uses the DirectAccess Plugin Manager API (Nuendo 15+ / API 1.3)."))
@@ -168,40 +197,64 @@ def build_mapper_guide():
     print("  done: Plugin Mapper Guide")
 
 def build_user_guide():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_User_Guide_v1_0_3.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
-    s.append(Paragraph("User Guide &amp; Installation Manual \u2014 Version 1.0.3", sSub))
+    s.append(Paragraph("User Guide &amp; Installation Manual \u2014 Version 1.0.4", sSub))
     s.append(Paragraph("Compatible with Nuendo 14+ and Cubase 14+ \u2014 macOS and Windows", sCtr))
     s.append(Paragraph("This guide covers installation, configuration, and use of the Push 2 / Nuendo Bridge.", sB))
     # TOC
     s.append(Paragraph("Table of Contents", sH1))
-    for item in ["1. System Requirements","2. Installation \u2014 macOS","3. Installation \u2014 Windows","4. First Launch","5. Nuendo Configuration","6. Using the Bridge","7. Mixer Modes","8. Sends Mode","9. Inserts Mode","10. Plugin Browser","11. Quick Controls","12. Transport","13. Automation","14. Touchstrip","15. Note Input","16. Control Room","17. Setup Page","18. MIDI CC Controller","19. Plugin Mapper","20. Button Reference","21. MIDI Channel Allocation","22. Troubleshooting","23. Support"]:
+    for item in ["1. System Requirements","2. Installation \u2014 macOS","3. Installation \u2014 Windows","4. First Launch","5. Nuendo Configuration","6. Using the Bridge","7. Mixer Modes","8. Sends Mode","9. Inserts Mode","10. Plugin Browser","11. Quick Controls","12. Transport","13. Automation","14. Touchstrip","15. Note Input","16. Control Room","17. Channel Strip","18. Channel EQ Page","19. Setup Page","20. MIDI CC Controller","21. Plugin Mapper","22. Button Reference","23. MIDI Channel Allocation","24. Troubleshooting","25. Support"]:
         s.append(Paragraph(item, ParagraphStyle('toc',parent=sB,spaceAfter=1,fontSize=10)))
     s.append(PageBreak())
     # 1
     s.append(Paragraph("1. System Requirements", sH1))
     s.append(B("Ableton Push 2 (USB), Steinberg Nuendo 14+ or Cubase 14+, macOS 11+ or Windows 10/11"))
-    s.append(B("Developer: Python 3.9+, libusb"))
+    s.append(B("<b>Python 3.11.9 maximum</b> (3.9–3.11.9). Newer 3.12/3.13 builds are not yet supported by the audio/MIDI dependencies."))
+    s.append(B("libusb (macOS: <font face='Courier'>brew install libusb</font>)"))
+    s.append(B("push2-python must be installed from source:<br/><font face='Courier'>pip install git+https://github.com/ffont/push2-python.git</font>"))
     s.append(B("Plugin Mapper (optional): pip install fastapi uvicorn pedalboard"))
-    s.append(Paragraph("<b>Nuendo 15+ features:</b> Plugin Browser (Add Device) and DirectAccess insert control require API 1.3. All other features work with Nuendo 14+.", sNote))
+    s.append(Paragraph("<b>Nuendo 15+ features:</b> Plugin Browser, DirectAccess insert control and the Channel Strip extended-parameter / EQ-curve pages require API 1.3. All other features work with Nuendo 14+.", sNote))
     # 2
     s.append(Paragraph("2. Installation \u2014 macOS", sH1))
     s.append(Paragraph("Option A: Standalone App (Recommended)", sH2))
     s.append(B("Step 1: Install Homebrew (if not already installed) \u2014 open Terminal and run:<br/><font face='Courier'>/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"</font><br/>See https://brew.sh for details."))
     s.append(B("Step 2: Install libusb \u2014 <font face='Courier'>brew install libusb</font>"))
     s.append(B("Step 3: Copy Push2 Nuendo Bridge.app to /Applications"))
-    s.append(B("Step 4: Copy Ableton_Push2.js to:<br/>~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/<br/>Create the Ableton/Push2 folder if it doesn't exist."))
-    s.append(B("Step 5: Double-click the app. A P2 icon appears in the menu bar."))
+    s.append(B("Step 4: The app is <b>not code-signed</b>, so macOS Gatekeeper blocks it on first launch. Open Terminal and remove the quarantine flag (match the version in the .app name to your copy):"))
+    s.append(Paragraph("xattr -dr com.apple.quarantine \"/Applications/Push2 Nuendo Bridge_v1.0.4.app\"", sCode))
+    s.append(B("Step 5: Copy Ableton_Push2.js to:<br/>~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/<br/>Create the Ableton/Push2 folder if it doesn't exist."))
+    s.append(B("Step 6: Double-click the app. A P2 icon appears in the menu bar."))
     # 3
     s.append(Paragraph("3. Installation \u2014 Windows", sH1))
-    s.append(Paragraph("See the separate Windows Installation Guide for detailed instructions.", sB))
+    s.append(Paragraph("Windows now ships as a <b>standalone .exe</b> \u2014 no Python, pip or command line required. See the separate Windows Installation Guide for the step-by-step walkthrough. Key points:", sB))
+    s.append(B("Download <b>Push2NuendoBridge-vX.Y.Z-Windows.zip</b> and unzip it anywhere (e.g. Documents). It contains the <font face='Courier'>.exe</font>, <font face='Courier'>Ableton_Push2.js</font> and the PDF guides."))
+    s.append(B("Install <b>loopMIDI</b> and create the four ports: <font face='Courier'>NuendoBridge In</font>, <font face='Courier'>NuendoBridge Out</font>, <font face='Courier'>BridgeNotes</font>, <font face='Courier'>BridgeNotes In</font>. Set it to start with Windows."))
+    s.append(B("Install the <b>WinUSB driver for the Push 2 with Zadig</b> (one time) so the bridge can talk to the device over USB."))
+    s.append(Paragraph("<b>IMPORTANT:</b> installing the WinUSB driver with Zadig <b>disables the Push 2 in Ableton Live</b> on this PC \u2014 Windows allows only one driver per device, and Live needs Ableton's own driver. The bridge and Ableton Live cannot use the Push 2 at the same time. This is fully reversible: see \u201cReverting the Zadig driver\u201d in the Windows Installation Guide to restore Push 2 use in Live. (macOS is not affected.)", sNote))
+    s.append(B("<b>Double-click the .exe</b> to run the bridge \u2014 a console window shows the status and a clickable Plugin Mapper link (http://localhost:8100)."))
+    s.append(Paragraph("No Python install is needed: the interpreter, all dependencies and the libusb runtime are bundled inside the .exe.", sNote))
+    s.append(B("Copy <b>Ableton_Push2.js</b> to the MIDI Remote scripts folder, creating the sub-folders if needed:"))
+    s.append(Paragraph("Nuendo:<br/>C:\\Users\\&lt;user&gt;\\Documents\\Steinberg\\Nuendo\\MIDI Remote\\Driver Scripts\\Local\\Ableton\\Push2\\", sCode))
+    s.append(Paragraph("Cubase:<br/>C:\\Users\\&lt;user&gt;\\Documents\\Steinberg\\Cubase\\MIDI Remote\\Driver Scripts\\Local\\Ableton\\Push2\\", sCode))
+    s.append(Paragraph("Replace &lt;user&gt; with your Windows user name. The <font face='Courier'>Local\\Ableton\\Push2</font> folders usually do not exist yet \u2014 create them.", sNote))
     # 4
     s.append(Paragraph("4. First Launch", sH1))
     s.append(Paragraph("Connect Push 2 via USB, launch the bridge, open Nuendo. Menu bar icon: P2 \u2713 = connected, P2 \u231b = waiting. Click for Start/Stop, Show Logs, Plugin Mapper, Start at Login, Quit.", sB))
     # 5
     s.append(Paragraph("5. Nuendo Configuration", sH1))
-    s.append(Paragraph("Automatic setup: Nuendo detects the script and assigns ports. If needed, assign manually: Input = NuendoBridge Out, Output = NuendoBridge In. For note input, enable BridgeNotes in MIDI Port Setup.", sB))
+    s.append(Paragraph("Automatic setup: Nuendo usually detects the script and assigns its ports on its own.", sB))
+    s.append(Paragraph("If the script does not load automatically", sH2))
+    s.append(B("Open any project."))
+    s.append(B("Studio → MIDI Remote Manager → <b>Add MIDI Controller Surface</b>."))
+    s.append(B("Vendor = <b>Ableton</b>, Model = <b>Push2</b>."))
+    s.append(B("MIDI Input = <b>NuendoBridge Out</b>, MIDI Output = <b>NuendoBridge In</b> (the ports carry the same names as listed here)."))
+    s.append(Paragraph("Note Input", sH2))
+    s.append(Paragraph("Set the instrument track's MIDI input to <b>BridgeNotes</b> (enable it in MIDI Port Setup if hidden).", sB))
+    s.append(Paragraph("Important — avoid doubled notes", sH2))
+    s.append(B("In Studio Setup → MIDI Port Setup, <b>uncheck “In ‘All MIDI Inputs’” for both Push 2 ports</b> — “Ableton Push 2” (Live Port) and “Ableton Push 2 User Port”."))
+    s.append(Paragraph("If left checked, every pad you play is received twice: once via the bridge's BridgeNotes port and once directly from the Push 2 hardware. Excluding the raw Push 2 ports is standard practice for any control-surface bridge and is permanent once set.", sNote))
     s.append(PageBreak())
     # 6
     s.append(Paragraph("6. Using the Bridge", sH1))
@@ -269,41 +322,76 @@ def build_user_guide():
     # 15
     s.append(Paragraph("15. Note Input", sH1))
     s.append(Paragraph("64 pads: Chromatic (default) or Drum (Layout). Scale, Accent, Note Repeat available. Set instrument input to BridgeNotes.", sB))
+    s.append(Paragraph("Scale selector (Scale button): pick a musical scale or the <b>Piano</b> layout. Piano mode arranges the pads like a piano keyboard — white keys on the lower row of each octave pair, black keys on the upper row, four octaves stacked bottom-to-top, every C in purple. The root is locked to C in Piano mode; use Octave Up/Down to move the whole four-octave block.", sB))
     # 16
     s.append(Paragraph("16. Control Room", sH1))
     s.append(Paragraph("Press User. 4 pages: Main, Phones, Cues, Sources. Master encoder = Main level. User+Master = Phones.", sB))
     s.append(PageBreak())
-    # 17
-    s.append(Paragraph("17. Setup Page", sH1))
+    # 17 — Channel Strip
+    s.append(Paragraph("17. Channel Strip", sH1))
+    s.append(Paragraph("<i>Extended-parameter and EQ-curve control require Nuendo 15+ (API 1.3).</i>", sNote))
+    s.append(Paragraph("From the Mixer view, press <b>Mix again</b> to enter Channel Strip mode. The overview shows the six strip sections as Cubase-coloured banners (Gate, Comp, EQ, Tools, Sat, Limiter) plus PreFilter Phase and PreGain.", sB))
+    s.append(Paragraph("<b>Important:</b> a strip module can only be controlled once it has been <b>activated manually in Nuendo</b>. Open the channel's strip in the Nuendo mixer and load/enable each module (Gate, Comp, EQ, Tools, Sat, Limiter) you want to use. An empty or disabled strip slot is not exposed to the Push 2 — its banner and encoders stay inactive until you turn the module on in Nuendo.", sNote))
+    s.append(Paragraph("Overview", sH2))
+    s.append(B("Each banner shows the section colour (dimmed when bypassed) and the loaded plugin variant."))
+    s.append(B("Lower row 1-6 = Bypass each section (pill/LED amber when bypassed)."))
+    s.append(B("Lower row 7 = PreFilter Phase On/Off. Lower row 8 = Edit Channel Settings (white when the window is open)."))
+    s.append(B("Upper row 1-6 = drill into that module's sub-page."))
+    s.append(Paragraph("Module Sub-pages", sH2))
+    s.append(B("8 encoders control that module's parameters. Parameters beyond Cubase's bank zone are exposed via DirectAccess (e.g. VintageCompressor Ratio &amp; Mix, Tube Compressor Character, DeEsser side-chain filter, Maximizer Release/Recover)."))
+    s.append(B("Lower row = the module's binary toggles (Auto Release, Solo, Diff, etc.) — LEDs follow the on-screen pills."))
+    s.append(B("Upper row layout: 1 = module name (inactive), 2 = Bypass, 3-5 = variant chips, 8 = back to overview."))
+    s.append(Paragraph("Variant chips show the currently loaded plugin. Switching the variant must be done in Nuendo's strip-slot menu — the MIDI Remote API does not allow changing strip-slot plugins from a controller; the chip mirrors the active variant in real time.", sNote))
+    # 18 — EQ page
+    s.append(Paragraph("18. Channel EQ Page", sH1))
+    s.append(Paragraph("Drill into the EQ section for an EQ-Eight-style page with a live frequency-response curve.", sB))
+    s.append(T([['Encoder','Function'],
+        ['1','Band selector (1-4) — turn to pick the active band'],
+        ['2','Filter Type of the selected band (bands 2-3 are fixed Peak)'],
+        ['3','Frequency of the selected band'],
+        ['4','Q of the selected band'],
+        ['5','Gain of the selected band'],
+        ['6','PreFilter Low-Cut frequency'],
+        ['7','PreFilter High-Cut frequency'],
+        ['8','PreGain']], w=[70,390]))
+    s.append(Spacer(1,6))
+    s.append(B("Lower row 1 = selected band On/Off. Lower 6 = LC On, Lower 7 = HC On, Lower 8 = PreFilter bypass."))
+    s.append(B("Upper row 2 = EQ section bypass (amber when bypassed). Upper 8 = back."))
+    s.append(B("The curve combines the 4 EQ bands + PreFilter HC/LC. Numbered circles mark each band at its (freq, gain) point — white when the band is on, grey when off. The curve and markers update live, whether you change a parameter from the Push or directly in Nuendo."))
+    s.append(PageBreak())
+    # 19
+    s.append(Paragraph("19. Setup Page", sH1))
     s.append(Paragraph("Press Setup. Tabs: MIDI Ctrl (aftertouch), Vel Curve (5 presets), CC Mode (Absolute/Pick-up), About.", sB))
     s.append(Paragraph("CC Mode", sH2))
     s.append(B("<b>Absolute</b> (default): encoder value is sent immediately. May cause parameter jumps if the encoder position differs from the current value in Nuendo."))
     s.append(B("<b>Pick-up</b>: encoder does not send values until the user reverses the direction of rotation. This prevents jumps but requires a direction change to engage."))
     s.append(Paragraph("<b>Important:</b> Nuendo does not send the current CC parameter value back to the Push 2. Because of this limitation, the bridge cannot know the actual value in Nuendo and cannot implement a true pick-up (where the encoder catches up to the existing value). Instead, pick-up mode uses direction-change detection: turn the encoder in one direction (nothing happens in Nuendo), then reverse \u2014 the encoder engages from that point on.", sNote))
     # 18
-    s.append(Paragraph("18. MIDI CC Controller", sH1))
+    s.append(Paragraph("20. MIDI CC Controller", sH1))
     s.append(Paragraph("Shift+Note. 8 assignable CC faders on BridgeNotes port. Upper row = edit CC number. Lower row = toggle 0/127. Defaults: CC 1,2,7,8,10,11,64,65.", sB))
     # 19
-    s.append(Paragraph("19. Plugin Mapper", sH1))
+    s.append(Paragraph("21. Plugin Mapper", sH1))
     s.append(Paragraph("Create custom parameter mappings for VST3 plugins. Access via menu bar (Plugin Mapper) or http://localhost:8100. Mappings saved in <b>~/.push2bridge/mappings/</b>. See the separate Plugin Mapper Guide for details.", sB))
     s.append(Paragraph("Requires: pip install fastapi uvicorn pedalboard. The bridge works without these \u2014 the Mapper is optional.", sNote))
     # 20
-    s.append(Paragraph("20. Button Reference", sH1))
-    s.append(T([['Button','Action','Shift + Button'],['Mix','Volume mode','Track mode'],['Clip','Sends mode','Pan mode'],['Device','Quick Controls',''],['Browse','Inserts mode',''],['Add Device','Plugin Browser',''],['Note','MIDI note pads','MIDI CC controller'],['Setup','Setup page',''],['Left/Right','Bank nav (8)','Nudge (1) in Vol/Pan'],['Play','Playback',''],['Record','Record toggle',''],['Mute','Mute/Monitor','Clear all'],['Solo','Solo/Rec arm','Clear all'],['User','Control Room',''],['Layout','Drum/Chromatic','Touchstrip cycle'],['Scale','Scale selector',''],['Accent','Fixed velocity',''],['Repeat','Auto-repeat','']],w=[80,170,200]))
+    s.append(Paragraph("22. Button Reference", sH1))
+    s.append(T([['Button','Action','Shift + Button'],['Mix','Volume mode (press again: Channel Strip)','Track mode'],['Clip','Sends mode','Pan mode'],['Device','Quick Controls',''],['Browse','Inserts mode',''],['Add Device','Plugin Browser',''],['Note','MIDI note pads','MIDI CC controller'],['Setup','Setup page',''],['Left/Right','Bank nav (8)','Nudge (1) in Vol/Pan'],['Play','Playback',''],['Record','Record toggle',''],['Mute','Mute/Monitor','Clear all'],['Solo','Solo/Rec arm','Clear all'],['User','Control Room',''],['Layout','Drum/Chromatic','Touchstrip cycle'],['Upper (dbl / Shift)','Edit Channel Settings',''],['Scale','Scale selector',''],['Accent','Fixed velocity',''],['Repeat','Auto-repeat','']],w=[80,170,200]))
     s.append(PageBreak())
-    # 21
-    s.append(Paragraph("21. MIDI Channel Allocation", sH1))
-    s.append(T([['Channel','Usage'],['1 (0xB0)','Mixer (volume, pan, transport, selection, VU)'],['2 (0xB1)','Insert plugin parameters'],['3 (0xB2)','Send levels (selected track)'],['4 (0xB3)','Insert bypass toggles'],['5 (0xB4)','Quick Controls'],['6 (0xB5)','Control Room'],['7 (0xB6)','Bank zone sends'],['8 (0xB7)','DirectAccess commands (browser, bypass, edit)'],['9 (0xB8)','DirectAccess encoder control (mapped params)'],['16 (0xBF)','Heartbeat']],w=[80,380]))
+    # 23
+    s.append(Paragraph("23. MIDI Channel Allocation", sH1))
+    s.append(T([['Channel','Usage'],['1 (0xB0)','Mixer (volume, pan, transport, selection, VU)'],['2 (0xB1)','Insert plugin parameters'],['3 (0xB2)','Send levels (selected track)'],['4 (0xB3)','Insert bypass toggles'],['5 (0xB4)','Quick Controls'],['6 (0xB5)','Control Room'],['7 (0xB6)','Bank zone sends'],['8 (0xB7)','DirectAccess commands (browser, bypass, edit, strip slot, param-flip, variant)'],['9 (0xB8)','DirectAccess encoder control (mapped params, strip slots)'],['16 (0xBF)','Heartbeat']],w=[80,380]))
     # 22
-    s.append(Paragraph("22. Troubleshooting", sH1))
+    s.append(Paragraph("24. Troubleshooting", sH1))
     s.append(B("<b>Push 2 not found</b>: check USB, libusb, close Ableton Live."))
-    s.append(B("<b>No Nuendo connection</b>: check bridge is running, verify MIDI Remote ports."))
-    s.append(B("<b>Plugin Browser not working</b>: requires Nuendo 15+ (API 1.3)."))
+    s.append(B("<b>push2-python error</b>: install it from source \u2014 pip install git+https://github.com/ffont/push2-python.git. Use Python 3.11.9 or lower."))
+    s.append(B("<b>No Nuendo connection</b>: check bridge is running; add the surface manually (MIDI Remote Manager \u2192 Add, Vendor Ableton / Model Push2)."))
+    s.append(B("<b>Pads play doubled notes</b>: uncheck \u201cIn \u2018All MIDI Inputs\u2019\u201d for the Push 2 Live Port and User Port (Studio Setup \u2192 MIDI Port Setup)."))
+    s.append(B("<b>Channel Strip / EQ curve not working</b>: requires Nuendo 15+ (API 1.3). Drill into a section once to trigger DA strip exploration."))
     s.append(B("<b>Plugin Mapper not loading</b>: pip install fastapi uvicorn pedalboard."))
     s.append(B("<b>Track names not loading</b>: navigate Left/Right to refresh."))
     s.append(Paragraph("Logs: macOS \u2014 ~/Library/Logs/Push2NuendoBridge.log. Windows \u2014 terminal output.", sNote))
-    # 23
-    s.append(Paragraph("23. Support", sH1))
+    # 25
+    s.append(Paragraph("25. Support", sH1))
     s.append(Paragraph("Push 2 / Nuendo Bridge is donationware.", sB))
     s.append(B("GitHub: https://github.com/mbourque-mix/Push2Nuendo-Bridge"))
     s.append(B("Buy Me A Coffee: https://buymeacoffee.com/mbourque"))
@@ -312,9 +400,92 @@ def build_user_guide():
     doc.build(s, onFirstPage=footer, onLaterPages=footer)
     print("  done: User Guide")
 
+def build_windows_install_guide():
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    s = []
+    s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
+    s.append(Paragraph("Windows Installation Guide — Version 1.0.4", sSub))
+    s.append(Paragraph("Standalone .exe — no Python, no pip, no command line", sCtr))
+    s.append(Paragraph("From version 1.0.4 the Windows bridge is a single self-contained executable. The Python interpreter, every dependency and the libusb USB runtime are bundled inside the .exe. You only need to set up the virtual MIDI ports (loopMIDI), the Push 2 USB driver (Zadig) and the Nuendo/Cubase MIDI Remote script.", sB))
+
+    s.append(Paragraph("What you downloaded", sH1))
+    s.append(B("<b>Push2NuendoBridge-vX.Y.Z-Windows.zip</b> — unzip it anywhere you like (e.g. <font face='Courier'>Documents\\Push2Bridge</font>). It contains:"))
+    s.append(B("<font face='Courier'>Push2 Nuendo Bridge_vX.Y.Z.exe</font> — the bridge (double-click to run)."))
+    s.append(B("<font face='Courier'>Ableton_Push2.js</font> — the Nuendo / Cubase MIDI Remote script."))
+    s.append(B("PDF guides (User Guide, Release Notes, Plugin Mapper Guide)."))
+    s.append(Paragraph("Do not delete the .exe after “installing” — it is the application; run it from wherever you keep the unzipped folder.", sNote))
+
+    s.append(Paragraph("Step 1 — loopMIDI virtual ports", sH1))
+    s.append(B("Download and install loopMIDI: https://www.tobias-erichsen.de/software/loopmidi.html"))
+    s.append(B("Open loopMIDI and create <b>four</b> ports with these EXACT names (type the name, click the <b>+</b> button):"))
+    s.append(Paragraph("NuendoBridge In<br/>NuendoBridge Out<br/>BridgeNotes<br/>BridgeNotes In", sCode))
+    s.append(B("Right-click the loopMIDI tray icon and enable <b>“Autostart loopMIDI”</b> so the ports exist every time Windows starts."))
+
+    s.append(Paragraph("Step 2 — Push 2 USB driver (Zadig)", sH1))
+    s.append(B("The bridge talks to the Push 2 over raw USB and needs the <b>WinUSB</b> driver. This is a one-time setup."))
+    s.append(B("Close Ableton Live if it is running (it grabs the Push 2 exclusively)."))
+    s.append(B("Download Zadig: https://zadig.akeo.ie"))
+    s.append(B("Connect the Push 2 by USB. In Zadig: <b>Options → List All Devices</b>, then select <b>Ableton Push 2</b> in the dropdown."))
+    s.append(B("Choose <b>WinUSB</b> as the target driver and click <b>Install Driver</b> (or <b>Replace Driver</b>). Wait for “The driver was installed successfully”."))
+    s.append(Paragraph("<b>IMPORTANT — this disables the Push 2 in Ableton Live.</b> Windows binds the Push 2 to a single driver at a time. Once WinUSB is installed, Ableton Live will no longer detect or control the Push 2 on this PC. The bridge and Ableton Live cannot use the Push 2 simultaneously. This is fully reversible — see “Reverting the Zadig driver” below to restore Push 2 use in Live. (macOS is not affected by this.)", sNote))
+
+    s.append(Paragraph("Reverting the Zadig driver (use the Push 2 in Ableton Live again)", sH2))
+    s.append(B("Quit the bridge and close Ableton Live."))
+    s.append(B("Open <b>Device Manager</b> (right-click Start → Device Manager)."))
+    s.append(B("Find <b>Ableton Push 2</b> — it appears under <i>Universal Serial Bus devices</i> (the WinUSB entry). Tip: View → <i>Devices by container</i> if you do not see it."))
+    s.append(B("Right-click it → <b>Uninstall device</b>, tick <b>“Delete the driver software for this device”</b>, confirm."))
+    s.append(B("Unplug the Push 2 USB cable, wait a few seconds, plug it back in (or Action → <i>Scan for hardware changes</i>). Windows reinstalls the default driver."))
+    s.append(B("Launch <b>Ableton Live</b> — it re-establishes its own Push 2 connection. If Live still does not see it, repair/reinstall Live so it reinstalls its Push 2 driver."))
+    s.append(Paragraph("To switch back to the bridge later, simply re-run the Zadig WinUSB step above. You can flip between WinUSB (bridge) and the Ableton driver (Live) as often as you like — it is a 30-second operation each way.", sNote))
+
+    s.append(Paragraph("Step 3 — Install the MIDI Remote script", sH1))
+    s.append(B("Copy <b>Ableton_Push2.js</b> into the Steinberg MIDI Remote scripts folder, creating the sub-folders if they do not exist:"))
+    s.append(Paragraph("Nuendo:<br/>C:\\Users\\&lt;user&gt;\\Documents\\Steinberg\\Nuendo\\MIDI Remote\\Driver Scripts\\Local\\Ableton\\Push2\\", sCode))
+    s.append(Paragraph("Cubase:<br/>C:\\Users\\&lt;user&gt;\\Documents\\Steinberg\\Cubase\\MIDI Remote\\Driver Scripts\\Local\\Ableton\\Push2\\", sCode))
+    s.append(Paragraph("Replace &lt;user&gt; with your Windows user name. The <font face='Courier'>Local\\Ableton\\Push2</font> sub-folders usually do not exist yet — create them.", sNote))
+
+    s.append(PageBreak())
+    s.append(Paragraph("Step 4 — Run the bridge", sH1))
+    s.append(B("Connect the Push 2 by USB (and make sure Ableton Live is closed)."))
+    s.append(B("<b>Double-click the .exe.</b> A console window opens and shows the startup status:"))
+    s.append(Paragraph("[0/3] Plugin Mapper: running at http://localhost:8100<br/>[1/3] Connecting to MIDI ports...<br/>[2/3] Connecting to Push 2...<br/>[3/3] Bridge is running!", sCode))
+    s.append(B("The console prints a framed <b>Plugin Mapper link</b> (http://localhost:8100) and opens it in your browser automatically. Most terminals also let you Ctrl+click the link. Launch the .exe with <font face='Courier'>--no-browser</font> to skip the auto-open."))
+    s.append(B("Keep the console window open while you work — it shows live status and any errors. Press <b>Ctrl+C</b> (or close the window) to stop the bridge."))
+    s.append(Paragraph("Windows SmartScreen may warn on first launch because the .exe is not code-signed. Click “More info → Run anyway”. The CI-built release is reproducible from the public source.", sNote))
+
+    s.append(Paragraph("Step 5 — Nuendo / Cubase configuration", sH1))
+    s.append(Paragraph("Automatic setup: Nuendo usually detects the script and assigns its ports on its own when you open a project.", sB))
+    s.append(Paragraph("If the script does not load automatically", sH2))
+    s.append(B("Open any project."))
+    s.append(B("Studio → MIDI Remote Manager → <b>Add MIDI Controller Surface</b>."))
+    s.append(B("Vendor = <b>Ableton</b>, Model = <b>Push2</b>."))
+    s.append(B("MIDI Input = <b>NuendoBridge Out</b>, MIDI Output = <b>NuendoBridge In</b>."))
+    s.append(Paragraph("Note Input", sH2))
+    s.append(Paragraph("Set the instrument track's MIDI input to <b>BridgeNotes</b> (enable it in Studio Setup → MIDI Port Setup if hidden).", sB))
+    s.append(Paragraph("Important — avoid doubled notes", sH2))
+    s.append(B("In Studio Setup → MIDI Port Setup, <b>uncheck “In ‘All MIDI Inputs’” for both Push 2 ports</b> — “Ableton Push 2” (Live Port) and “Ableton Push 2 User Port”. Otherwise every pad is received twice."))
+
+    s.append(Paragraph("Plugin Mapper (optional)", sH1))
+    s.append(B("The Plugin Mapper web server is bundled and starts automatically with the .exe — no extra install. Open <font face='Courier'>http://localhost:8100</font> (the console prints and opens the link) to create custom plugin parameter mappings. See the Plugin Mapper Guide for details."))
+
+    s.append(Paragraph("Troubleshooting", sH1))
+    s.append(B("<b>“Could not connect to Push 2”</b> — Close Ableton Live; re-check the Zadig WinUSB driver (Step 2); reconnect the USB cable."))
+    s.append(B("<b>“Could not open MIDI ports”</b> — loopMIDI is not running or the four port names are not exactly as in Step 1."))
+    s.append(B("<b>Push 2 connects but Nuendo does nothing</b> — The MIDI Remote script is missing or the surface ports are wrong (Step 3 / Step 5)."))
+    s.append(B("<b>Doubled pad notes</b> — Uncheck the two Push 2 ports from “In All MIDI Inputs” (Step 5)."))
+    s.append(B("<b>SmartScreen / antivirus blocks the .exe</b> — Allow it; PyInstaller one-file executables are a common false positive."))
+
+    s.append(Paragraph("Support", sH1))
+    s.append(B("Website: https://push2bridge.kaikuaudio.com"))
+    s.append(B("Issues: https://github.com/mbourque-mix/Push2Nuendo-Bridge/issues"))
+    s.append(Paragraph("Licensed under GPL-3.0. Built with push2-python and the Steinberg MIDI Remote API.", sNote))
+    doc.build(s, onFirstPage=footer, onLaterPages=footer)
+    print("  done: Windows Installation Guide")
+
 if __name__ == "__main__":
     print("Generating documents...")
     build_release_notes()
     build_mapper_guide()
     build_user_guide()
+    build_windows_install_guide()
     print("All done!")

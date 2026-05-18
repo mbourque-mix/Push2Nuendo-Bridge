@@ -22,7 +22,10 @@ echo "Building ${APP_NAME}..."
 echo ""
 
 # Check dependencies
-pip3 install pyinstaller rumps 2>/dev/null
+# The Plugin Mapper deps (fastapi/uvicorn/pedalboard) MUST be installed in the
+# build environment so PyInstaller can bundle them into the .app — a frozen
+# app cannot pip-install them at runtime.
+pip3 install pyinstaller rumps fastapi uvicorn pedalboard 2>/dev/null
 
 # Clean previous build
 rm -rf "$PROJECT_DIR/dist" "$PROJECT_DIR/build"
@@ -32,8 +35,8 @@ cd "$SRC_DIR"
 # Build the .app
 # Note: push2-python includes a Flask/SocketIO simulator that requires
 # engineio.async_drivers to be bundled, otherwise it crashes at import.
-# The mapper/ folder is bundled but its dependencies (fastapi, uvicorn,
-# pedalboard) must be installed separately by the user.
+# uvicorn loads its loop/protocol/lifespan implementations dynamically, so
+# --collect-all is required or the Plugin Mapper server won't start.
 pyinstaller \
     --name "$APP_NAME" \
     --onedir \
@@ -50,6 +53,7 @@ pyinstaller \
     --add-data "repeat.py:." \
     --add-data "overview.py:." \
     --add-data "main_macos.py:." \
+    --add-data "assets:assets" \
     --add-data "mapper:mapper" \
     --hidden-import rumps \
     --hidden-import push2_python \
@@ -75,6 +79,16 @@ pyinstaller \
     --hidden-import usb.core \
     --hidden-import usb.backend \
     --hidden-import usb.backend.libusb1 \
+    --collect-all uvicorn \
+    --collect-all fastapi \
+    --collect-all starlette \
+    --collect-all pydantic \
+    --collect-all pydantic_core \
+    --collect-all anyio \
+    --collect-all pedalboard \
+    --hidden-import mapper \
+    --hidden-import mapper.server \
+    --hidden-import mapper.scanner \
     main.py
 
 # Move output to project root
@@ -86,10 +100,10 @@ cp "$PROJECT_DIR/Ableton_Push2.js" "$PROJECT_DIR/dist/"
 
 # Copy docs if they exist
 for pdf in \
-    "Push2_Nuendo_Bridge_User_Guide_v1_0_3.pdf" \
-    "Push2_Nuendo_Bridge_Release_Notes_v1_0_3.pdf" \
+    "Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf" \
+    "Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf" \
     "Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf" \
-    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_2.pdf"; do
+    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf"; do
     [ -f "$PROJECT_DIR/docs/$pdf" ] && cp "$PROJECT_DIR/docs/$pdf" "$PROJECT_DIR/dist/"
 done
 

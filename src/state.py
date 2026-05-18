@@ -23,9 +23,19 @@ MODE_CR      = "controlroom"  # Control Room mode
 MODE_SETUP   = "setup"    # Setup page (aftertouch mode, etc.)
 MODE_MIDICC  = "midicc"   # MIDI CC controller page
 MODE_BROWSER = "browser"  # Plugin browser (load plugins into insert slots)
+MODE_CHANNEL_STRIP = "channel_strip"  # Channel Strip view of the selected track
+
+# Channel Strip sub-pages (used when mode == MODE_CHANNEL_STRIP)
+CS_PAGE_OVERVIEW = "overview"
+CS_PAGE_GATE = "gate"
+CS_PAGE_COMP = "comp"
+CS_PAGE_EQ = "eq"
+CS_PAGE_TOOLS = "tools"
+CS_PAGE_SAT = "sat"
+CS_PAGE_LIMITER = "limiter"
 
 # Bridge version
-BRIDGE_VERSION = "1.0.3"
+BRIDGE_VERSION = "1.0.4"
 
 # Aftertouch modes
 AT_POLY    = "poly"       # Polyphonic aftertouch (per-note)
@@ -143,6 +153,220 @@ class InsertInfo:
         return f"<Insert {self.slot}: {self.name} [{status}]>"
 
 
+# ─────────────────────────────────────────────
+# Channel Strip state (v1.0.4)
+# Holds the selected track's PreFilter, ChannelEQ, and 5 strip slots.
+# ─────────────────────────────────────────────
+
+# Module IDs (matching SysEx 0x30/0x31/0x32/0x33 protocol from JS)
+STRIP_MOD_PREFILTER  = 0x00
+STRIP_MOD_CHANNEL_EQ = 0x01
+STRIP_MOD_GATE       = 0x10
+STRIP_MOD_COMPRESSOR = 0x11
+STRIP_MOD_TOOLS      = 0x12
+STRIP_MOD_SATURATOR  = 0x13
+STRIP_MOD_LIMITER    = 0x14
+
+STRIP_SLOT_MOD_IDS = (STRIP_MOD_GATE, STRIP_MOD_COMPRESSOR, STRIP_MOD_TOOLS,
+                      STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER)
+
+
+class StripSlotState:
+    """
+    One Channel Strip slot (Gate / Compressor / Tools / Saturator / Limiter).
+    
+    The current variant ('VintageCompressor', 'EnvelopeShaper', etc.) determines
+    which parameters live in the bank zone. params is keyed by paramId from the
+    JS side: 0x01..0x08 are bank parameters; 0x00 is reserved for slot.mOn but
+    we mirror its on/off into the dedicated `on` field for convenience. paramId
+    0x7E is the slot's mBypass — separate from mOn since they represent different
+    things in the API: mOn = "is the slot active in the chain", mBypass = "is the
+    slot bypassed". The renderer's effective ON indicator is `on AND NOT bypassed`.
+    """
+    def __init__(self, mod_id, label):
+        self.mod_id = mod_id
+        self.label = label              # 'Gate' / 'Compressor' / etc.
+        self.plugin_name = ''           # e.g. 'VintageCompressor'
+        self.on = False                 # mirror of slot.mOn display ("Activate Plug-in")
+        self.bypassed = False           # mirror of slot.mBypass display ("Bypass Plug-in")
+        # paramId int → {'name': str, 'display': str}
+        self.params = {}
+    
+    def __repr__(self):
+        state = 'BYP' if self.bypassed else ('ON' if self.on else 'OFF')
+        return (f"<Strip {self.label} {self.plugin_name or '<empty>'} "
+                f"{state} {len(self.params)}params>")
+
+
+class ChannelStripState:
+    """
+    Aggregate state of the selected track's channel strip:
+      - PreFilter  (8 params, paramId 0x00..0x07)
+      - ChannelEQ  (4 bands × 5 params, paramIds 0x10..0x44)
+      - 5 strip slots (Gate/Comp/Tools/Sat/Limiter), each with up to 8 params
+    
+    The update_*() methods return True ONLY when the value actually changed —
+    callers use this for dedup so the renderer is only refreshed on real changes
+    rather than on every Nuendo callback fire (which can repeat 4-10× per change).
+    """
+    def __init__(self):
+        # PreFilter — paramId 0x00..0x07 → {'name', 'display'}
+        self.prefilter = {}
+        
+        # ChannelEQ — paramId (band*0x10 + offset) → {'name', 'display'}
+        # Layout: band1 = 0x10..0x14, band2 = 0x20..0x24, etc.
+        # Within a band: 0=Freq, 1=Gain, 2=Q, 3=Type, 4=On
+        self.eq = {}
+        
+        # 5 strip slots, indexed by mod_id
+        self.slots = {
+            STRIP_MOD_GATE:       StripSlotState(STRIP_MOD_GATE,       'Gate'),
+            STRIP_MOD_COMPRESSOR: StripSlotState(STRIP_MOD_COMPRESSOR, 'Comp'),
+            STRIP_MOD_TOOLS:      StripSlotState(STRIP_MOD_TOOLS,      'Tools'),
+            STRIP_MOD_SATURATOR:  StripSlotState(STRIP_MOD_SATURATOR,  'Sat'),
+            STRIP_MOD_LIMITER:    StripSlotState(STRIP_MOD_LIMITER,    'Limit'),
+        }
+    
+    def _store_for(self, mod_id):
+        """Returns the dict that holds params for this module, or None."""
+        if mod_id == STRIP_MOD_PREFILTER:
+            return self.prefilter
+        if mod_id == STRIP_MOD_CHANNEL_EQ:
+            return self.eq
+        if mod_id in self.slots:
+            return self.slots[mod_id].params
+        return None
+    
+    def update_announce(self, mod_id, param_id, name):
+        """
+        Store the parameter name (announce). Returns True if changed.
+        
+        The JS sends names as 'PluginName:ParamName' (e.g. 'Noise Gate:Threshold').
+        We strip the plugin prefix here so renderers can use a clean param name.
+        For strip slots, paramId 0x00 is the slot's .mOn — its announce contains
+        the variant name, which we ignore (variant comes via update_plugin()).
+        """
+        # slot.mOn announce is just '<variant>:On' — we get variant from 0x33 instead
+        if mod_id in self.slots and param_id == 0x00:
+            return False
+        
+        store = self._store_for(mod_id)
+        if store is None:
+            return False
+        
+        # Strip the plugin/section prefix from 'Section:Param'
+        cleaned = name.split(':', 1)[1] if ':' in name else name
+        
+        existing = store.setdefault(param_id, {})
+        if existing.get('name') == cleaned:
+            return False
+        existing['name'] = cleaned
+        return True
+    
+    def update_display(self, mod_id, param_id, display):
+        """
+        Store the parameter display value. Returns True if changed.
+        
+        Special-cases for strip slots:
+          - paramId 0x00 (slot.mOn): mirror into slot.on bool ("Activate Plug-in")
+          - paramId 0x7E (slot.mBypass): mirror into slot.bypassed bool ("Bypass Plug-in")
+        
+        The renderer's effective ON indicator combines both: green when
+        slot.on AND NOT slot.bypassed.
+        """
+        # slot.mOn display = 'On' / 'Off' → mirror into slot.on
+        if mod_id in self.slots and param_id == 0x00:
+            new_on = (display == 'On')
+            slot = self.slots[mod_id]
+            if slot.on == new_on:
+                return False
+            slot.on = new_on
+            return True
+        
+        # slot.mBypass display → mirror into slot.bypassed
+        # Steinberg typically shows "On" when bypass is engaged ("Bypass: On" = bypassed),
+        # but be lenient: any non-Off / non-empty string treated as bypassed.
+        if mod_id in self.slots and param_id == 0x7E:
+            # 'On' = bypass active = slot bypassed
+            new_byp = (display == 'On')
+            slot = self.slots[mod_id]
+            if slot.bypassed == new_byp:
+                return False
+            slot.bypassed = new_byp
+            return True
+        
+        store = self._store_for(mod_id)
+        if store is None:
+            return False
+        
+        existing = store.setdefault(param_id, {})
+        if existing.get('display') == display:
+            return False
+        existing['display'] = display
+        return True
+    
+    def update_plugin(self, mod_id, plugin_name):
+        """
+        Store the loaded plugin/variant name for a strip slot. Returns True if
+        changed. When the variant changes, the slot's params dict is cleared
+        because the new plugin will have entirely different parameters.
+        """
+        if mod_id not in self.slots:
+            return False
+        slot = self.slots[mod_id]
+        if slot.plugin_name == plugin_name:
+            return False
+        slot.plugin_name = plugin_name
+        # Variant changed — old param names/values are stale; new ones will arrive
+        slot.params.clear()
+        return True
+    
+    def update_value(self, mod_id, param_id, val127):
+        """
+        Store the raw 0-127 value for a parameter (received via SysEx 0x31).
+        Returns True if changed. This cache lets the bridge compute deltas
+        and toggles without round-tripping through Nuendo.
+        
+        For slot.mOn (paramId 0x00 of slot mods), also mirrors into slot.on bool.
+        """
+        # slot.mOn is treated specially — also keep the bool in sync
+        if mod_id in self.slots and param_id == 0x00:
+            new_on = (val127 >= 64)
+            slot = self.slots[mod_id]
+            changed = (slot.on != new_on)
+            slot.on = new_on
+            # Also store in params dict for uniform get_value access
+            slot.params.setdefault(0x00, {})['value'] = val127
+            return changed
+        
+        store = self._store_for(mod_id)
+        if store is None:
+            return False
+        existing = store.setdefault(param_id, {})
+        if existing.get('value') == val127:
+            return False
+        existing['value'] = val127
+        return True
+    
+    def get_value(self, mod_id, param_id):
+        """
+        Return the cached 0-127 value for a parameter, or None if unknown.
+        Used by the bridge to compute relative deltas and toggle inversions
+        before sending an absolute value back to Nuendo.
+        """
+        # slot.mOn — derive from the bool if no explicit value cached
+        if mod_id in self.slots and param_id == 0x00:
+            slot = self.slots[mod_id]
+            cached = slot.params.get(0x00, {}).get('value')
+            if cached is not None:
+                return cached
+            return 127 if slot.on else 0
+        store = self._store_for(mod_id)
+        if store is None:
+            return None
+        return store.get(param_id, {}).get('value')
+
+
 class AppState:
     """
     Global application state.
@@ -187,6 +411,29 @@ class AppState:
         self.insert_param_names = [''] * 8
         self.insert_param_values = [''] * 8
         self.insert_params_mode = False
+
+        # ── Edit Channel Settings window state (for the selected channel) ──
+        self.editor_open = False
+
+        # ── EQ page state ──
+        self.eq_selected_band = 0  # 0-based (0=Band1, 3=Band4)
+        # Cache of last-parsed per-band params so the curve stays stable when
+        # switching bands (we only get fresh display strings for the selected
+        # band; other bands use the most recent parse stored here).
+        self.eq_band_cache = [{}, {}, {}, {}]
+
+        # ── Channel Strip footer pill states (one bool per position 0-7) ──
+        # Populated by the renderer each frame; read by _update_lower_row_leds
+        # so the lower-row LEDs reflect the same on/off state as the on-screen
+        # pills (Band on/off, HC/LC on, PreFilter bypass, etc.).
+        # None means "no toggle at this position" → LED off.
+        self.cs_footer_pill_states = [None] * 8
+
+        # ── DA strip param mirror (for renderer display of DA-based toggles) ──
+        # Keyed by (plugin_name, da_param_idx) → float value. Populated by
+        # nuendo_link on SysEx 0x29 + 0x39. plugin_name is used as key (not
+        # strip_si) so custom strip layouts work without remapping.
+        self.da_strip_toggle_values = {}
         
         # ── Selected track sends ──
         self.send_names = [''] * 8          # Destination names
@@ -275,6 +522,18 @@ class AppState:
         self.browser_target_slot = 0        # Insert slot to load into
         self.browser_phase = "slot_select"  # "slot_select" or "plugin_list"
         self.browser_prev_mode = MODE_VOLUME  # Mode to return to on cancel
+        
+        # ── Channel Strip (v1.0.4) ──
+        # Holds the selected track's PreFilter, ChannelEQ, and 5 strip slots.
+        # Updated by nuendo_link.py from SysEx 0x30/0x32/0x33 messages.
+        self.channel_strip = ChannelStripState()
+        # Sub-page within MODE_CHANNEL_STRIP. Starts on "overview"; upper row
+        # buttons 1-6 drill into module pages, upper row 1 on a sub-page returns.
+        self.cs_page = CS_PAGE_OVERVIEW
+        # Sub-page within MODE_CHANNEL_STRIP:
+        #   "overview"  — 8-cell module overview (Gate/Comp/EQ/Tools/Sat/Limiter/Phase/PreGain)
+        #   "gate" / "comp" / "eq" / "tools" / "sat" / "limiter" — drill-down pages (TBD)
+        self.cs_page = "overview"
 
     @property
     def visible_tracks(self):

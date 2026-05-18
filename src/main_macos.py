@@ -144,27 +144,14 @@ def _start_plugin_mapper():
     """
     import threading
     import sys as _sys
-    
-    # ── In a frozen .app, add system site-packages so pip-installed
-    #    packages (fastapi, uvicorn, pedalboard) can be found ──
-    if getattr(_sys, 'frozen', False):
-        import glob, os
-        site_paths = []
-        # Python.org framework installs
-        site_paths += glob.glob('/Library/Frameworks/Python.framework/Versions/3.*/lib/python3.*/site-packages')
-        # Homebrew (Apple Silicon)
-        site_paths += glob.glob('/opt/homebrew/lib/python3.*/site-packages')
-        # Homebrew (Intel)
-        site_paths += glob.glob('/usr/local/lib/python3.*/site-packages')
-        # User site-packages
-        site_paths += glob.glob(os.path.expanduser('~/Library/Python/3.*/lib/python/site-packages'))
-        
-        for p in sorted(site_paths, reverse=True):  # Newest version first
-            if p not in _sys.path and os.path.isdir(p):
-                _sys.path.insert(0, p)
-                blog(f"  Added site-packages: {p}")
-    
-    # ── In a frozen .app, mapper files are in sys._MEIPASS ──
+
+    # The Plugin Mapper deps (fastapi/uvicorn/pedalboard) and the mapper/
+    # package are bundled into the frozen .app by PyInstaller, so they are
+    # already importable from the app's own sys.path. Do NOT inject the
+    # system/Homebrew site-packages here: prepending them shadows the
+    # bundled, version-matched deps with whatever (possibly incompatible
+    # or different-ABI) packages happen to exist system-wide, which makes
+    # `import fastapi` fail and the mapper report "not available".
     if getattr(_sys, 'frozen', False):
         base = getattr(_sys, '_MEIPASS', '')
         if base and base not in _sys.path:

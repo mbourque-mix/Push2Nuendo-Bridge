@@ -2,7 +2,7 @@
 
 Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
-![Version](https://img.shields.io/badge/version-1.0.3-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.0.4-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 
@@ -38,6 +38,14 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - **Plugin Mapper integration** — mapped plugins show ★ MAPPED indicator and use custom parameter pages
 - Mute/Solo/Monitor/Rec on buttons 5-8
 - Track navigation with ◄►
+
+### Channel Strip *(Nuendo 15+ / API 1.3)*
+- **Overview** — Gate, Comp, EQ, Tools, Sat, Limiter shown as Cubase-coloured banners with bold names; lower row bypasses each section (amber when engaged)
+- **Module sub-pages** — 8 encoders per module, including **extended parameters not in Cubase's bank zone** via DirectAccess (VintageCompressor Ratio/Mix, Tube Comp Character/High-Ratio, Standard Comp DryMix/Hold, DeEsser side-chain filter + Diff, Magneto II Dual/Oversample, Maximizer Release/Recover, Brickwall Link/Oversample, Noise Gate Hold/Analysis, …)
+- **Channel EQ page (EQ-Eight style)** — band selector, Type/Freq/Q/Gain per band, PreFilter LC/HC freq + on/off, PreGain, and a **live magnitude curve** (4 bands + PreFilter) with numbered band markers
+- **Bidirectional feedback** — the curve, pills and LEDs update whether you change a parameter from the Push or directly in Nuendo
+- **Edit Channel Settings** — lower row 8 (Channel Strip) and Shift+Upper Row (Mix), window-open state shown white on screen and LED
+- Variant chips mirror the active strip plugin (variant switching is done in Nuendo — the MIDI Remote API does not allow it from a controller)
 
 ### Plugin Browser *(Nuendo 15+ / API 1.3)*
 - **Add Device** button opens the Plugin Browser
@@ -121,10 +129,16 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 
 **Nuendo 15+ features:** Plugin Browser (Add Device) and DirectAccess-based insert control require MIDI Remote API 1.3. All other features work with Nuendo 14+.
 
+**No Python needed for end users** — the Windows `.exe` and the macOS `.app` bundle the interpreter and all dependencies. Python is only required to **run from source** or **build** the app.
+
+**Python (source / build only):** 3.9 – **3.11.9 maximum** (3.12 / 3.13 are not yet supported by the audio/MIDI dependencies). When running from source, `push2-python` must be installed from source:
+```bash
+pip install git+https://github.com/ffont/push2-python.git
+```
+
 For Windows, you also need:
-- **Python 3.9+**
 - **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** for virtual MIDI ports
-- **[Zadig](https://zadig.akeo.ie/)** for USB driver
+- **[Zadig](https://zadig.akeo.ie/)** for the Push 2 WinUSB driver
 
 For the Plugin Mapper (optional):
 ```bash
@@ -140,31 +154,52 @@ pip install fastapi uvicorn pedalboard
 1. Install Homebrew (if needed): visit [brew.sh](https://brew.sh)
 2. Install libusb: `brew install libusb`
 3. Copy **Push2 Nuendo Bridge.app** to `/Applications`
-4. Copy **Ableton_Push2.js** to:
+4. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.4.app"
+   ```
+5. Copy **Ableton_Push2.js** to:
    ```
    ~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/
    ```
-5. Launch the app — a **P2** icon appears in the menu bar
-6. Open Nuendo — the MIDI Remote script configures itself automatically
+6. Launch the app — a **P2** icon appears in the menu bar
+7. Open Nuendo — the MIDI Remote script configures itself automatically
 
 ### macOS — From Source
 
 ```bash
-brew install libusb python3
+brew install libusb python@3.11
 pip3 install -r requirements.txt
+pip3 install git+https://github.com/ffont/push2-python.git
 cd src && python3 main.py
 ```
 
 ### Windows
 
-See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_2.pdf)** for detailed step-by-step instructions including Python, Zadig, loopMIDI, and Nuendo configuration.
+Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** for the full step-by-step (loopMIDI, Zadig, Nuendo configuration).
 
 Quick start:
-```bash
-pip install -r requirements.txt
-cd src
-python main.py --terminal
+
+1. Download **`Push2NuendoBridge-vX.Y.Z-Windows.zip`** from the [Releases](https://github.com/mbourque-mix/Push2Nuendo-Bridge/releases) page and unzip it anywhere.
+2. Install **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** and create four ports: `NuendoBridge In`, `NuendoBridge Out`, `BridgeNotes`, `BridgeNotes In`.
+3. Install the **WinUSB driver for the Push 2 with [Zadig](https://zadig.akeo.ie/)** (one time).
+4. **Double-click the `.exe`.** A console shows the status and a clickable Plugin Mapper link (`http://localhost:8100`).
+
+> ⚠️ **Windows — important:** installing the WinUSB driver with Zadig **disables the Push 2 in Ableton Live** (Windows binds the device to one driver at a time; the bridge and Live cannot share it). It is fully reversible — see *“Reverting the Zadig driver”* in the [Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf) to switch back to Live. macOS is not affected.
+
+> No Python install needed — the interpreter, all dependencies and the libusb runtime are bundled in the `.exe`.
+
+**Building the `.exe` yourself:** run `scripts\build_windows.bat` on a Windows machine (PyInstaller cannot cross-compile), or let the `Build Windows .exe` GitHub Actions workflow build it on every `v*` tag.
+
+Copy **Ableton_Push2.js** to (create the `Local\Ableton\Push2` sub-folders):
 ```
+C:\Users\<user>\Documents\Steinberg\Nuendo\MIDI Remote\Driver Scripts\Local\Ableton\Push2\
+```
+For Cubase, replace `Nuendo` with `Cubase` in that path.
+
+**If the script doesn't load automatically:** open a project → Studio → MIDI Remote Manager → **Add MIDI Controller Surface** → Vendor **Ableton**, Model **Push2**, MIDI In **NuendoBridge Out**, MIDI Out **NuendoBridge In**.
+
+> ⚠️ **Avoid doubled pad notes:** in Studio Setup → MIDI Port Setup, uncheck **"In 'All MIDI Inputs'"** for both **Ableton Push 2** (Live Port) and **Ableton Push 2 User Port**. Otherwise every pad is received twice (once via BridgeNotes, once direct from the hardware).
 
 ---
 
@@ -172,7 +207,7 @@ python main.py --terminal
 
 | Push 2 Button | Function | Shift + Button |
 |---------------|----------|----------------|
-| Mix | Volume mode | Track mode |
+| Mix | Volume mode (press again → Channel Strip) | Track mode |
 | Clip | Sends mode | Pan mode |
 | Device | Quick Controls | |
 | Browse | Inserts mode | |
@@ -212,8 +247,10 @@ python main.py --terminal
 ## Troubleshooting
 
 - **Push 2 not found**: Make sure it's connected via USB, libusb is installed, and Ableton Live is not running
-- **No connection to Nuendo**: Check that the bridge is running and MIDI Remote ports are correctly assigned
-- **Plugin Browser not working**: Requires Nuendo 15+ (API 1.3)
+- **push2-python error**: install from source — `pip install git+https://github.com/ffont/push2-python.git`; use Python ≤ 3.11.9
+- **Doubled pad notes**: uncheck "In 'All MIDI Inputs'" for the Push 2 Live Port and User Port (Studio Setup → MIDI Port Setup)
+- **No connection to Nuendo**: Check that the bridge is running and MIDI Remote ports are correctly assigned (or add the surface manually in MIDI Remote Manager)
+- **Plugin Browser / Channel Strip / EQ curve not working**: Requires Nuendo 15+ (API 1.3)
 - **Plugin Mapper not loading**: Install dependencies with `pip install fastapi uvicorn pedalboard`
 - **Peak clip on startup**: Normal — filtered automatically after a 3-second grace period
 - **Track names not loading**: Navigate with ◄► to force a bank refresh
@@ -222,10 +259,10 @@ python main.py --terminal
 
 ## Documentation
 
-- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_3.pdf)** — Complete installation and usage manual
-- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_3.pdf)** — Version history
+- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf)** — Complete installation and usage manual
+- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf)** — Version history
 - **[Plugin Mapper Guide](docs/Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf)** — Plugin Mapper setup and usage
-- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_2.pdf)** — Step-by-step Windows setup
+- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** — Step-by-step Windows `.exe` setup
 
 ---
 

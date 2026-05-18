@@ -6,8 +6,16 @@ Uses Spotify's pedalboard library to load each plugin and read its parameter lis
 
 Default plugin directories:
   macOS VST3:  /Library/Audio/Plug-Ins/VST3/, ~/Library/Audio/Plug-Ins/VST3/
+               + Steinberg factory location (/Library/Application Support/Steinberg)
   macOS AU:    (handled by pedalboard automatically)
   Windows VST3: C:/Program Files/Common Files/VST3/
+                + Steinberg factory plugins bundled with Cubase/Nuendo
+                  (C:/Program Files/Steinberg, C:/Program Files/Common Files/Steinberg/VST3)
+
+Steinberg ships its factory plugins (Frequency, Compressor, Retrologue,
+Padshop, Groove Agent SE, HALion Sonic, …) inside the application install
+tree, NOT in the shared third-party VST3 folder, so those roots are scanned
+recursively as well. Non-existent directories are skipped silently.
 """
 
 import os
@@ -25,9 +33,16 @@ DEFAULT_VST3_DIRS = {
     "darwin": [
         "/Library/Audio/Plug-Ins/VST3",
         os.path.expanduser("~/Library/Audio/Plug-Ins/VST3"),
+        # Steinberg factory plugins bundled with Cubase/Nuendo
+        "/Library/Application Support/Steinberg",
     ],
     "win32": [
         "C:/Program Files/Common Files/VST3",
+        # Steinberg factory plugins bundled with Cubase/Nuendo — these live
+        # in the app install tree, not the shared VST3 folder. The root is
+        # scanned recursively so any version (Cubase 13/14/15, Nuendo …) works.
+        "C:/Program Files/Steinberg",
+        "C:/Program Files/Common Files/Steinberg/VST3",
     ],
     "linux": [
         "/usr/lib/vst3",
@@ -51,7 +66,7 @@ def discover_vst3_plugins(extra_dirs=None):
     
     Returns a list of absolute paths to .vst3 bundles/files.
     """
-    dirs = get_default_vst3_dirs()
+    dirs = list(get_default_vst3_dirs())  # copy — never mutate the module list
     if extra_dirs:
         dirs.extend(extra_dirs)
     
@@ -66,15 +81,20 @@ def discover_vst3_plugins(extra_dirs=None):
             plugins.append(str(item))
             logger.debug(f"Found: {item.name}")
     
-    # Deduplicate
-    seen = set()
+    # Deduplicate by filename (a plugin can appear in several scanned roots,
+    # e.g. Steinberg factory copy + Common Files copy). Keep the first hit and
+    # log the rest so the count is explainable.
+    seen = {}
     unique = []
     for p in plugins:
         name = Path(p).name
         if name not in seen:
-            seen.add(name)
+            seen[name] = p
             unique.append(p)
-    
+        else:
+            logger.info(f"Skipping duplicate '{name}': {p} "
+                        f"(already found at {seen[name]})")
+
     return sorted(unique, key=lambda p: Path(p).stem.lower())
 
 

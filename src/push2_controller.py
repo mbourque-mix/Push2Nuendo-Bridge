@@ -21,7 +21,7 @@ import time
 from state import (
     AppState, BANK_SIZE,
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, AT_POLY, AT_CHANNEL, AT_OFF,
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
     CC_ABSOLUTE, CC_PICKUP
 )
@@ -202,6 +202,7 @@ MODE_COLORS = {
     MODE_TRACK:   LED_WHITE,
     MODE_OVERVIEW: LED_PURPLE,
     MODE_BROWSER: LED_BLUE,
+    MODE_CHANNEL_STRIP: LED_WHITE,  # Mix button toggled into Channel Strip view
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +214,188 @@ MODE_COLORS = {
 
 ENCODER_SENSITIVITY_NORMAL = 0.008   # Normal speed (1 notch = 0.8%)
 ENCODER_SENSITIVITY_FINE   = 0.001   # Fine speed with Shift (1 notch = 0.1%)
+
+
+# ── Channel Strip variant routing (Axe B Step 2A) ──
+# Each slot's bank zone exposes different params per loaded plugin variant.
+# To route encoders and lower-row toggles correctly per variant, we look up
+# tables keyed by (cs_page, variant_name).
+#
+# variant_name = None is the "primary" variant — used as a fallback when the
+# loaded plugin has no entry, or when no plugin is loaded yet.
+#
+# JS sub-page bindings mirror these maps. See Ableton_Push2.js (search for
+# bindModuleEncoders/bindModuleToggles for each variant).
+
+_CS_PAGE_TO_MOD_ID = {
+    'gate':    0x10,
+    'comp':    0x11,
+    'tools':   0x12,
+    'sat':     0x13,
+    'limiter': 0x14,
+}
+
+# Encoder index (0..7) → paramId for each (cs_page, variant)
+_VARIANT_ENCODER_MAPS = {
+    # Gate (single variant)
+    ('gate', None):                   [0x01, 0x02, 0x03, 0x04, 0x07, 0x08, None, None],
+    ('gate', 'Noise Gate'):           [0x01, 0x02, 0x03, 0x04, 0x07, 0x08, None, None],
+    
+    # Compressor variants
+    ('comp', None):                   [0x01, 0x02, 0x03, 0x04, 0x06, None, None, None],
+    ('comp', 'Standard Compressor'):  [0x01, 0x02, 0x03, 0x04, 0x06, None, None, None],
+    ('comp', 'Tube Compressor'):      [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, None, None],
+    ('comp', 'VintageCompressor'):    [0x01, 0x02, 0x03, 0x05, None, None, None, None],
+    
+    # Tools variants
+    ('tools', None):                  [0x01, 0x03, 0x04, 0x05, 0x06, None, None, None],
+    ('tools', 'DeEsser'):             [0x01, 0x03, 0x04, 0x05, 0x06, None, None, None],
+    ('tools', 'EnvelopeShaper'):      [0x01, 0x02, 0x04, 0x06, None, None, None, None],
+    
+    # Saturator variants
+    ('sat', None):                    [0x01, 0x02, 0x03, 0x04, 0x07, None, None, None],
+    ('sat', 'Magneto II'):            [0x01, 0x02, 0x03, 0x04, 0x07, None, None, None],
+    ('sat', 'Tape Saturation'):       [0x01, 0x02, 0x03, 0x07, None, None, None, None],
+    ('sat', 'Tube Saturation'):       [0x01, 0x02, 0x03, 0x06, None, None, None, None],
+    
+    # Limiter variants
+    ('limiter', None):                [0x01, 0x04, None, None, None, None, None, None],
+    ('limiter', 'Brickwall Limiter'): [0x01, 0x04, None, None, None, None, None, None],
+    ('limiter', 'Maximizer'):         [0x01, 0x03, 0x06, None, None, None, None, None],
+    ('limiter', 'Standard Limiter'):  [0x01, 0x04, 0x07, None, None, None, None, None],
+}
+
+# Active toggle positions (lower row indices) for each (cs_page, variant).
+# The actual paramId at each position is wired by the JS sub-page bindings;
+# Python just needs to know which positions get a drilldown_toggle note.
+_VARIANT_ACTIVE_TOGGLES = {
+    ('gate', None):                   {0, 1, 2},
+    ('gate', 'Noise Gate'):           {0, 1, 2},
+    
+    ('comp', None):                   {0, 1},
+    ('comp', 'Standard Compressor'):  {0, 1},
+    ('comp', 'Tube Compressor'):      {0},
+    ('comp', 'VintageCompressor'):    {0, 1},
+    
+    ('tools', None):                  {0, 1},
+    ('tools', 'DeEsser'):             {0, 1},
+    ('tools', 'EnvelopeShaper'):      set(),
+    
+    ('sat', None):                    {0, 1},
+    ('sat', 'Magneto II'):            {0, 1},
+    ('sat', 'Tape Saturation'):       {0, 1},
+    ('sat', 'Tube Saturation'):       set(),  # Tube has no toggle params
+    
+    ('limiter', None):                {0},
+    ('limiter', 'Brickwall Limiter'): {0},
+    ('limiter', 'Maximizer'):         set(),
+    ('limiter', 'Standard Limiter'):  {0},
+}
+
+# DA encoder setup for CS sub-page variants with extended parameters (not in bank zone).
+# Maps (cs_page, variant) → (da_slot_idx, [8 param_indices])
+# da_slot_idx: 16-20 (DA_STRIP_SLOT_OFFSET + strip slot 0..4)
+# param_indices: index into the DA-enumerated param list (-1 = unused position)
+# Variant lists for strip slot switching via DA Plugin Manager.
+# Maps cs_page → (da_slot, ordered list of variant names).
+# The ORDER must mirror Ableton_Push2.js STRIP_VARIANTS exactly — the index is
+# the wire protocol value sent to JS.
+_VARIANT_SWITCH_OPTIONS = {
+    'gate':    (16, ['Noise Gate']),
+    'comp':    (17, ['Standard Compressor', 'Tube Compressor', 'VintageCompressor']),
+    'tools':   (18, ['DeEsser', 'EnvelopeShaper']),
+    'sat':     (19, ['Magneto II', 'Tape Saturation', 'Tube Saturation']),
+    'limiter': (20, ['Brickwall Limiter', 'Maximizer', 'Standard Limiter']),
+}
+
+
+# Footer toggle positions that use DA flip instead of the bank-zone binding path.
+# Use this for params where setTypeToggle fails — e.g. VintageCompressor Att-Mode
+# triggers a Cubase bank-zone refresh that invalidates the toggle binding.
+# Maps (cs_page, variant, lower_row_idx) → (da_slot, da_param_idx)
+_VARIANT_DA_TOGGLES = {
+    ('comp', 'VintageCompressor', 0): (17, 1),  # Punch (Att-Mode) — DA tag 4218
+    # DeEsser Diff (DA idx 6, tag 4244) on footer position 2.
+    # Listed under both 'tools' (standard layout) and 'sat' (custom layouts where
+    # DeEsser sits at the saturator slot position).
+    ('tools', 'DeEsser', 2): (18, 6),
+    ('sat',   'DeEsser', 2): (19, 6),
+    # Standard Compressor: SoftKnee (idx=8) at footer position 2.
+    ('comp', 'Standard Compressor', 2): (17, 8),
+    # Magneto II: Dual (idx=1) and OverSampling (idx=5) are binary extended params.
+    # Listed for both 'sat' (standard) and 'limiter' (custom layouts).
+    ('sat',     'Magneto II', 2): (19, 1),  # Dual
+    ('sat',     'Magneto II', 3): (19, 5),  # OverSampling
+    ('limiter', 'Magneto II', 2): (20, 1),
+    ('limiter', 'Magneto II', 3): (20, 5),
+    # Tape Saturation: OverSampling (idx=6) only extended param.
+    ('sat',     'Tape Saturation', 2): (19, 6),
+    ('limiter', 'Tape Saturation', 2): (20, 6),
+    # Brickwall Limiter: Link (idx=4) and Oversample (idx=5) are binary extended.
+    ('limiter', 'Brickwall Limiter', 1): (20, 4),  # Link at footer pos 1
+    ('limiter', 'Brickwall Limiter', 2): (20, 5),  # Oversample at footer pos 2
+    # Maximizer: SoftClipper (idx=0) and Modern Mode (idx=2) binary extended.
+    ('limiter', 'Maximizer', 0): (20, 0),  # SoftClipper
+    ('limiter', 'Maximizer', 1): (20, 2),  # Modern Mode
+
+    # EQ Band On is handled dynamically in the lower-row handler (acts on the
+    # currently selected band) — no fixed entries here.
+}
+
+
+_VARIANT_DA_ENC_SETUP = {
+    # Maps (cs_page, variant) → list of 8 DA param indices (use -1 for unused).
+    # The DA slot is resolved at runtime from cs_page via _CS_PAGE_TO_MOD_ID.
+    # Use this to surface params that are NOT exposed by the bank zone, or to
+    # benefit from DA's reliable display-value feedback.
+
+    # Noise Gate: bank zone has 6 encoders; Hold + Analysis are extended params
+    # only reachable via DA. Bypass/SCOn/SCMonitor remain footer toggles via
+    # the binding path.
+    ('gate', 'Noise Gate'): [0, 1, 2, 3, 12, 13, 5, 6],
+    # enc: Threshold, Range, Attack, Release, FilterFreq, Q-Factor, Hold, Analysis
+
+    # VintageCompressor: Ratio (idx=5) and Mix (idx=6) are absent from bank zone.
+    # Attack Mode (idx=1) and Auto Release (idx=4) are binary — kept as footer toggles.
+    ('comp', 'VintageCompressor'): [0, 2, 3, 7, 5, 6, -1, -1],
+    # enc: InputGain, AttackTime, ReleaseTime, OutputGain, Ratio, Mix, –, –
+
+    # Standard Compressor: DryMix (idx=11, parallel comp) and Hold (idx=5)
+    # are the most useful extended params beyond the bank zone.
+    ('comp', 'Standard Compressor'): [0, 1, 2, 3, 6, 11, 5, -1],
+    # enc: Threshold, Ratio, Attack, Release, MakeUp, DryMix, Hold, –
+
+    # Tube Compressor: Character (idx=1) gives the tube color knob, High Ratio
+    # (idx=3) is the dual-band high-frequency ratio. Both absent from bank zone.
+    ('comp', 'Tube Compressor'): [0, 1, 2, 7, 4, 5, 8, 3],
+    # enc: Drive, Character, InputGain, OutputGain, Attack, Release, Mix, HighRatio
+
+    # Maximizer: Release + Recover (Modern-mode timing) absent from bank zone.
+    ('limiter', 'Maximizer'): [1, 6, 5, 3, 4, -1, -1, -1],
+    # enc: Optimize, Output, Mix, Release, Recover, –, –, –
+
+    # Channel EQ: EQ-Eight style with band selector. The actual indices are
+    # computed at runtime by _eq_da_encoder_indices(selected_band) because they
+    # depend on which band is selected. This sentinel just signals "EQ has DA
+    # encoder setup" so other lookup paths work.
+    # enc layout: [Sel(-1), Type, Freq, Q, Gain, HC(-1), LC(-1), PreGain(-1)]
+    ('eq', 'EQ'): [-1, -1, -1, -1, -1, -1, -1, -1],
+
+    # Tube Saturation: OverSampling (idx=4) is the only param beyond the bank zone.
+    # Listed under both 'sat' (standard layout) and 'limiter' (some user setups
+    # place Tube Saturation at the Limiter slot position).
+    ('sat',     'Tube Saturation'): [0, 1, 2, 3, 4, -1, -1, -1],
+    ('limiter', 'Tube Saturation'): [0, 1, 2, 3, 4, -1, -1, -1],
+    # enc: Drive, LF, HF, Output, OverSampling, –, –, –
+
+    # DeEsser: SCFreq (idx=9) and SCQ (idx=10) are side-chain filter controls
+    # not exposed in the bank zone. Diff is added as a footer toggle below.
+    # Listed under both 'tools' (standard) and 'sat' (some custom strip layouts
+    # place DeEsser at the Saturator slot position).
+    ('tools', 'DeEsser'): [1, 0, 2, 3, 4, -1, 9, 10],
+    ('sat',   'DeEsser'): [1, 0, 2, 3, 4, -1, 9, 10],
+    # enc: Threshold, Reduction, Release, LowFreq, HighFreq, –, SCFreq, SCQ
+}
 
 
 class Push2Controller:
@@ -260,6 +443,9 @@ class Push2Controller:
         
         # Callback for LED update when selection changes
         self.nuendo_link._on_selection_changed = lambda: self._update_all_leds()
+
+        # Always-on callback so strip DA param completions can apply encoder setup
+        self.nuendo_link._on_da_params_ready = self._on_da_params_ready
 
     # ─────────────────────────────────────────
     # Start / stop
@@ -543,6 +729,82 @@ class Push2Controller:
                 midi_val = 64 + min(63, abs(increment))
             self.nuendo_link.send_cc_ch3(20 + encoder_index, midi_val)
             return  # Feedback comes from JS via SysEx 0x19
+        
+        elif mode == MODE_CHANNEL_STRIP:
+            # Channel Strip encoder routing depends on the current sub-page
+            # AND the loaded plugin variant for multi-variant slots.
+            #
+            # Overview: encoder 8 (idx 7) = PreGain delta
+            # Variant slots: each variant has its own encoder→paramId map
+            # (matches JS sub-page bindings). Look up via (cs_page, variant).
+            cs_page = getattr(state, 'cs_page', 'overview')
+            if cs_page == 'overview':
+                if encoder_index == 7:
+                    self.nuendo_link.send_strip_param_delta(0x00, 0x00, increment)
+                return
+
+            # EQ page Enc 6/7/8 → PreFilter LC Freq / HC Freq / PreGain (binding path)
+            if cs_page == 'eq':
+                if encoder_index == 5:
+                    self.nuendo_link.send_strip_param_delta(0x00, 0x05, increment)  # LC Freq
+                    return
+                if encoder_index == 6:
+                    self.nuendo_link.send_strip_param_delta(0x00, 0x02, increment)  # HC Freq
+                    return
+                if encoder_index == 7:
+                    self.nuendo_link.send_strip_param_delta(0x00, 0x00, increment)  # PreGain
+                    return
+
+            # EQ band selector (Enc 1): no MIDI — change internal selection,
+            # re-arm DA encoders so Enc 2-5 control the new band's params.
+            # Accumulate raw encoder ticks (Push 2 sends many per turn) and only
+            # advance one band per ENC_BAND_STEP ticks for a controllable feel.
+            if cs_page == 'eq' and encoder_index == 0:
+                ENC_BAND_STEP = 12
+                accum = getattr(state, '_eq_band_accum', 0) + increment
+                steps = int(accum / ENC_BAND_STEP) if accum >= 0 else -int(-accum / ENC_BAND_STEP)
+                if steps != 0:
+                    new_band = max(0, min(3, state.eq_selected_band + steps))
+                    accum -= steps * ENC_BAND_STEP
+                    if new_band != state.eq_selected_band:
+                        state.eq_selected_band = new_band
+                        self._apply_cs_strip_da_setup('eq', 'EQ')
+                        print(f"  EQ band selected: {new_band + 1}")
+                state._eq_band_accum = accum
+                return
+
+            # DA encoder path: takes priority and also enables pages without a
+            # binding-path mod_id (e.g. EQ page where mod_id is the section 0x01).
+            if getattr(state, 'cs_strip_da_active', False):
+                if increment > 0:
+                    midi_val = min(63, abs(increment))
+                else:
+                    midi_val = 64 + min(63, abs(increment))
+                self.nuendo_link.send_da_encoder_value(encoder_index, midi_val)
+                return
+
+            # Resolve the slot's mod_id and current variant for binding-path
+            mod_id = _CS_PAGE_TO_MOD_ID.get(cs_page)
+            if mod_id is None:
+                return  # EQ etc. — no binding-path slot, no DA setup applied
+            slot = state.channel_strip.slots.get(mod_id)
+            variant = slot.plugin_name if (slot and slot.plugin_name) else None
+
+            # Pick the encoder paramId map for this (page, variant).
+            # Fall back to the page's primary variant (None key) if the
+            # current plugin doesn't have a custom map.
+            enc_map = _VARIANT_ENCODER_MAPS.get((cs_page, variant))
+            if enc_map is None:
+                enc_map = _VARIANT_ENCODER_MAPS.get((cs_page, None))
+            if enc_map is None:
+                return
+            
+            if 0 <= encoder_index < len(enc_map):
+                pid = enc_map[encoder_index]
+                if pid is not None:
+                    self.nuendo_link.send_slot_param_delta(
+                        mod_id, pid, increment, encoder_index=encoder_index)
+            return  # No fader/state update for strip params; feedback via SysEx 0x32
         
         elif mode == MODE_DEVICE:
             selected = state.selected_track
@@ -997,8 +1259,18 @@ class Push2Controller:
         # ── Mode buttons ──
         if button_name == BTN_MODE_VOLUME:
             if state.shift_held:
+                # Shift+Mix → Track view (combined Vol+Pan+Sends on selected)
                 self._set_mode(MODE_TRACK)
+            elif state.mode == MODE_VOLUME:
+                # Already on the 8-track mix → drill into Channel Strip overview
+                self._set_cs_page("overview")
+                self._set_mode(MODE_CHANNEL_STRIP)
+            elif state.mode == MODE_CHANNEL_STRIP:
+                # In Channel Strip → back out to the 8-track mix
+                # (regardless of whether we were on overview or a drill-down sub-page)
+                self._set_mode(MODE_VOLUME)
             else:
+                # Coming from any other mode → land on the 8-track mix
                 self._set_mode(MODE_VOLUME)
             return
         
@@ -1261,6 +1533,155 @@ class Push2Controller:
                     elif i >= 4 and (i - 4) < len(CR_PAGE_NAMES):
                         self.cr_state.page = i - 4
                         self._update_cr_leds()
+                    return
+            return
+        
+        # ── Channel Strip mode: drill-in nav (upper) + bypass toggles (lower) ──
+        if state.mode == MODE_CHANNEL_STRIP and state.cs_page == "overview":
+            # Upper row 1-6 → enter drill-down page for that module
+            # Upper row 7   → toggle PreFilter section bypass
+            # Upper row 8   → no-op (reserved for future)
+            for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                if button_name == btn:
+                    if i < 6:
+                        target_page = ["gate", "comp", "eq", "tools", "sat", "limiter"][i]
+                        self._set_cs_page(target_page)
+                        print(f"  CS drill-in: {target_page}")
+                    elif i == 6:
+                        # PreFilter section bypass — link reads cached value and sends inverse
+                        self.nuendo_link.send_strip_param_toggle(0x00, 0x7F)
+                    return
+            
+            # Lower row 1-6 → toggle bypass of corresponding module
+            #   1=Gate, 2=Comp, 3=EQ section, 4=Tools, 5=Sat, 6=Limiter
+            # Lower row 7   → toggle Phase Switch
+            # Lower row 8   → no-op
+            for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                if button_name == btn:
+                    if i == 0:    # Gate slot.mOn
+                        self.nuendo_link.send_strip_param_toggle(0x10, 0x00)
+                    elif i == 1:  # Compressor slot.mOn
+                        self.nuendo_link.send_strip_param_toggle(0x11, 0x00)
+                    elif i == 2:  # ChannelEQ section bypass via DA flip
+                        # The binding-path Note 9/3 (eq.mBypass setTypeToggle)
+                        # is unreliable on some Cubase versions; DA flip works.
+                        da_slot = self._resolve_da_slot_for_variant('EQ')
+                        if da_slot >= 0:
+                            self.nuendo_link.send_da_param_flip(da_slot, 0)
+                    elif i == 3:  # Tools slot.mOn
+                        self.nuendo_link.send_strip_param_toggle(0x12, 0x00)
+                    elif i == 4:  # Saturator slot.mOn
+                        self.nuendo_link.send_strip_param_toggle(0x13, 0x00)
+                    elif i == 5:  # Limiter slot.mOn
+                        self.nuendo_link.send_strip_param_toggle(0x14, 0x00)
+                    elif i == 6:  # PreFilter Phase Switch
+                        self.nuendo_link.send_strip_param_toggle(0x00, 0x01)
+                    elif i == 7:  # Toggle Edit Channel Settings window
+                        self.nuendo_link.toggle_edit_channel_settings()
+                    return
+            return
+        
+        # ── Channel Strip drill-down upper row ──
+        # Layout (all CS sub-pages):
+        #   Upper 1 = inactive (just displays the module name)
+        #   Upper 2 = module On/Off (slot.mOn for strip slots, section bypass for EQ)
+        #   Upper 3-4-5 = variant choice (when applicable — limited by API)
+        #   Upper 6, 7 = unassigned
+        #   Upper 8 = back to overview
+        if state.mode == MODE_CHANNEL_STRIP and state.cs_page != "overview":
+            for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                if button_name == btn and i == 0:
+                    # Inactive — module name label only
+                    return
+                if button_name == btn and i == 1:
+                    # Upper 2 → module Bypass.
+                    # EQ section: DA flip on the Bypass param (DA idx 0,
+                    # tag 4204) — the binding-path Note 9/3 seems unreliable
+                    # for eq.mBypass on certain Cubase versions.
+                    # Strip slots: toggle slot.mOn via binding path (works fine).
+                    if state.cs_page == 'eq':
+                        da_slot = self._resolve_da_slot_for_variant('EQ')
+                        if da_slot >= 0:
+                            self.nuendo_link.send_da_param_flip(da_slot, 0)
+                            print(f"  EQ section bypass toggle (DA slot {da_slot} idx 0)")
+                    else:
+                        mod_id = _CS_PAGE_TO_MOD_ID.get(state.cs_page)
+                        if mod_id is not None:
+                            self.nuendo_link.send_strip_param_toggle(mod_id, 0x00)
+                            print(f"  CS toggle on/off: {state.cs_page}")
+                    return
+                if button_name == btn and 2 <= i <= 4:
+                    # Variant switch from Push is NOT supported by the MIDI Remote API
+                    # for strip slots — silently ignore. Only log for pages that
+                    # have multiple variants (so EQ etc. don't print misleading msg).
+                    if state.cs_page in _VARIANT_SWITCH_OPTIONS:
+                        print(f"  Variant switch from Push not supported; "
+                              f"change in Nuendo's plugin slot menu.")
+                    return
+                if button_name == btn and i == 7:
+                    # Upper 8 → back to overview
+                    self._set_cs_page("overview")
+                    print(f"  CS back to overview")
+                    return
+            # Lower row → drill-down toggles. JS Buttons at notes 9/120..127
+            # have bindings per sub-page; bridge just sends the note. Each
+            # sub-page's specific param mapping is on the JS side.
+            for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                if button_name == btn:
+                    # Look up active toggle positions for the current
+                    # (cs_page, variant) — mirror of the JS sub-page bindings.
+                    variant = self._cs_page_variant(state.cs_page)
+
+                    # Lower 8 (universal on all CS sub-pages) → toggle the
+                    # Edit Channel Settings window for the selected channel.
+                    if i == 7:
+                        self.nuendo_link.toggle_edit_channel_settings()
+                        return
+
+                    # DA-based toggle overrides the binding path (workaround for
+                    # params that trigger Cubase bank-zone refresh on change).
+                    # EQ page-specific lower-row toggles:
+                    #   0 = selected band On/Off (dynamic via DA)
+                    #   4 = PreFilter Bypass, 5 = LC On, 6 = HC On
+                    if state.cs_page == 'eq':
+                        if i == 0:
+                            sel = self.state.eq_selected_band
+                            on_idx = 5 + sel * 6  # DA param idx for Band N On
+                            da_slot = self._resolve_da_slot_for_variant('EQ')
+                            if da_slot >= 0:
+                                self.nuendo_link.send_da_param_flip(da_slot, on_idx)
+                                print(f"  EQ Band {sel + 1} On toggle (DA idx {on_idx})")
+                            return
+                        if i == 4:
+                            self.nuendo_link.send_strip_param_toggle(0x00, 0x7F)  # PreFilter Bypass
+                            return
+                        if i == 5:
+                            self.nuendo_link.send_strip_param_toggle(0x00, 0x06)  # LC On
+                            return
+                        if i == 6:
+                            self.nuendo_link.send_strip_param_toggle(0x00, 0x03)  # HC On
+                            return
+
+                    da_toggle = _VARIANT_DA_TOGGLES.get((state.cs_page, variant, i))
+                    if da_toggle is not None:
+                        _, param_idx = da_toggle  # hardcoded da_slot ignored — resolve dynamically
+                        resolved_slot = self._resolve_da_slot_for_variant(variant)
+                        if resolved_slot < 0:
+                            resolved_slot = da_toggle[0]  # fall back to hardcoded
+                        self.nuendo_link.send_da_param_flip(resolved_slot, param_idx)
+                        # Re-activate the sub-page so any subsequent bank-zone
+                        # refresh (triggered by the plugin's value change) doesn't
+                        # leave the JS sub-page in a stale/inactive state.
+                        import threading as _t
+                        _t.Timer(0.1, lambda p=state.cs_page:
+                                 self.nuendo_link.activate_subpage(p)).start()
+                        return
+
+                    active = _VARIANT_ACTIVE_TOGGLES.get((state.cs_page, variant))
+                    if active is None:
+                        active = _VARIANT_ACTIVE_TOGGLES.get((state.cs_page, None), set())
+                    if i in active:
+                        self.nuendo_link.send_drilldown_toggle(i)
                     return
             return
         
@@ -1644,9 +2065,14 @@ class Push2Controller:
             if button_name == btn:
                 abs_index = state.bank_offset + i
                 
-                # Shift + upper row button = clear peak for this track
-                if state.shift_held and abs_index < len(state.tracks):
-                    state.tracks[abs_index].peak_clipped = False
+                # Shift + upper row button = toggle Edit Channel Settings window
+                # for the track at this bank position (Clear Clip removed — clip
+                # auto-clears, the shortcut is repurposed here).
+                if state.shift_held and abs_index < state.total_tracks:
+                    self.nuendo_link.send_note(70 + i, 127)
+                    time.sleep(0.01)
+                    self.nuendo_link.send_note(70 + i, 0)
+                    print(f"  Shift+Upper: Edit Channel Settings track {abs_index}")
                     return
                 
                 now = time.time()
@@ -2430,6 +2856,148 @@ class Push2Controller:
             self._restore_default_palette()
             self._update_pad_colors()
     
+    def _set_cs_page(self, new_page):
+        """
+        Change the active Channel Strip sub-page and notify the JS side so
+        encoder write bindings switch to the right module's params.
+
+        Sends a note-on (channel 9, note 100..106) via activate_subpage; the
+        JS Phase 1d activator buttons trigger the sub-page's mActivate action
+        which re-routes the 8 encoder Knobs' bindings.
+
+        On drill-in to a strip slot page, triggers DA strip exploration if not
+        yet done so that bypass/edit and extended param access are available.
+        """
+        if self.state.cs_page == new_page:
+            return
+        self.state.cs_page = new_page
+        self.nuendo_link.activate_subpage(new_page)
+        self._update_upper_row_leds()
+        self._update_lower_row_leds()
+
+        if new_page == 'overview':
+            self.state.cs_strip_da_active = False
+        else:
+            # Apply DA encoder setup when strip is already explored and variant has DA params.
+            # If not explored yet, trigger exploration; DA setup will be applied after
+            # auto-enum completes via _on_da_params_ready.
+            variant = self._cs_page_variant(new_page)
+            if getattr(self.nuendo_link, '_da_strip_explored', False):
+                self._apply_cs_strip_da_setup(new_page, variant)
+            else:
+                self.state.cs_strip_da_active = False
+                self.nuendo_link.request_da_strip_exploration()
+            # Variant switching needs insert collections (strip slots expose 0)
+            # — ensure inserts are also explored so the UID fallback works.
+            if not getattr(self.nuendo_link, '_da_inserts_ready', False):
+                self.nuendo_link.request_da_insert_exploration()
+    
+    def _cs_page_variant(self, cs_page):
+        """Resolve the variant name used as a lookup key for a CS sub-page.
+
+        For strip-slot pages (gate/comp/tools/sat/limiter), reads the loaded
+        plugin name from the binding-path slot. The EQ page is a special case:
+        it's a section in the binding path but appears as a strip slot in the
+        DA tree with plugin_name='EQ' — we return 'EQ' directly.
+        """
+        if cs_page == 'eq':
+            return 'EQ'
+        mod_id = _CS_PAGE_TO_MOD_ID.get(cs_page)
+        if mod_id is None:
+            return None
+        slot = self.state.channel_strip.slots.get(mod_id)
+        return slot.plugin_name if (slot and slot.plugin_name) else None
+
+    def _resolve_da_slot_for_variant(self, variant):
+        """Find the actual DA strip slot index that currently hosts the given
+        variant plugin. Custom strip layouts can put e.g. DeEsser at the
+        Saturator physical position, so the binding-path mod_id doesn't always
+        match the DA tree's slot index. Returns DA slot (16-20) or -1 if not found.
+        """
+        if not variant:
+            return -1
+        cache = getattr(self.nuendo_link, '_da_strip_slot_cache', []) or []
+        for entry in cache:
+            if entry and entry.get('plugin_name') == variant:
+                strip_si = entry.get('slot_index', -1)
+                if 0 <= strip_si <= 5:
+                    return 16 + strip_si
+        return -1
+
+    def _eq_da_encoder_indices(self, band_idx_0based):
+        """Compute the 8 DA param indices for the EQ page given the selected band.
+
+        DA enum for the ChannelEQ slot:
+          Band N (1-based): On=5+(N-1)*6, Type=6+(N-1)*6, Gain=7+(N-1)*6,
+                            Freq=8+(N-1)*6, Q=9+(N-1)*6
+
+        Encoder layout (Ableton EQ-Eight style):
+          0 = band selector (no DA, handled in encoder handler)
+          1 = Type, 2 = Freq, 3 = Q, 4 = Gain (for selected band)
+          5 = HC Freq, 6 = LC Freq, 7 = PreGain (PreFilter — Phase 2, not yet)
+        """
+        b = max(0, min(3, band_idx_0based))
+        base = b * 6
+        type_idx = 6 + base
+        gain_idx = 7 + base
+        freq_idx = 8 + base
+        q_idx    = 9 + base
+        return [-1, type_idx, freq_idx, q_idx, gain_idx, -1, -1, -1]
+
+    def _apply_cs_strip_da_setup(self, cs_page, variant):
+        """Configure DA encoders for a CS sub-page variant that has extended DA params.
+
+        Returns True if DA setup was applied and cs_strip_da_active set, False otherwise.
+        """
+        # EQ uses dynamic param indices that depend on the selected band.
+        if cs_page == 'eq':
+            param_indices = self._eq_da_encoder_indices(self.state.eq_selected_band)
+        else:
+            param_indices = _VARIANT_DA_ENC_SETUP.get((cs_page, variant))
+        if param_indices is None:
+            self.state.cs_strip_da_active = False
+            return False
+
+        # Resolve the actual DA slot by scanning the strip cache for the variant
+        # (handles custom Cubase strip layouts where the binding-path mod_id
+        # doesn't match the DA tree position).
+        da_slot = self._resolve_da_slot_for_variant(variant)
+        if da_slot < 0:
+            # Fall back to standard mapping if not found in cache yet
+            mod_id = _CS_PAGE_TO_MOD_ID.get(cs_page)
+            if mod_id is None or not (0x10 <= mod_id <= 0x14):
+                self.state.cs_strip_da_active = False
+                return False
+            da_slot = 16 + (mod_id - 0x10)
+        strip_si = da_slot - getattr(self.nuendo_link, 'DA_STRIP_SLOT_OFFSET', 16)
+        da_params = getattr(self.nuendo_link, '_da_strip_params', {}).get(strip_si, {})
+
+        names = [''] * 8
+        for enc_i, pidx in enumerate(param_indices):
+            if pidx >= 0:
+                info = da_params.get(pidx)
+                if info:
+                    names[enc_i] = info.get('name', '')
+
+        # EQ page: Enc 1 = band selector, Enc 6-8 = PreFilter LC/HC/PreGain (binding path).
+        # Populate names manually since these encs have no DA tag.
+        if cs_page == 'eq':
+            names[0] = "BAND"
+            names[5] = "LC Freq"
+            names[6] = "HC Freq"
+            names[7] = "PreGain"
+
+        self.state.insert_param_names = names
+        self.state.insert_param_values = [''] * 8
+        if cs_page == 'eq':
+            self.state.insert_param_values[0] = str(self.state.eq_selected_band + 1)
+        self.state.cs_strip_da_active = True
+
+        self.nuendo_link.send_da_encoder_setup(da_slot, param_indices)
+        named = [n for n in names if n]
+        print(f"  ✓ CS strip DA: {variant} [{', '.join(named)}]")
+        return True
+
     def _restore_default_palette(self):
         """Restore Push 2 palette by resetting the Push."""
         if not self.push:
@@ -2552,7 +3120,7 @@ class Push2Controller:
         
         mode = self.state.mode
         buttons_modes = {
-            BTN_MODE_VOLUME:  [MODE_VOLUME, MODE_TRACK],
+            BTN_MODE_VOLUME:  [MODE_VOLUME, MODE_TRACK, MODE_CHANNEL_STRIP],
             BTN_MODE_SENDS:   [MODE_SENDS, MODE_PAN],
             BTN_DEVICE:       [MODE_DEVICE],
             BTN_MODE_INSERTS: [MODE_INSERTS, MODE_BROWSER],
@@ -2663,6 +3231,15 @@ class Push2Controller:
                         pass
             return
         
+        # ── Channel Strip mode: upper row OFF (drill-in nav, not state) ──
+        if state.mode == MODE_CHANNEL_STRIP:
+            for i in range(8):
+                try:
+                    self._send_midi_to_push([0xB0, 102 + i, LED_OFF])
+                except Exception:
+                    pass
+            return
+
         # ── Browser mode: upper row ──
         if state.mode == MODE_BROWSER:
             if state.browser_phase == "slot_select":
@@ -2863,6 +3440,75 @@ class Push2Controller:
                     pass
             return
         
+        # ── Channel Strip drill-down: lower row mirrors footer pill states
+        # (set by the renderer each frame in state.cs_footer_pill_states) ──
+        if state.mode == MODE_CHANNEL_STRIP and state.cs_page != 'overview':
+            pill_states = getattr(state, 'cs_footer_pill_states', [None] * 8)
+            for i in range(8):
+                cc = 20 + i
+                try:
+                    s = pill_states[i] if i < len(pill_states) else None
+                    if s is None:
+                        self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    else:
+                        self._send_midi_to_push([0xB0, cc, BTN_WHITE if s else BTN_DIM])
+                except Exception:
+                    pass
+            return
+
+        # ── Channel Strip overview: lower row mirrors section bypass state ──
+        if state.mode == MODE_CHANNEL_STRIP and state.cs_page == 'overview':
+            cs = state.channel_strip
+            # Compute the "ON" state for each lower-row position
+            #   0 = Gate, 1 = Comp, 2 = EQ, 3 = Tools, 4 = Sat, 5 = Limiter
+            #   6 = Phase, 7 = unused
+            def _slot_active(mod_id):
+                slot = cs.slots.get(mod_id)
+                if slot is None or not slot.plugin_name:
+                    return False
+                return not slot.bypassed
+
+            eq_bypass_val = cs.eq.get(0x7F, {}).get('value', 0)
+            eq_bypass_disp = cs.eq.get(0x7F, {}).get('display', '')
+            # Cross-check via DA mirror (more reliable for EQ section bypass)
+            eq_bypass_da = state.da_strip_toggle_values.get(('EQ', 0), None)
+            if eq_bypass_da is not None:
+                eq_active = eq_bypass_da < 0.5
+            else:
+                eq_active = not ((eq_bypass_disp == 'On') or (eq_bypass_val >= 64))
+
+            phase_val = cs.prefilter.get(0x01, {}).get('value', 0)
+            phase_disp = cs.prefilter.get(0x01, {}).get('display', '')
+            phase_on = (phase_disp == 'On') or (phase_val >= 64)
+
+            editor_open = bool(getattr(state, 'editor_open', False))
+            # Lower 1-6 = Bypass indicators: lit AMBER when the section is
+            # BYPASSED (matches the on-screen pills + Nuendo's bypass button).
+            # Lower 7 = Phase On/Off (white when on). Lower 8 = Edit (white).
+            bypassed = [
+                not _slot_active(0x10),  # Gate
+                not _slot_active(0x11),  # Comp
+                not eq_active,           # EQ
+                not _slot_active(0x12),  # Tools
+                not _slot_active(0x13),  # Sat
+                not _slot_active(0x14),  # Limiter
+            ]
+            for i in range(6):
+                cc = 20 + i
+                try:
+                    self._send_midi_to_push(
+                        [0xB0, cc, BTN_YELLOW if bypassed[i] else BTN_DIM])
+                except Exception:
+                    pass
+            try:
+                self._send_midi_to_push(
+                    [0xB0, 26, BTN_WHITE if phase_on else BTN_DIM])      # Lower 7
+                self._send_midi_to_push(
+                    [0xB0, 27, BTN_WHITE if editor_open else BTN_DIM])   # Lower 8
+            except Exception:
+                pass
+            return
+
         # ── MIDI CC mode: lower row = toggle on/off ──
         if state.mode == MODE_MIDICC:
             for i in range(8):
@@ -3084,11 +3730,6 @@ class Push2Controller:
                             except Exception:
                                 pass
                 
-                # Update LEDs if a change was signaled
-                if getattr(self.nuendo_link, '_leds_dirty', False):
-                    self.nuendo_link._leds_dirty = False
-                    self._update_all_leds()
-                
                 # Blink for Overview mode (~2Hz)
                 if self.state.mode == MODE_OVERVIEW:
                     if not hasattr(self, '_overview_blink_counter'):
@@ -3119,6 +3760,12 @@ class Push2Controller:
                     _frame_count += 1
                     if _frame_count == 1:
                         print("  ✓ First frame sent to Push 2 display")
+
+                # Update LEDs AFTER render so any state computed by the
+                # renderer (e.g. state.cs_footer_pill_states) is already fresh.
+                if getattr(self.nuendo_link, '_leds_dirty', False):
+                    self.nuendo_link._leds_dirty = False
+                    self._update_all_leds()
             except Exception as e:
                 _frame_count += 1
                 if _display_ok:
@@ -3594,10 +4241,24 @@ class Push2Controller:
         return best_match
 
     def _on_da_params_ready(self, slot_index):
-        """Called when DA param enumeration is complete. Applies the active mapping."""
+        """Called when DA param enumeration is complete for any slot."""
+        # Strip slot DA (16-20): apply CS encoder setup when the matching slot is done
+        da_strip_offset = getattr(self.nuendo_link, 'DA_STRIP_SLOT_OFFSET', 16)
+        if slot_index >= da_strip_offset:
+            cs_page = getattr(self.state, 'cs_page', 'overview')
+            if cs_page != 'overview':
+                variant = self._cs_page_variant(cs_page)
+                # Only apply if there's a DA setup for this (page, variant) AND
+                # the completed DA slot matches the dynamically resolved one.
+                if _VARIANT_DA_ENC_SETUP.get((cs_page, variant)) is not None:
+                    expected_da_slot = self._resolve_da_slot_for_variant(variant)
+                    if expected_da_slot == slot_index:
+                        self._apply_cs_strip_da_setup(cs_page, variant)
+            return
+
         import json
         from pathlib import Path
-        
+
         mapping = self.state.active_mapping
         if not mapping:
             return

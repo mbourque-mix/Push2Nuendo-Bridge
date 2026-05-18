@@ -35,6 +35,7 @@ import rtmidi
 import threading
 import time
 import struct
+import os
 from state import (
     AppState, TrackInfo, InsertInfo, QuickControl,
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_OVERVIEW,
@@ -93,6 +94,15 @@ class NuendoLink:
         self._da_available = False  # True when JS reports DirectAccess is active
         self._da_inserts_ready = False  # True when JS has explored the insert tree
         self._da_insert_cache = []  # Mirrored from JS: [{bypass_tag, title, bypassed}]
+        # Strip slot DA (v1.0.4)
+        self._da_strip_slot_cache = []   # [{slot_index, mod_id, bypassed, is_on, plugin_name, slot_title}]
+        self._da_strip_explored   = False  # True once JS has sent 0x35
+        # ── Channel Strip discovery dump (Axe B) ──
+        # Auto-written each time a strip param announce or display change
+        # triggers a real state change. Lets users inspect the bank zone
+        # contents for each module without scrolling Nuendo's console window.
+        # Path is rewritten in full on each update — newest state always wins.
+        self._strip_discovery_log = os.path.expanduser('~/strip-discovery.log')
         self._da_bypass_fallback_slot = -1  # Slot needing viewer fallback
         
         # MTC (MIDI Time Code)
@@ -186,18 +196,44 @@ class NuendoLink:
 
     # ── IAC/loopMIDI fallback ──
 
+    @staticmethod
+    def _find_port_index(ports, target):
+        """
+        Return the index of a port matching ``target``.
+
+        Prefers an exact name match; loopMIDI sometimes appends an index
+        (e.g. "NuendoBridge In 2"), so fall back to a substring match.
+        Returns None if not found.
+        """
+        for i, name in enumerate(ports):
+            if name == target:
+                return i
+        for i, name in enumerate(ports):
+            if target in name:
+                return i
+        return None
+
     def _open_iac_input(self):
         """Open an existing IAC/loopMIDI input port."""
         self._midi_in = rtmidi.MidiIn()
         self._midi_in.ignore_types(sysex=False, timing=False, active_sense=True)
         ports = self._midi_in.get_ports()
         
-        for i, port_name in enumerate(ports):
-            if PORT_FROM_NUENDO in port_name:
-                self._midi_in.open_port(i)
-                self._midi_in.set_callback(self._on_midi_received)
-                print(f"  ✓ IAC port '{PORT_FROM_NUENDO}' connected")
-                return True
+        idx = self._find_port_index(ports, PORT_FROM_NUENDO)
+        if idx is not None:
+            try:
+                self._midi_in.open_port(idx)
+            except Exception as e:
+                print(f"  ✗ Could not open input port '{ports[idx]}': {e}")
+                print(f"    Available input ports: {ports}")
+                print( "    → That port is already in use by another app.")
+                print( "      Close other MIDI software, make sure only ONE")
+                print( "      copy of the bridge runs, and in Nuendo/Cubase")
+                print( "      uncheck it from 'In All MIDI Inputs'.")
+                return False
+            self._midi_in.set_callback(self._on_midi_received)
+            print(f"  ✓ loopMIDI port '{PORT_FROM_NUENDO}' connected")
+            return True
         
         print(f"  ✗ Port '{PORT_FROM_NUENDO}' not found")
         print(f"    Available ports: {ports}")
@@ -208,13 +244,21 @@ class NuendoLink:
         self._midi_out = rtmidi.MidiOut()
         ports = self._midi_out.get_ports()
         
-        for i, port_name in enumerate(ports):
-            if PORT_TO_NUENDO in port_name:
-                self._midi_out.open_port(i)
-                print(f"  ✓ IAC port '{PORT_TO_NUENDO}' connected")
-                return True
-        
-        print(f"  ✗ Port '{PORT_TO_NUENDO}' not found")
+        idx = self._find_port_index(ports, PORT_TO_NUENDO)
+        if idx is not None:
+            try:
+                self._midi_out.open_port(idx)
+            except Exception as e:
+                print(f"  ✗ Could not open output port '{ports[idx]}': {e}")
+                print(f"    Available output ports: {ports}")
+                print( "    → That port is already in use by another app.")
+                return False
+            print(f"  ✓ loopMIDI port '{PORT_TO_NUENDO}' connected")
+            return True
+
+        print(f"  ✗ Output port '{PORT_TO_NUENDO}' not found")
+        print(f"    Available output ports: {ports}")
+        print(f"    → Create a loopMIDI port named exactly '{PORT_TO_NUENDO}'")
         return False
 
     # ── Notes ports (always virtual) ──
@@ -226,9 +270,21 @@ class NuendoLink:
         try:
             self._midi_notes_out.open_virtual_port(PORT_NOTES_OUT)
             print(f"  ✓ Virtual port '{PORT_NOTES_OUT}' created")
-        except Exception as e:
-            print(f"  ⚠ Notes output port failed: {e}")
-            self._midi_notes_out = None
+        except Exception:
+            # Windows (WinMM) has no virtual ports — use the loopMIDI port
+            ports = self._midi_notes_out.get_ports()
+            idx = self._find_port_index(ports, PORT_NOTES_OUT)
+            if idx is not None:
+                try:
+                    self._midi_notes_out.open_port(idx)
+                    print(f"  ✓ loopMIDI port '{PORT_NOTES_OUT}' connected")
+                except Exception as e:
+                    print(f"  ⚠ Notes output port failed: {e}")
+                    self._midi_notes_out = None
+            else:
+                print(f"  ⚠ Notes output port '{PORT_NOTES_OUT}' not found "
+                      f"(create a loopMIDI port with this exact name)")
+                self._midi_notes_out = None
         
         # Input: receive playback notes from Nuendo
         self._midi_notes_in = rtmidi.MidiIn()
@@ -236,9 +292,22 @@ class NuendoLink:
             self._midi_notes_in.open_virtual_port(PORT_NOTES_IN)
             self._midi_notes_in.set_callback(self._on_notes_received)
             print(f"  ✓ Virtual port '{PORT_NOTES_IN}' created")
-        except Exception as e:
-            print(f"  ⚠ Notes input port failed: {e}")
-            self._midi_notes_in = None
+        except Exception:
+            # Windows (WinMM) has no virtual ports — use the loopMIDI port
+            ports = self._midi_notes_in.get_ports()
+            idx = self._find_port_index(ports, PORT_NOTES_IN)
+            if idx is not None:
+                try:
+                    self._midi_notes_in.open_port(idx)
+                    self._midi_notes_in.set_callback(self._on_notes_received)
+                    print(f"  ✓ loopMIDI port '{PORT_NOTES_IN}' connected")
+                except Exception as e:
+                    print(f"  ⚠ Notes input port failed: {e}")
+                    self._midi_notes_in = None
+            else:
+                print(f"  ⚠ Notes input port '{PORT_NOTES_IN}' not found "
+                      f"(create a loopMIDI port with this exact name)")
+                self._midi_notes_in = None
 
     # ─────────────────────────────────────────────
     # Receiving messages from Nuendo
@@ -753,7 +822,7 @@ class NuendoLink:
             val127 = message[6]
             tag = message[7] | (message[8] << 7) | (message[9] << 14) | (message[10] << 21)
             title = ''.join(chr(b) for b in message[11:-1]) if len(message) > 12 else ''
-            
+
             # Store in DA param cache
             if not hasattr(self, '_da_plugin_params'):
                 self._da_plugin_params = {}
@@ -763,14 +832,47 @@ class NuendoLink:
                 'value': val127 / 127.0,
                 'value_display': '',
             }
+            # For strip slot enum (slot >= 16), mirror into a per-slot dict and log
+            if slot >= self.DA_STRIP_SLOT_OFFSET:
+                strip_si = slot - self.DA_STRIP_SLOT_OFFSET
+                if not hasattr(self, '_da_strip_params'):
+                    self._da_strip_params = {}
+                if strip_si not in self._da_strip_params:
+                    self._da_strip_params[strip_si] = {}
+                self._da_strip_params[strip_si][param_idx] = {
+                    'name': title, 'tag': tag, 'value': val127 / 127.0,
+                }
+                # Mirror for renderer display of DA-based footer toggles, keyed
+                # by plugin_name so custom strip layouts work without remapping.
+                cache_entry = (self._da_strip_slot_cache[strip_si]
+                               if strip_si < len(self._da_strip_slot_cache) else None)
+                pname = cache_entry.get('plugin_name') if cache_entry else None
+                if pname:
+                    self.state.da_strip_toggle_values[(pname, param_idx)] = val127 / 127.0
+                print(f"    [strip {strip_si}] param {param_idx:3d}: '{title}' "
+                      f"tag={tag} val={val127/127.0:.3f}")
             return
         elif len(message) >= 6 and message[1] == 0x00 and message[2] == 0x2A:
             # DA plugin param enum complete : [F0 00 2A slotIdx countLo countHi F7]
             slot = message[3]
             count = message[4] | (message[5] << 7)
-            print(f"  ✓ DA Plugin params enumerated: slot {slot}, {count} params")
+            if slot >= self.DA_STRIP_SLOT_OFFSET:
+                strip_si = slot - self.DA_STRIP_SLOT_OFFSET
+                print(f"  ✓ DA Strip params enumerated: strip slot {strip_si}, {count} params total")
+                # Chain next strip slot enum if auto-enum is in progress
+                if getattr(self, '_strip_enum_active', False):
+                    queue = getattr(self, '_strip_enum_queue', [])
+                    if queue:
+                        si, name = queue.pop(0)
+                        print(f"  → DA Strip: auto-enum slot {si} ({name})")
+                        self.request_da_strip_params(si)
+                    else:
+                        self._strip_enum_active = False
+                        print("  ✓ DA Strip: all slots enumerated")
+            else:
+                print(f"  ✓ DA Plugin params enumerated: slot {slot}, {count} params")
             self._da_params_enumerated = True
-            
+
             # Notify controller to apply mapping
             if hasattr(self, '_on_da_params_ready') and self._on_da_params_ready:
                 self._on_da_params_ready(slot)
@@ -783,6 +885,7 @@ class NuendoLink:
             state = self.state
             if enc_idx < 8:
                 state.insert_param_values[enc_idx] = display if display else f"{val127/127:.2f}"
+                self._leds_dirty = True
             return
         elif len(message) >= 6 and message[1] == 0x00 and message[2] == 0x2C:
             # DA plugin list entry : [F0 00 2C idxLo idxHi ...name 00 ...vendor 00 ...subCat 00 ...uid F7]
@@ -872,6 +975,210 @@ class NuendoLink:
             else:
                 print(f"  ✗ DA Plugin load FAILED for slot {slot + 1}")
             return
+
+        # ── DA Strip Slot handlers (v1.0.4) ──
+
+        elif len(message) >= 7 and message[1] == 0x00 and message[2] == 0x34:
+            # DA strip slot cache entry:
+            # [F0 00 34 slotIdx modId bypassed isOn ...pluginName 00 ...slotTitle F7]
+            slot_idx = message[3]
+            mod_id   = message[4]
+            bypassed = message[5] > 0
+            is_on    = message[6] > 0
+            rest     = message[7:-1]
+            # Split plugin name / slot title at the 0x00 separator
+            sep = len(rest)
+            for j, b in enumerate(rest):
+                if b == 0:
+                    sep = j
+                    break
+            plugin_name = ''.join(chr(b) for b in rest[:sep])
+            slot_title  = ''.join(chr(b) for b in rest[sep + 1:]) if sep < len(rest) - 1 else ''
+
+            if not hasattr(self, '_da_strip_slot_cache'):
+                self._da_strip_slot_cache = []
+            while len(self._da_strip_slot_cache) <= slot_idx:
+                self._da_strip_slot_cache.append(None)
+            self._da_strip_slot_cache[slot_idx] = {
+                'slot_index':  slot_idx,
+                'mod_id':      mod_id,
+                'bypassed':    bypassed,
+                'is_on':       is_on,
+                'plugin_name': plugin_name,
+                'slot_title':  slot_title,
+            }
+            print(f"  DA Strip slot {slot_idx} (mod {mod_id:02X}): '{slot_title}'"
+                  f" plugin='{plugin_name}' on={is_on} bypass={bypassed}")
+            return
+
+        elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x35:
+            # DA strip slot cache complete : [F0 00 35 count F7]
+            count = message[3]
+            self._da_strip_explored = True
+            self._leds_dirty = True
+            print(f"  ✓ DA Strip exploration complete: {count} slots cached")
+            # Diagnostic: auto-enum params for every loaded slot so we can
+            # inspect which extended params (beyond bank zone) are available.
+            # Chain sequentially via 0x2A: each completion triggers the next request.
+            self._strip_enum_queue = [
+                (e['slot_index'], e['plugin_name'])
+                for e in self._da_strip_slot_cache
+                if e and e.get('plugin_name')
+            ]
+            self._strip_enum_active = True
+            if self._strip_enum_queue:
+                si, name = self._strip_enum_queue.pop(0)
+                print(f"  → DA Strip: auto-enum slot {si} ({name})")
+                self.request_da_strip_params(si)
+            if hasattr(self, '_on_strip_da_ready') and self._on_strip_da_ready:
+                self._on_strip_da_ready()
+            return
+
+        elif len(message) >= 9 and message[1] == 0x00 and message[2] == 0x3D:
+            # Live DA param feedback from host (e.g. user touched a param in
+            # Nuendo's GUI). Format:
+            #   [F0 00 3D slotIdxLo slotIdxHi paramIdxLo paramIdxHi val127 ...display F7]
+            slot_idx  = message[3] | (message[4] << 7)
+            param_idx = message[5] | (message[6] << 7)
+            val127    = message[7]
+            try:
+                disp = bytes(message[8:-1]).decode('utf-8', errors='ignore').rstrip('\x00')
+            except Exception:
+                disp = ''
+            val_norm = val127 / 127.0
+
+            # Resolve plugin_name from the strip cache
+            strip_si = slot_idx - getattr(self, 'DA_STRIP_SLOT_OFFSET', 16)
+            cache = getattr(self, '_da_strip_slot_cache', []) or []
+            pname = None
+            if 0 <= strip_si < len(cache) and cache[strip_si]:
+                pname = cache[strip_si].get('plugin_name')
+
+            # Update DA toggle/value mirror so the renderer sees fresh values
+            if pname:
+                self.state.da_strip_toggle_values[(pname, param_idx)] = val_norm
+                self._leds_dirty = True
+
+            # If this is an EQ param and the user is currently on the EQ page,
+            # also refresh insert_param_values / eq_band_cache so the encoder
+            # cells and the curve update without waiting for a Push encoder
+            # touch to fire SysEx 0x2B.
+            if pname == 'EQ':
+                # Map param_idx → (band_idx, role)  where role ∈ {'type','gain','freq','q','on'}
+                # Band N: On=5+N*6, Type=6+N*6, Gain=7+N*6, Freq=8+N*6, Q=9+N*6
+                roles_by_offset = {0: 'on', 1: 'type', 2: 'gain', 3: 'freq', 4: 'q'}
+                if 5 <= param_idx < 29:
+                    band_idx = (param_idx - 5) // 6
+                    role_off = (param_idx - 5) % 6
+                    role = roles_by_offset.get(role_off)
+                    if 0 <= band_idx <= 3 and role:
+                        cache_entry = self.state.eq_band_cache[band_idx]
+                        # Update numeric cache (parse display if available)
+                        if role == 'freq':
+                            # Parse "30.0 Hz" / "1.5 kHz"
+                            v = self._parse_eq_freq(disp)
+                            if v is not None: cache_entry['freq'] = v
+                        elif role == 'gain':
+                            v = self._parse_eq_db(disp)
+                            if v is not None: cache_entry['gain'] = v
+                        elif role == 'q':
+                            try: cache_entry['q'] = float(disp.strip()) if disp else None
+                            except ValueError: pass
+                        elif role == 'type':
+                            cache_entry['type'] = disp.lower() if disp else None
+                        # If this is the SELECTED band's currently-armed encoder,
+                        # also update insert_param_values for the cell display.
+                        sel = self.state.eq_selected_band
+                        if band_idx == sel:
+                            enc_pos_for_role = {'type': 1, 'freq': 2, 'q': 3, 'gain': 4}
+                            ep = enc_pos_for_role.get(role)
+                            if ep is not None and 0 <= ep < 8:
+                                self.state.insert_param_values[ep] = (
+                                    disp if disp else f"{val_norm:.2f}")
+            return
+
+        elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x3E:
+            # Edit Channel Settings window state: [F0 00 3E open F7]
+            self.state.editor_open = (message[3] > 0)
+            self._leds_dirty = True
+            return
+
+        elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x3B:
+            # JS-side strip cache reset notification (e.g. on Nuendo reload).
+            self._da_strip_explored = False
+            self._da_strip_slot_cache = []
+            print("  ℹ DA Strip cache reset by JS (Nuendo reload?)")
+            # If we're currently in a CS drill-down sub-page, re-trigger exploration
+            # right away — otherwise it would only fire on the next page switch and
+            # DA-dependent commands (Edit, encoder feedback) would fail silently.
+            cur_page = getattr(self.state, 'cs_page', 'overview')
+            if cur_page and cur_page != 'overview':
+                print("  → Re-triggering strip exploration (in drill-down)")
+                self.request_da_strip_exploration()
+            return
+
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x3A:
+            # Variant switch result: [F0 00 3A daSlot success F7]
+            da_slot = message[3]
+            success = message[4] > 0
+            if success:
+                print(f"  ✓ Variant switch slot {da_slot} succeeded — strip cache invalidated")
+                # Re-explore so the cache reflects the new plugin
+                self.request_da_strip_exploration()
+            else:
+                print(f"  ✗ Variant switch slot {da_slot} failed")
+            return
+
+        elif len(message) >= 7 and message[1] == 0x00 and message[2] == 0x39:
+            # DA param flip feedback: [F0 00 39 daSlot paramIdx val127 F7]
+            da_slot   = message[3]
+            param_idx = message[4]
+            val127    = message[5]
+            val_norm  = val127 / 127.0
+            if da_slot >= self.DA_STRIP_SLOT_OFFSET:
+                strip_si = da_slot - self.DA_STRIP_SLOT_OFFSET
+                cache = getattr(self, '_da_strip_params', {}).get(strip_si, {})
+                info = cache.get(param_idx)
+                if info:
+                    info['value'] = val_norm
+                    print(f"  DA flip: strip {strip_si} param {param_idx} → {val_norm:.3f}")
+                # Mirror keyed by plugin_name (custom strip layouts).
+                slot_cache = getattr(self, '_da_strip_slot_cache', [])
+                cache_entry = slot_cache[strip_si] if strip_si < len(slot_cache) else None
+                pname = cache_entry.get('plugin_name') if cache_entry else None
+                if pname:
+                    self.state.da_strip_toggle_values[(pname, param_idx)] = val_norm
+                self._leds_dirty = True
+            return
+
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x36:
+            # DA strip bypass result : [F0 00 36 slotIdx success bypassed F7]
+            slot_idx = message[3]
+            success  = message[4] > 0
+            if success and len(message) >= 7:
+                bypassed = message[5] > 0
+                # Update DA cache
+                cache = getattr(self, '_da_strip_slot_cache', [])
+                if slot_idx < len(cache) and cache[slot_idx]:
+                    cache[slot_idx]['bypassed'] = bypassed
+                    mod_id = cache[slot_idx]['mod_id']
+                    # Mirror into ChannelStripState
+                    slot_state = self.state.channel_strip.slots.get(mod_id)
+                    if slot_state:
+                        slot_state.bypassed = bypassed
+                        self._leds_dirty = True
+                print(f"  DA Strip bypass slot {slot_idx}: {'BYPASS' if bypassed else 'ACTIVE'} ✓")
+            elif not success:
+                print(f"  DA Strip bypass slot {slot_idx}: FAILED")
+            return
+
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x37:
+            # DA strip edit result : [F0 00 37 slotIdx success F7]
+            slot_idx = message[3]
+            success  = message[4] > 0
+            print(f"  DA Strip edit slot {slot_idx}: {'✓' if success else 'FAILED'}")
+            return
+
         else:
             return
         
@@ -1097,6 +1404,93 @@ class NuendoLink:
                 print(f"  [DA] {log_text}")
             except UnicodeDecodeError:
                 pass
+        
+        # ── Strip Exploration (Phase 1a/1b/1c) — types 0x30/0x31/0x32/0x33 ──
+        # Module IDs: 0x00 = PreFilter, 0x01 = ChannelEQ
+        #             0x10..0x14 = strip slots (Gate, Comp, Tools, Sat, Limit)
+        # 0x30 = parameter announce  (modId, paramId, ascii name)
+        # 0x31 = parameter value     (modId, paramId, val127)
+        # 0x32 = parameter display   (modId, paramId, ascii display)
+        # 0x33 = plugin identity     (modId, ascii pluginName) — variant change
+        #
+        # Each call routes into self.state.channel_strip which deduplicates
+        # against its cached values. A real change returns True and is logged
+        # at debug level; redundant fires (Nuendo emits each callback 4-10×
+        # per actual user action) are silently dropped.
+        # _STRIP_LOG_EMPTY=True forces logging of empty strings for diagnostics.
+        elif msg_type == 0x30 and len(payload) >= 2:
+            mod_id = payload[0]
+            param_id = payload[1]
+            try:
+                name = bytes(payload[2:]).decode('utf-8').rstrip('\x00')
+                if name:
+                    if self.state.channel_strip.update_announce(mod_id, param_id, name):
+                        mod_name = _strip_module_name(mod_id)
+                        print(f"  [STRIP] {mod_name} 0x{param_id:02X} announce='{name}'")
+                        self._leds_dirty = True
+                        # Refresh the on-disk discovery dump (Axe B).
+                        self._dump_strip_discovery()
+                elif _STRIP_LOG_EMPTY:
+                    mod_name = _strip_module_name(mod_id)
+                    print(f"  [STRIP] {mod_name} 0x{param_id:02X} announce=<empty>")
+            except UnicodeDecodeError:
+                pass
+        
+        elif msg_type == 0x31 and len(payload) >= 3:
+            mod_id = payload[0]
+            param_id = payload[1]
+            val127 = payload[2]
+            # Cache the raw 0-127 value for delta/toggle commands.
+            # state.channel_strip.update_value() returns True only on changes,
+            # so this stays cheap even with the 4-10× duplicate fires.
+            if self.state.channel_strip.update_value(mod_id, param_id, val127):
+                # Logging is opt-in via attribute flag (volume of fires is high)
+                if getattr(self, '_strip_log_values', False):
+                    mod_name = _strip_module_name(mod_id)
+                    print(f"  [STRIP] {mod_name} 0x{param_id:02X} val={val127}")
+        
+        elif msg_type == 0x32 and len(payload) >= 2:
+            mod_id = payload[0]
+            param_id = payload[1]
+            try:
+                text = bytes(payload[2:]).decode('utf-8').rstrip('\x00')
+                if text:
+                    if self.state.channel_strip.update_display(mod_id, param_id, text):
+                        mod_name = _strip_module_name(mod_id)
+                        print(f"  [STRIP] {mod_name} 0x{param_id:02X} display='{text}'")
+                        self._leds_dirty = True
+                elif _STRIP_LOG_EMPTY:
+                    mod_name = _strip_module_name(mod_id)
+                    print(f"  [STRIP] {mod_name} 0x{param_id:02X} display=<empty>")
+            except UnicodeDecodeError:
+                pass
+        
+        # ── Plugin identity (Phase 1c) — type 0x33 ──
+        # Fired by slot.mOnChangePluginIdentity when a strip module variant changes.
+        # Format: F0 00 21 09 33 modId <ascii pluginName> F7
+        # E.g. variant switch in Compressor slot fires plugin='Tube Compressor'.
+        elif msg_type == 0x33 and len(payload) >= 1:
+            mod_id = payload[0]
+            try:
+                name = bytes(payload[1:]).decode('utf-8').rstrip('\x00')
+                if name:
+                    if self.state.channel_strip.update_plugin(mod_id, name):
+                        mod_name = _strip_module_name(mod_id)
+                        print(f"  [STRIP] {mod_name} plugin='{name}'")
+                        self._leds_dirty = True
+                        self._dump_strip_discovery()
+                        # If the user is currently drilled into THIS slot,
+                        # re-activate the variant-specific sub-page so the
+                        # JS encoder/toggle bindings match the new plugin.
+                        cs_page = getattr(self.state, 'cs_page', 'overview')
+                        if self._PAGE_TO_MOD_ID.get(cs_page) == mod_id:
+                            print(f"  [STRIP] re-activating sub-page for new variant")
+                            self.activate_subpage(cs_page)
+                elif _STRIP_LOG_EMPTY:
+                    mod_name = _strip_module_name(mod_id)
+                    print(f"  [STRIP] {mod_name} plugin=<empty>")
+            except UnicodeDecodeError:
+                pass
 
     # ─────────────────────────────────────────────
     # Sending messages to Nuendo
@@ -1145,6 +1539,349 @@ class NuendoLink:
         if self._midi_out and self._running:
             self._midi_out.send_message([0xB6, cc_num & 0x7F, int(value) & 0x7F])
 
+    def send_cc_ch8(self, cc_num, value):
+        """Send a CC message on channel 8 (0xB7). Used for Channel Strip writes."""
+        if self._midi_out and self._running:
+            self._midi_out.send_message([0xB7, cc_num & 0x7F, int(value) & 0x7F])
+
+    def send_cc_ch9(self, cc_num, value):
+        """Send a CC message on MIDI Remote channel index 9 (wire byte 0xB9).
+        
+        ⚠ Naming exception: the existing send_cc_chN functions in this file use
+        a "1-based user-facing" channel naming where chN sends wire byte 0xB(N-1).
+        This function BREAKS that convention because the MIDI Remote API on the
+        JS side uses 0-based channel indexing — bindToControlChange(9, ...)
+        listens specifically for wire byte 0xB9. To match, we send 0xB9 directly.
+        
+        Used for Channel Strip CONTINUOUS writes (PreGain encoder delta).
+        Channel 8 (0xB8) is heavily used by the DirectAccess encoder routing
+        system, hence the +1 here.
+        """
+        if self._midi_out and self._running:
+            self._midi_out.send_message([0xB9, cc_num & 0x7F, int(value) & 0x7F])
+
+    def send_note_ch9(self, note_num, velocity):
+        """Send a note-on message on MIDI Remote channel index 9 (wire byte 0x99).
+        
+        Used for Channel Strip BINARY toggle writes (slot.mOn, Phase, section
+        bypasses). Steinberg MIDI Remote API requires Button + bindToNote +
+        setTypeToggle for binary host writes — confirmed by the working
+        sendOnBtn pattern at line ~475 of Ableton_Push2.js. Knob + CC +
+        setTypeToggle does NOT propagate writes for binary hosts.
+        
+        Each note-on event flips the host's binary value via the toggle binding.
+        We send velocity 127 (press) which is what the toggle binding watches for.
+        """
+        if self._midi_out and self._running:
+            self._midi_out.send_message([0x99, note_num & 0x7F, int(velocity) & 0x7F])
+
+    # ── Channel Strip control (Axe A) ─────────────────────────────
+    # Channel 9 (raw, 0-indexed) — wire bytes 0xB9 (CC) and 0x99 (note-on).
+    # Free of conflicts with daBypass (raw 7) and DA encoder system (raw 8).
+    #
+    # CONTINUOUS hosts (PreGain) → CC 9/N, value is absolute 0-127
+    # BINARY hosts (Phase, Bypass, slot.mOn) → Note 9/N (velocity 127), each
+    #   note-on toggles the host via .setTypeToggle() binding on JS side
+    #
+    # The number N is the same in both cases (it's just a row in the table),
+    # but messages with the same N differ in type:
+    #   N=0 : PreGain         — CC (continuous)
+    #   N=1 : Phase Switch    — Note (toggle)
+    #   N=2 : PreFilter sec   — Note (toggle)
+    #   N=3 : ChannelEQ sec   — Note (toggle)
+    #   N=4..8 : slot.mOn     — Note (toggle)
+    
+    # Map (mod_id, param_id) → message number N on channel 9
+    _STRIP_PARAM_NUM = {
+        (0x00, 0x00): 0,   # PreFilter PreGain (CC, continuous)
+        (0x00, 0x01): 1,   # PreFilter Phase Switch (Note, toggle)
+        (0x00, 0x7F): 2,   # PreFilter section bypass (Note, toggle)
+        (0x01, 0x7F): 3,   # ChannelEQ section bypass (Note, toggle)
+        (0x10, 0x00): 4,   # Gate slot.mOn (Note, toggle)
+        (0x11, 0x00): 5,   # Compressor slot.mOn (Note, toggle)
+        (0x12, 0x00): 6,   # Tools slot.mOn (Note, toggle)
+        (0x13, 0x00): 7,   # Saturator slot.mOn (Note, toggle)
+        (0x14, 0x00): 8,   # Limiter slot.mOn (Note, toggle)
+        (0x00, 0x03): 9,   # PreFilter HC On (Note, toggle)
+        (0x00, 0x06): 10,  # PreFilter LC On (Note, toggle)
+        (0x00, 0x02): 18,  # PreFilter HC Freq (CC, continuous)
+        (0x00, 0x05): 19,  # PreFilter LC Freq (CC, continuous)
+    }
+    # Backward-compatible alias for code that still references _STRIP_PARAM_CC
+    _STRIP_PARAM_CC = _STRIP_PARAM_NUM
+    
+    def send_strip_param_set(self, mod_id, param_id, val127):
+        """
+        Send an absolute 0-127 value to a continuous strip parameter via CC.
+        Currently only used implicitly by the delta helper for PreGain.
+        For binary params, use send_strip_param_toggle instead.
+        """
+        n = self._STRIP_PARAM_NUM.get((mod_id, param_id))
+        if n is None:
+            print(f"[STRIP] send_strip_param_set: no mapping for "
+                  f"mod={mod_id:02X} param={param_id:02X}")
+            return
+        val = max(0, min(127, int(val127)))
+        print(f"[STRIP→Nuendo] CC9/{n} = {val}  (set, mod={mod_id:02X} param={param_id:02X})")
+        self.send_cc_ch9(n, val)
+    
+    def send_strip_param_delta(self, mod_id, param_id, delta):
+        """
+        Apply a relative delta to a continuous strip param (PreGain). Reads the
+        cached value from state.channel_strip, adds delta, sends the new absolute
+        value via CC on channel 9. Used by encoder turns.
+        """
+        n = self._STRIP_PARAM_NUM.get((mod_id, param_id))
+        if n is None:
+            print(f"[STRIP] send_strip_param_delta: no mapping for "
+                  f"mod={mod_id:02X} param={param_id:02X}")
+            return
+        current = self.state.channel_strip.get_value(mod_id, param_id)
+        if current is None:
+            current = 64
+        new_val = max(0, min(127, current + int(delta)))
+        print(f"[STRIP→Nuendo] CC9/{n} = {new_val}  (delta from {current} +{delta:+d}, "
+              f"mod={mod_id:02X} param={param_id:02X})")
+        self.send_cc_ch9(n, new_val)
+    
+    def send_strip_param_toggle(self, mod_id, param_id):
+        """
+        Flip a binary strip param (slot.mOn, mPhaseSwitch, section bypass).
+        Sends a note-on event on channel 9, note number = mapping table N,
+        velocity 127. The JS binding has .setTypeToggle() which flips the
+        host's binary value on each note-on event.
+
+        Some Cubase params (notably PreFilter HC/LC On and section bypass)
+        don't fire mOnProcessValueChange/mOnDisplayValueChange callbacks
+        reliably, so we also OPTIMISTICALLY update the cached value/display
+        with the predicted new state. If a real SysEx 0x31/0x32 arrives
+        later, it overrides our prediction.
+        """
+        n = self._STRIP_PARAM_NUM.get((mod_id, param_id))
+        if n is None:
+            print(f"[STRIP] send_strip_param_toggle: no mapping for "
+                  f"mod={mod_id:02X} param={param_id:02X}")
+            return
+        current = self.state.channel_strip.get_value(mod_id, param_id)
+        # Predict the post-toggle value
+        new_val = 0 if (current is not None and current >= 64) else 127
+        self.state.channel_strip.update_value(mod_id, param_id, new_val)
+        self.state.channel_strip.update_display(
+            mod_id, param_id, 'On' if new_val >= 64 else 'Off')
+        self._leds_dirty = True
+        print(f"[STRIP→Nuendo] Note9/{n} velocity 127  (toggle, current={current} "
+              f"→ predicted {new_val}, mod={mod_id:02X} param={param_id:02X})")
+        self.send_note_ch9(n, 127)
+    
+    # ── Channel Strip drill-down (Axe B) ─────────────────────────────
+    # Sub-page activation: bridge sends a note on channel 9 to activate the
+    # corresponding sub-page in the JS script. Once a sub-page is active,
+    # encoder writes (CC 9/10..17) route to that sub-page's param bindings.
+    #
+    #   Note 9/100 = Overview
+    #   Note 9/101 = Gate
+    #   Note 9/102 = Comp
+    #   Note 9/103 = EQ
+    #   Note 9/104 = Tools
+    #   Note 9/105 = Sat
+    #   Note 9/106 = Limiter
+    
+    # Sub-page activator notes. Each Channel Strip variant has its own sub-page
+    # in JS with bindings tailored to that variant's params (continuous vs
+    # binary positions differ between, e.g., Standard and Vintage Comp).
+    #
+    # Lookup is keyed by (cs_page, plugin_name). plugin_name=None falls back
+    # to the "primary" variant for that slot (used when drilling in before
+    # the variant is detected, or when the slot has no plugin loaded yet).
+    _SUBPAGE_NOTES = {
+        # Overview + single-variant slots
+        ('overview', None):                    100,
+        ('gate',     None):                    101,
+        ('gate',     'Noise Gate'):            101,
+        ('eq',       None):                    103,
+        # Comp variants (3)
+        ('comp',     None):                    110,  # fallback → Standard
+        ('comp',     'Standard Compressor'):   110,
+        ('comp',     'Tube Compressor'):       111,
+        ('comp',     'VintageCompressor'):     112,
+        # Tools variants (2 known so far) — moved out of 120-127 range to avoid
+        # collision with drilldown toggle notes (120 = Auto Threshold for DeEsser).
+        ('tools',    None):                    113,  # fallback → DeEsser
+        ('tools',    'DeEsser'):               113,
+        ('tools',    'EnvelopeShaper'):        114,
+        # Sat variants (3)
+        ('sat',      None):                    130,  # fallback → Magneto II
+        ('sat',      'Magneto II'):            130,
+        ('sat',      'Tape Saturation'):       131,
+        ('sat',      'Tube Saturation'):       132,
+        # Limit variants (3)
+        ('limiter',  None):                    140,  # fallback → Brickwall
+        ('limiter',  'Brickwall Limiter'):     140,
+        ('limiter',  'Maximizer'):             141,
+        ('limiter',  'Standard Limiter'):      142,
+    }
+    
+    # Map cs_page name → mod_id, used by the bridge to resolve the slot's
+    # current plugin_name when activating the right variant sub-page.
+    _PAGE_TO_MOD_ID = {
+        'gate':    0x10,
+        'comp':    0x11,
+        'tools':   0x12,
+        'sat':     0x13,
+        'limiter': 0x14,
+    }
+    
+    def activate_subpage(self, name):
+        """
+        Send a note-on to activate the corresponding Channel Strip sub-page
+        in JS. Called whenever state.cs_page changes so encoder write
+        bindings route to the right module's parameters.
+        
+        For multi-variant slots, looks up the current plugin_name in
+        state.channel_strip.slots[mod_id] and activates the variant-specific
+        sub-page. Falls back to the "primary" variant (key with None) when
+        no plugin is loaded or the variant is unknown.
+        """
+        # Look up the current plugin name for this page's slot (if any).
+        variant = None
+        mod_id = self._PAGE_TO_MOD_ID.get(name)
+        if mod_id is not None:
+            slot = self.state.channel_strip.slots.get(mod_id)
+            if slot and slot.plugin_name:
+                variant = slot.plugin_name
+        
+        # Resolve activator note. Try exact match first, then fall back to
+        # the page's primary variant (None key).
+        note = self._SUBPAGE_NOTES.get((name, variant))
+        if note is None:
+            note = self._SUBPAGE_NOTES.get((name, None))
+        if note is None:
+            print(f"[STRIP] activate_subpage: unknown page '{name}'")
+            return
+        
+        variant_str = f"variant='{variant}'" if variant else "no-variant"
+        print(f"[STRIP→Nuendo] Note9/{note} velocity 127  "
+              f"(activate sub-page '{name}' {variant_str})")
+        self.send_note_ch9(note, 127)
+    
+    def send_slot_param_delta(self, mod_id, param_id, delta, encoder_index=None):
+        """
+        Apply a relative delta to a strip slot's bank zone parameter.
+        Used by drill-down encoders 1..8 when a slot sub-page is active.
+        
+        encoder_index : 0..7 — physical encoder index, determines which CC is
+                        sent (CC 9/(10+encoder_index)). This must match the
+                        JS knob's CC binding, which is fixed per knob position.
+                        Defaults to (param_id - 0x01) for backward compat when
+                        encoders are 1:1 mapped to paramIds, but for custom
+                        sub-page layouts (where enc N may control paramId
+                        other than N+1), the caller must pass encoder_index
+                        explicitly.
+        
+        mod_id, param_id : used for cache lookup. The sub-page binding on the
+                           JS side determines which paramVal the CC drives;
+                           we mirror that here to compute current + delta.
+        """
+        if param_id < 0x01 or param_id > 0x08:
+            print(f"[STRIP] send_slot_param_delta: param_id 0x{param_id:02X} "
+                  f"out of bank zone range (0x01..0x08)")
+            return
+        if encoder_index is None:
+            encoder_index = param_id - 0x01
+        if encoder_index < 0 or encoder_index > 7:
+            print(f"[STRIP] send_slot_param_delta: encoder_index {encoder_index} "
+                  f"out of range (0..7)")
+            return
+        cc = 10 + encoder_index
+        slot = self.state.channel_strip.slots.get(mod_id)
+        if slot is None:
+            print(f"[STRIP] send_slot_param_delta: slot mod=0x{mod_id:02X} not found")
+            return
+        cached = slot.params.get(param_id, {}).get('value')
+        current = cached if cached is not None else 64
+        new_val = max(0, min(127, current + int(delta)))
+        print(f"[STRIP→Nuendo] CC9/{cc} = {new_val}  (slot delta enc{encoder_index+1} "
+              f"from {current} {delta:+d}, mod={mod_id:02X} param={param_id:02X})")
+        self.send_cc_ch9(cc, new_val)
+    
+    def send_drilldown_toggle(self, lower_row_idx):
+        """
+        Toggle a drill-down lower-row binary param. The JS Button at note
+        9/(120 + lower_row_idx) is wired (per active sub-page) to a bank zone
+        paramVal with setTypeToggle. Bridge just sends the note — JS flips
+        the value on the active sub-page's binding.
+        
+        lower_row_idx : 0..7 — which physical lower row button was pressed.
+        Returns silently if the active sub-page doesn't have a toggle at
+        that position (the JS Button still receives the note but has no
+        binding to act on).
+        """
+        if lower_row_idx < 0 or lower_row_idx > 7:
+            return
+        note = 120 + lower_row_idx
+        print(f"[STRIP→Nuendo] Note9/{note} velocity 127 "
+              f"(drill-down toggle, lower row {lower_row_idx + 1})")
+        self.send_note_ch9(note, 127)
+        # Defer the release so the rising edge is processed in its own audio
+        # buffer by Steinberg's MIDI Remote (back-to-back messages get coalesced
+        # to the final value and setTypeToggle never sees the 0→1 transition).
+        # Use a real note-off (status 0x89) — `bindToNote` ignores 0x99 vel=0
+        # so the surface value would stay stuck at 1.0 and the next press would
+        # not be a rising edge.
+        def _release(n=note):
+            if self._midi_out and self._running:
+                self._midi_out.send_message([0x89, n & 0x7F, 0])
+        threading.Timer(0.05, _release).start()
+    
+    def _dump_strip_discovery(self):
+        """
+        Rewrite the strip discovery log file with the current state of all
+        Channel Strip modules. Easier than scrolling the Nuendo JS console
+        for capturing the bank zone param inventory of each module.
+        
+        Called on every announce/display change that actually mutates state.
+        Rewrites the file in full each time — latest state always wins.
+        """
+        cs = self.state.channel_strip
+        try:
+            with open(self._strip_discovery_log, 'w') as f:
+                f.write("# Channel Strip parameter discovery dump\n")
+                f.write("# Auto-updated by Push2Nuendo-Bridge on every strip\n")
+                f.write("# announce / display change.\n#\n")
+                
+                # PreFilter (mod_id 0x00)
+                if cs.prefilter:
+                    f.write("\n## PreFilter (mod_id=0x00)\n")
+                    for pid in sorted(cs.prefilter.keys()):
+                        p = cs.prefilter[pid]
+                        f.write(f"  pid=0x{pid:02X}  name='{p.get('name','')}'  "
+                                f"display='{p.get('display','')}'  "
+                                f"value={p.get('value','')}\n")
+                
+                # ChannelEQ + 4 bands (mod_id 0x01)
+                if cs.eq:
+                    f.write("\n## ChannelEQ (mod_id=0x01)\n")
+                    for pid in sorted(cs.eq.keys()):
+                        p = cs.eq[pid]
+                        f.write(f"  pid=0x{pid:02X}  name='{p.get('name','')}'  "
+                                f"display='{p.get('display','')}'  "
+                                f"value={p.get('value','')}\n")
+                
+                # Strip slots (mod_id 0x10..0x14)
+                for mod_id in sorted(cs.slots.keys()):
+                    slot = cs.slots[mod_id]
+                    f.write(f"\n## Slot mod_id=0x{mod_id:02X} ({slot.label})\n")
+                    f.write(f"#   plugin variant: {slot.plugin_name or '<empty>'}\n")
+                    f.write(f"#   on={slot.on}  bypassed={slot.bypassed}\n")
+                    for pid in sorted(slot.params.keys()):
+                        p = slot.params[pid]
+                        f.write(f"  pid=0x{pid:02X}  name='{p.get('name','')}'  "
+                                f"display='{p.get('display','')}'  "
+                                f"value={p.get('value','')}\n")
+        except Exception as e:
+            # Don't crash the bridge over a file-write error
+            print(f"[STRIP] discovery dump error: {e}")
+
     def send_note(self, note, velocity):
         """Send a Note On/Off message to Nuendo (Loop port)."""
         if self._midi_out and self._running:
@@ -1152,6 +1889,22 @@ class NuendoLink:
                 self._midi_out.send_message([0x90, note & 0x7F, velocity & 0x7F])
             else:
                 self._midi_out.send_message([0x80, note & 0x7F, 0])
+
+    def toggle_edit_channel_settings(self):
+        """Toggle the Edit Channel Settings window for the selected channel.
+
+        JS binds Note 0/78 to selectedCh.mValue.mEditorOpen with setTypeToggle.
+        A note-on (with deferred note-off so each press is a fresh rising edge)
+        flips the window open/closed.
+        """
+        if not (self._midi_out and self._running):
+            return
+        self._midi_out.send_message([0x90, 78, 127])
+        def _release():
+            if self._midi_out and self._running:
+                self._midi_out.send_message([0x80, 78, 0])
+        threading.Timer(0.05, _release).start()
+        print("[STRIP→Nuendo] Note0/78 (toggle Edit Channel Settings window)")
 
     def send_note_on(self, note, velocity=100):
         """Send a Note On via the Push 2 User port (channel 1)."""
@@ -1405,12 +2158,198 @@ class NuendoLink:
         print(f"  → DA: Clear slot {slot_index}")
         return True
 
+    # ── DA Strip Slot methods (v1.0.4) ────────────────────────────────────────
+
+    # Strip slot index mapping: Gate=0, Comp=1, Tools=2, Sat=3, Limiter=4
+    # In the unified DA encoder system these map to slot indices 16-20.
+    _STRIP_MOD_TO_SLOT_INDEX = {
+        0x10: 0,  # Gate
+        0x11: 1,  # Compressor
+        0x12: 2,  # Tools
+        0x13: 3,  # Saturator
+        0x14: 4,  # Limiter
+    }
+    DA_STRIP_SLOT_OFFSET = 16  # insert slots 0-15, strip slots 16-20
+
+    @staticmethod
+    def _parse_eq_freq(disp):
+        """Parse '30.0 Hz' / '1.5 kHz' → float Hz, or None."""
+        if not disp:
+            return None
+        s = disp.strip().lower().replace(' ', '')
+        try:
+            if s.endswith('khz'): return float(s[:-3]) * 1000.0
+            if s.endswith('hz'):  return float(s[:-2])
+            return float(s)
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _parse_eq_db(disp):
+        """Parse '0.0 dB' / '-3.5 dB' → float dB, or None."""
+        if not disp:
+            return None
+        s = disp.strip().lower().replace(' ', '')
+        if s.endswith('db'): s = s[:-2]
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return None
+
+    def request_da_strip_exploration(self):
+        """Ask JS to explore strip slot objects via DA (CC 70 ch8).
+
+        JS responds with SysEx 0x34 (slot entries) and 0x35 (complete).
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        self._da_strip_slot_cache = []
+        self._da_strip_explored   = False
+        self._midi_out.send_message([0xB7, 70, 127])
+        print("  → DA: Requested strip slot exploration")
+        return True
+
+    def send_da_strip_bypass(self, slot_index, want_bypass):
+        """Set bypass on a strip slot via DirectAccess (CC 71 ch8).
+
+        slot_index: 0-4 (Gate=0, Comp=1, Tools=2, Sat=3, Limiter=4)
+        want_bypass: True = bypass ON, False = bypass OFF
+
+        JS responds with SysEx 0x36.
+        Returns True if command was sent.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_strip_explored', False):
+            return False
+        value = (slot_index & 0x07) | (0x40 if want_bypass else 0x00)
+        self._midi_out.send_message([0xB7, 71, value & 0x7F])
+        return True
+
+    def send_da_strip_edit(self, slot_index):
+        """Toggle the plugin UI for a strip slot via the binding path mEdit.
+
+        slot_index: 0-4 (Gate, Comp, Tools, Sat, Limiter)
+
+        Uses the HostStripEffectSlot.mEdit binding path (CC 90..94 channel 0)
+        with setTypeToggle — same pattern as insert Edit (CC 99 ch0). The DA
+        tag-based path (tag 4101) only flips a metadata flag; tag 4127 opens
+        the Routing Patcher, not the plugin UI.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not (0 <= slot_index <= 4):
+            return False
+        cc = 90 + slot_index
+        # Reset pulse so consecutive presses re-fire the binding (Steinberg
+        # ignores identical CC values; setTypeToggle needs a fresh rising edge).
+        self._midi_out.send_message([0xB0, cc, 0])
+        self._midi_out.send_message([0xB0, cc, 127])
+        print(f"  → Strip Edit toggle slot {slot_index} (CC0/{cc})")
+        return True
+
+    def diag_probe_effect_type(self, da_slot):
+        """Probe tag 4125 across [0..1] to discover discrete variant mapping.
+
+        Captures original value, sweeps, restores. Output goes to Nuendo JS console.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        self._midi_out.send_message([0xB7, 78, da_slot & 0x7F])
+        print(f"  → DA diag: probe tag 4125 for DA slot {da_slot}")
+        return True
+
+    def diag_enum_slot_object(self, da_slot):
+        """Dump the SLOT object's own params + children to the Nuendo JS console.
+
+        Diagnostic for finding a strip-variant type selector tag.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        self._midi_out.send_message([0xB7, 77, da_slot & 0x7F])
+        print(f"  → DA diag: enum slot-object params for DA slot {da_slot}")
+        return True
+
+    def send_variant_switch(self, da_slot, variant_idx):
+        """Swap the plugin in a strip slot to a named variant via DA Plugin Manager.
+
+        da_slot: 16-20 (strip slot index)
+        variant_idx: index into the variant name list for that slot
+                     (must match Ableton_Push2.js STRIP_VARIANTS order)
+
+        JS responds with SysEx 0x3A [daSlot, success].
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_strip_explored', False):
+            return False
+        self._midi_out.send_message([0xB7, 75, variant_idx & 0x7F])
+        # Sentinel so the next slot value is always seen as a change.
+        self._midi_out.send_message([0xB7, 76, 127])
+        self._midi_out.send_message([0xB7, 76, da_slot & 0x7F])
+        print(f"  → DA: Variant switch slot {da_slot} → idx {variant_idx}")
+        return True
+
+    def send_da_param_flip(self, da_slot, param_idx):
+        """Flip a binary plugin param via DirectAccess (CC 73 + CC 74 ch8).
+
+        Bypasses the bank-zone binding/setTypeToggle path, which Cubase
+        sometimes invalidates after value changes on certain params
+        (e.g. VintageCompressor Att-Mode). JS reads current value, flips
+        0<->1, and notifies via SysEx 0x39.
+
+        da_slot: 0-15 for insert slots, 16-20 for strip slots
+        param_idx: index into the DA-enumerated param list of that plugin
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        self._midi_out.send_message([0xB7, 73, param_idx & 0x7F])
+        # Sentinel reset on CC 74 ensures the next slot value is seen as a
+        # change even when flipping the same (slot, param) twice in a row.
+        self._midi_out.send_message([0xB7, 74, 127])
+        self._midi_out.send_message([0xB7, 74, da_slot & 0x7F])
+        return True
+
+    def request_da_strip_params(self, slot_index):
+        """Enumerate all parameters of a strip slot plugin (CC 87 ch8, slot 16+).
+
+        slot_index: 0-4 (bridge adds DA_STRIP_SLOT_OFFSET internally)
+        JS responds with SysEx 0x29 (param entries) and 0x2A (complete).
+        Returns True if command was sent.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_strip_explored', False):
+            return False
+        da_idx = self.DA_STRIP_SLOT_OFFSET + slot_index
+        self._da_plugin_params    = {}
+        self._da_params_enumerated = False
+        self._midi_out.send_message([0xB7, 87, da_idx & 0x7F])
+        print(f"  → DA: Requested strip param enum for strip slot {slot_index} (DA idx {da_idx})")
+        return True
+
+    # ─────────────────────────────────────────────────────────────────────────
+
     def send_da_encoder_value(self, encoder_idx, relative_midi):
         """Send a relative encoder value to JS for DA param control (CC 20-27 ch9).
-        
+
         encoder_idx: 0-7
         relative_midi: signed bit encoding (1-63=CW, 65-127=CCW)
-        
+
         Sends CC=0 first (reset) then the actual delta, so the JS button
         binding always sees a value change and fires its callback.
         """
@@ -1570,6 +2509,35 @@ class NuendoLink:
 
 # 0 dB = CC 101 on a 7-bit MIDI fader = process value 101/127
 _ZERO_DB = 99.0 / 127.0  # 0.779528
+
+
+# ─────────────────────────────────────────────
+# Strip Exploration (v1.0.4) — module ID lookup
+# ─────────────────────────────────────────────
+
+_STRIP_MODULE_NAMES = {
+    0x00: "PreFilter",
+    0x01: "ChannelEQ",
+    0x10: "Gate",
+    0x11: "Compressor",
+    0x12: "Tools",
+    0x13: "Saturator",
+    0x14: "Limiter",
+}
+
+
+# Diagnostic flag: when True, empty announce/display strings are logged with a
+# <empty> marker. Useful when investigating why a binding's callbacks don't seem
+# to fire — an empty fire still tells us the binding is alive. Default False to
+# keep startup logs clean (28+ params from PreFilter/EQ would otherwise spam).
+_STRIP_LOG_EMPTY = False
+
+
+def _strip_module_name(mod_id):
+    """Returns the human-readable name of a strip module from its byte ID.
+    Falls back to a hex placeholder if the ID is unknown."""
+    return _STRIP_MODULE_NAMES.get(mod_id, f"Mod{mod_id:02X}")
+
 
 def _to_db(normalized_volume):
     """

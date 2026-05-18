@@ -31,6 +31,7 @@ SCALES = {
     "Minor Blues":      [0, 3, 5, 6, 7, 10],
     "Whole Tone":       [0, 2, 4, 6, 8, 10],
     "Chromatic":        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    "Piano":            [],  # Special: piano-style 4-octave layout, see _update_piano_note_map
     "Hungarian Minor":  [0, 2, 3, 6, 7, 8, 11],
     "Spanish":          [0, 1, 3, 4, 5, 6, 8, 10],
 }
@@ -47,7 +48,7 @@ PAD_BLUE       = 45   # Blue (root note)
 PAD_GREEN      = 21   # Green (pressed pad)
 PAD_CYAN       = 37   # Cyan
 PAD_BLACK      = 117  # Black/dark grey (chromatic alterations)
-PAD_PURPLE     = 116  # Purple (root in chromatic mode)
+PAD_PURPLE     = 116  # Purple (root in chromatic mode, all C's in piano mode)
 
 # Natural notes (no accidentals) = indices in the chromatic scale
 NATURAL_NOTES = {0, 2, 4, 5, 7, 9, 11}  # C, D, E, F, G, A, B
@@ -90,6 +91,9 @@ class PadGrid:
         if self.drum_mode:
             self._update_drum_note_map()
             return
+        if self.scale_name == "Piano":
+            self._update_piano_note_map()
+            return
         
         intervals = self.scale_intervals
         num_notes = len(intervals)
@@ -121,6 +125,53 @@ class PadGrid:
                     # Outside drum zone: off (note -1 = no sound)
                     self.note_map[row][col] = -1
     
+    def _update_piano_note_map(self):
+        """Piano-style layout: 4 octaves stacked vertically.
+        
+        Each octave occupies 2 rows of pads on the Push 2 hardware:
+          - Bottom of each pair (lower on the physical pad grid): white keys
+              C  D  E  F  G  A  B  C(next)
+          - Top of each pair    (higher on the physical pad grid): black keys
+              C# D# X  F# G# A# X  C#(next)
+        
+        The lowest octave is at the bottom of the pad grid, the highest at the top —
+        bottom-left pad plays the lowest C, top-right plays the highest C# of the
+        topmost pair, like looking down at a piano keyboard.
+        
+        Note: by codebase convention (see push2_controller._update_pad_colors),
+        note_map[0] is the TOP physical row of the Push 2 and note_map[7] is the
+        BOTTOM. inverted_row mirrors what the other scales do so the layout reads
+        correctly on the hardware.
+        
+        The root note is fixed at C — set_root() is a no-op while this scale is active.
+        The C# at col 7 of each black row sits above the C at col 7 of the white row
+        and shares its MIDI note with col 0 of the black row of the next pair above.
+        Each octave_up / octave_down shifts the whole 4-octave block by 12 semitones.
+        max self.octave = 6 keeps the highest note within the 0–127 MIDI range.
+        """
+        # Semitone offsets from the base C of each octave-pair
+        # White row (cols 0-7): C, D, E, F, G, A, B, C(next octave)
+        white_offsets = [0, 2, 4, 5, 7, 9, 11, 12]
+        # Black row (cols 0-7): C#, D#, off, F#, G#, A#, off, C#(next octave)
+        # Note: black_offsets[7] = 13 plays the same note as black_offsets[0] of the
+        # next pair-of-rows above, mirroring the octave-boundary overlap of the white row.
+        black_offsets = [1, 3, -1, 6, 8, 10, -1, 13]
+        
+        base_c = self.octave * 12  # MIDI value of the bottom-most C
+        
+        for row in range(8):
+            inverted_row = 7 - row              # row 7 (bottom of hardware) → 0 (lowest pair)
+            pair_index = inverted_row // 2      # 0..3 — which octave pair this row belongs to
+            is_white_row = (inverted_row % 2 == 0)  # bottom of each pair is white
+            pair_base_c = base_c + pair_index * 12
+            
+            for col in range(8):
+                offset = white_offsets[col] if is_white_row else black_offsets[col]
+                if offset < 0:
+                    self.note_map[row][col] = -1  # silent pad
+                else:
+                    self.note_map[row][col] = max(0, min(127, pair_base_c + offset))
+    
     def is_root_note(self, row, col):
         """Checks whether the pad corresponds to the root note."""
         note = self.note_map[row][col]
@@ -138,6 +189,14 @@ class PadGrid:
             # C1 (note 36) in blue as a reference marker
             if self.note_map[row][col] == 36:
                 return PAD_BLUE
+            return PAD_WHITE
+        # Piano mode: every C in purple, other notes in white, X pads off
+        if self.scale_name == "Piano":
+            note = self.note_map[row][col]
+            if note < 0:
+                return PAD_OFF
+            if (note % 12) == 0:  # any C across all octaves
+                return PAD_PURPLE
             return PAD_WHITE
         # Chromatic mode: white=natural, black=accidental, purple=root
         if self.scale_name == "Chromatic":
@@ -169,24 +228,33 @@ class PadGrid:
         return self.note_map[row][col]
     
     def midi_note_to_pad(self, midi_note):
-        """Converts a Push MIDI note number (36-99) to (row, col)."""
+        """Converts a Push 2 pad MIDI note (36-99) to (row, col) in note_map convention.
+        
+        By codebase convention (see push2_controller._update_pad_colors and the
+        inverted_row pattern used throughout this module), note_map row 0 is the
+        TOP physical row of the Push 2 and row 7 is the BOTTOM.
+        Push 2 hardware sends:
+          - notes 36-43 from the BOTTOM physical row → (row=7, col=0..7)
+          - notes 92-99 from the TOP physical row    → (row=0, col=0..7)
+        """
         if midi_note < 36 or midi_note > 99:
             return None, None
-        # Push 2 notes:
-        # Row 0 (bottom) = notes 36-43
-        # Row 7 (top)    = notes 92-99
-        row = (midi_note - 36) // 8
+        row = 7 - ((midi_note - 36) // 8)
         col = (midi_note - 36) % 8
         return row, col
     
     def set_root(self, root):
-        """Changes the root note (0-11)."""
+        """Changes the root note (0-11). Locked in Piano mode."""
+        if self.scale_name == "Piano":
+            return  # Piano layout is rooted at C — root is not user-selectable
         self.root_note = root % 12
         self._update_note_map()
     
     def set_scale(self, index):
         """Changes the scale by index."""
         self.scale_index = index % len(SCALE_NAMES)
+        if self.scale_name == "Piano":
+            self.root_note = 0  # Force C when entering Piano mode
         self._update_note_map()
     
     def next_scale(self):
@@ -207,7 +275,9 @@ class PadGrid:
                 self.drum_base_note += 16
                 self._update_note_map()
         else:
-            if self.octave < 8:
+            # Piano spans 4 octaves, so cap at 6 to keep the top note within MIDI range
+            max_oct = 6 if self.scale_name == "Piano" else 8
+            if self.octave < max_oct:
                 self.octave += 1
                 self._update_note_map()
     

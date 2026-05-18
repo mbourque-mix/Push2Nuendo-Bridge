@@ -1,0 +1,153 @@
+name: Build Windows .exe
+
+# Builds the standalone onefile console .exe on Windows.
+# - Runs on every push/PR touching the app (CI sanity check)
+# - Attaches the .exe + zip to a GitHub Release when a v* tag is pushed
+#
+# PyInstaller cannot cross-compile, so this MUST run on a Windows runner.
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+    paths:
+      - 'src/**'
+      - 'Ableton_Push2.js'
+      - 'requirements.txt'
+      - 'scripts/build_windows.bat'
+      - '.github/workflows/build-windows.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'requirements.txt'
+      - 'scripts/build_windows.bat'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Read bridge version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = python -c "import sys; sys.path.insert(0, 'src'); from state import BRIDGE_VERSION; print(BRIDGE_VERSION)"
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "Bridge version: $v"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller libusb-package
+          python -m pip install fastapi uvicorn pedalboard
+          python -m pip install -r requirements.txt
+
+      - name: Locate libusb-1.0.dll
+        id: libusb
+        shell: pwsh
+        run: |
+          $dll = python -c "import glob,os,libusb_package; m=glob.glob(os.path.join(os.path.dirname(libusb_package.__file__),'**','libusb-1.0.dll'),recursive=True); print(m[0] if m else '')"
+          if ($dll) { echo "Found: $dll" } else { echo "::warning::libusb-1.0.dll not found" }
+          echo "dll=$dll" >> $env:GITHUB_OUTPUT
+
+      - name: Build onefile console .exe
+        shell: pwsh
+        working-directory: src
+        run: |
+          $name = "Push2 Nuendo Bridge_v${{ steps.ver.outputs.version }}"
+          $libusbArg = @()
+          if ("${{ steps.libusb.outputs.dll }}") {
+            $libusbArg = @("--add-binary", "${{ steps.libusb.outputs.dll }};.")
+          }
+          pyinstaller `
+            --name "$name" `
+            --onefile `
+            --console `
+            --noconfirm `
+            --clean `
+            --paths . `
+            --add-data "assets;assets" `
+            --add-data "mapper;mapper" `
+            --add-data "state.py;." `
+            --add-data "nuendo_link.py;." `
+            --add-data "push2_controller.py;." `
+            --add-data "renderer.py;." `
+            --add-data "pad_grid.py;." `
+            --add-data "control_room.py;." `
+            --add-data "repeat.py;." `
+            --add-data "overview.py;." `
+            --hidden-import state `
+            --hidden-import nuendo_link `
+            --hidden-import push2_controller `
+            --hidden-import renderer `
+            --hidden-import pad_grid `
+            --hidden-import control_room `
+            --hidden-import repeat `
+            --hidden-import overview `
+            @libusbArg `
+            --hidden-import push2_python `
+            --hidden-import push2_python.constants `
+            --hidden-import push2_python.simulator `
+            --hidden-import push2_python.simulator.simulator `
+            --hidden-import rtmidi `
+            --hidden-import mido `
+            --hidden-import mido.backends `
+            --hidden-import mido.backends.rtmidi `
+            --hidden-import numpy `
+            --hidden-import usb `
+            --hidden-import usb.core `
+            --hidden-import usb.backend `
+            --hidden-import usb.backend.libusb1 `
+            --hidden-import engineio `
+            --hidden-import engineio.async_drivers `
+            --hidden-import engineio.async_drivers.threading `
+            --hidden-import socketio `
+            --hidden-import flask `
+            --hidden-import flask_socketio `
+            --collect-submodules PIL `
+            --collect-submodules push2_python `
+            --collect-submodules engineio `
+            --collect-submodules socketio `
+            --collect-all uvicorn `
+            --collect-all fastapi `
+            --collect-all starlette `
+            --collect-all pydantic `
+            --collect-all pydantic_core `
+            --collect-all anyio `
+            --collect-all pedalboard `
+            --hidden-import mapper `
+            --hidden-import mapper.server `
+            --hidden-import mapper.scanner `
+            main.py
+
+      - name: Assemble release folder
+        shell: pwsh
+        run: |
+          $name = "Push2 Nuendo Bridge_v${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item "src/dist/$name.exe" release/
+          Copy-Item "Ableton_Push2.js" release/
+          if (Test-Path docs) { Get-ChildItem docs/*.pdf | Copy-Item -Destination release/ -ErrorAction SilentlyContinue }
+          Compress-Archive -Force -Path release/* -DestinationPath "Push2NuendoBridge-v${{ steps.ver.outputs.version }}-Windows.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Push2NuendoBridge-Windows-v${{ steps.ver.outputs.version }}
+          path: Push2NuendoBridge-v${{ steps.ver.outputs.version }}-Windows.zip
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Push2NuendoBridge-v${{ steps.ver.outputs.version }}-Windows.zip

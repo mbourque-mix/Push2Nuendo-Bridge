@@ -12,15 +12,18 @@ We use Pillow (PIL) for drawing, then convert
 to BGR565 format to send to the Push 2.
 """
 
+import math
 import numpy as np
 import time
 from PIL import Image, ImageDraw, ImageFont
 from state import (
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, AT_POLY, AT_CHANNEL, AT_OFF,
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
     CC_ABSOLUTE, CC_PICKUP,
-    BRIDGE_VERSION, BANK_SIZE, AppState
+    BRIDGE_VERSION, BANK_SIZE, AppState,
+    STRIP_MOD_GATE, STRIP_MOD_COMPRESSOR, STRIP_MOD_TOOLS,
+    STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER,
 )
 from control_room import (
     CR_PAGES, CR_PAGE_NAMES, CR_PAGE_MAIN, ControlRoomState
@@ -32,6 +35,16 @@ from control_room import (
 
 SCREEN_WIDTH  = 960
 SCREEN_HEIGHT = 160
+
+# Channel Strip section colors (match the Nuendo GUI).
+CS_SECTION_COLORS = {
+    'gate':    (210, 165, 70),    # yellow-ochre
+    'comp':    (110, 140, 215),   # blue
+    'eq':      (95, 180, 220),    # light blue
+    'tools':   (120, 185, 100),   # green
+    'sat':     (220, 140, 80),    # orange
+    'limiter': (210, 90, 75),     # red
+}
 CELL_WIDTH    = SCREEN_WIDTH // BANK_SIZE   # 120 pixels per cell
 
 # ─────────────────────────────────────────────
@@ -57,32 +70,78 @@ COLOR_SELECTED_HDR = (0, 140, 180)    # Selected track header
 # Character fonts
 # ─────────────────────────────────────────────
 
+def _resource_path(*parts):
+    """
+    Resolve a path to a bundled resource.
+
+    Works both when running from source and when frozen by PyInstaller
+    (which extracts data files to ``sys._MEIPASS``). Returns ``None`` if the
+    resource cannot be located.
+    """
+    import os
+    import sys
+
+    candidates = []
+    # 1. PyInstaller one-file/one-dir extraction dir
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, *parts))
+    # 2. Alongside this source file (dev mode: src/assets/fonts/...)
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(here, *parts))
+    # 3. Project-root relative fallback
+    candidates.append(os.path.join(here, "..", *parts))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _bundled_font(filename, size):
+    """
+    Load a font that ships with the app first (so the Push display looks
+    identical on every OS, including a frozen .exe where no system fonts
+    are guaranteed). Falls back to the system-installed font of the same
+    name, then to PIL's built-in bitmap font.
+    """
+    path = _resource_path("assets", "fonts", filename)
+    if path:
+        try:
+            return ImageFont.truetype(path, size)
+        except (IOError, OSError):
+            pass
+    try:
+        return ImageFont.truetype(filename, size)  # system-installed
+    except (IOError, OSError):
+        return None
+
+
 def _load_fonts():
     """
-    Load fonts. Uses system fonts if available,
+    Load fonts. Prefers the fonts bundled with the app, then system fonts,
     otherwise falls back to PIL default font.
     """
-    try:
-        # Try to load a clean monospace font
-        font_large  = ImageFont.truetype("DejaVuSansMono.ttf", 14)
-        font_medium = ImageFont.truetype("DejaVuSansMono.ttf", 11)
-        font_small  = ImageFont.truetype("DejaVuSansMono.ttf", 9)
-    except (IOError, OSError):
+    font_large  = _bundled_font("DejaVuSansMono.ttf", 14)
+    font_medium = _bundled_font("DejaVuSansMono.ttf", 11)
+    font_small  = _bundled_font("DejaVuSansMono.ttf", 9)
+    if font_large is None or font_medium is None or font_small is None:
         # Fall back to PIL built-in font (always available)
-        font_large  = ImageFont.load_default()
-        font_medium = ImageFont.load_default()
-        font_small  = ImageFont.load_default()
-    
-    # Try bold variant for headers
-    try:
-        font_medium_bold = ImageFont.truetype("DejaVuSansMono-Bold.ttf", 11)
-    except (IOError, OSError):
-        font_medium_bold = font_medium
-    
-    return font_large, font_medium, font_small, font_medium_bold
+        _def = ImageFont.load_default()
+        font_large  = font_large  or _def
+        font_medium = font_medium or _def
+        font_small  = font_small  or _def
+
+    # Try bold variants for headers / section names
+    font_medium_bold = _bundled_font("DejaVuSansMono-Bold.ttf", 11) or font_medium
+    font_small_bold  = _bundled_font("DejaVuSansMono-Bold.ttf", 9)  or font_small
+    font_large_bold  = _bundled_font("DejaVuSansMono-Bold.ttf", 14) or font_large
+
+    return (font_large, font_medium, font_small,
+            font_medium_bold, font_small_bold, font_large_bold)
 
 
-FONT_LG, FONT_MD, FONT_SM, FONT_MD_BOLD = _load_fonts()
+FONT_LG, FONT_MD, FONT_SM, FONT_MD_BOLD, FONT_SM_BOLD, FONT_LG_BOLD = _load_fonts()
 
 
 def _text_color_for_bg(bg_color):
@@ -298,100 +357,217 @@ def _draw_header(draw, cell_x, track, is_selected):
             ix += 6
 
 
-def _draw_volume_cell(draw, cell_x, track):
-    """Draw a cell in Volume mode with compact bar + VU meter."""
-    bar_y      = 30
-    bar_height = 95
+def _draw_status_icon(draw, x, y, w, h, symbol, active_color, is_active):
+    """Pro Tools-style status icon: rounded rect with a symbol inside.
     
-    # ── Volume bar (left side, narrow) ──
-    vol_x = cell_x + 8
-    vol_w = 25
+    `symbol` can be:
+      - a single character (e.g. "S", "M") — drawn as bold text
+      - "rec_circle" — drawn as a filled circle (classic REC look)
+      - "speaker"    — drawn as a small speaker shape
     
-    draw.rectangle([vol_x, bar_y, vol_x + vol_w, bar_y + bar_height],
-                   fill=(35, 35, 35))
-    
-    fill_h = int(bar_height * track.volume)
-    if fill_h > 0:
-        color = COLOR_VOLUME_BAR
-        if track.volume_db > 0.1:
-            color = COLOR_WARNING
-        draw.rectangle([
-            vol_x,
-            bar_y + bar_height - fill_h,
-            vol_x + vol_w,
-            bar_y + bar_height
-        ], fill=color)
-    
-    # ── VU Meter (right side of the volume bar) ──
-    vu_x = cell_x + 40
-    vu_w = 18
-    
-    # Peak clipped outline (red flash)
-    if track.peak_clipped:
-        import time
-        blink = int(time.time() * 4) % 2 == 0  # ~4Hz
-        border_color = (255, 0, 0) if blink else (100, 0, 0)
-        draw.rectangle([vu_x - 1, bar_y - 1, vu_x + vu_w + 1, bar_y + bar_height + 1],
-                       outline=border_color, width=1)
-    
-    draw.rectangle([vu_x, bar_y, vu_x + vu_w, bar_y + bar_height],
-                   fill=(20, 20, 20))
-    
-    # Logarithmic curve : the linear 0-1 value from Nuendo is already
-    # approximately linear in dB. We amplify small values.
-    import math
-    vu_lin = track.vu_meter
-    if vu_lin > 0:
-        # Log conversion: amplify small values
-        vu_db = 20 * math.log10(max(vu_lin, 0.0001))  # -8to 0 dB
-        # Map -60 dB..0 dB → 0..1
-        vu_display = max(0.0, min(1.0, (vu_db + 60) / 60))
+    Active: filled with `active_color`; symbol in black (for shapes) / white (for letters).
+    Inactive: dim grey background, symbol in dim grey.
+    """
+    if is_active:
+        bg_color = active_color
+        shape_fg = (10, 10, 10)         # Black for shapes (REC circle, speaker)
+        text_fg  = (255, 255, 255)      # White for letters
     else:
-        vu_display = 0.0
+        bg_color = (38, 38, 38)
+        shape_fg = (95, 95, 95)
+        text_fg  = (95, 95, 95)
     
-    vu_h = int(bar_height * vu_display)
+    draw.rounded_rectangle([x, y, x + w - 1, y + h - 1], radius=3, fill=bg_color)
+    
+    if symbol == "rec_circle":
+        # Filled circle in the center (~6px radius for 21px-tall icons)
+        cx = x + w // 2
+        cy = y + h // 2
+        r = max(3, min(w, h) // 4)
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=shape_fg)
+    
+    elif symbol == "speaker":
+        # Simple speaker icon: a square 'box' on the left, triangular 'cone' on the right
+        cx = x + w // 2
+        cy = y + h // 2
+        bx = cx - 6
+        by = cy - 3
+        bw = 4
+        bh = 6
+        draw.rectangle([bx, by, bx + bw, by + bh], fill=shape_fg)
+        draw.polygon([
+            (bx + bw, by),
+            (bx + bw, by + bh),
+            (bx + bw + 5, cy + 5),
+            (bx + bw + 5, cy - 5),
+        ], fill=shape_fg)
+    
+    else:
+        # Single character (letter)
+        bbox = draw.textbbox((0, 0), symbol, font=FONT_MD_BOLD)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = x + (w - tw) // 2
+        ty = y + (h - th) // 2 - 2  # Slight upward visual adjust
+        draw.text((tx, ty), symbol, font=FONT_MD_BOLD, fill=text_fg)
+
+
+def _draw_automation_chip(draw, x, y, w, h, letter, color, is_active):
+    """Small badge to the right of S/M icons indicating automation Read/Write state.
+    
+    Hidden when inactive. When active: small rounded rect with letter inside.
+    """
+    if not is_active:
+        return
+    draw.rounded_rectangle([x, y, x + w - 1, y + h - 1], radius=2, fill=color)
+    bbox = draw.textbbox((0, 0), letter, font=FONT_SM)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    tx = x + (w - tw) // 2
+    ty = y + (h - th) // 2 - 2
+    draw.text((tx, ty), letter, font=FONT_SM, fill=(255, 255, 255))
+
+
+def _draw_fader_with_vu(draw, x, y, w, h, volume_value, vu_value, peak_clipped, volume_db):
+    """Vertical fader with VU meter integrated inside the rail.
+    
+    The rail is wide enough (14px) for the VU to fill from bottom to vu_value level.
+    The fader cap (volume position) sits centered on the rail, slightly wider than it
+    for the 'handle' look (24px), and turns red (COLOR_WARNING) above 0 dB.
+    
+    Reference ticks at -6, -12, -18, -24 dB are drawn on the sides of the rail.
+    Unity (0 dB) gets a brighter line across the full fader width.
+    Peak clipping shows as a red blink frame around the rail.
+    """
+    rail_w = 14
+    rail_x = x + (w - rail_w) // 2
+    rail_x_end = rail_x + rail_w
+    rail_center = rail_x + rail_w // 2
+    
+    # ── Rail background ──
+    draw.rectangle([rail_x, y, rail_x_end, y + h], fill=(22, 22, 22))
+    
+    # ── VU meter inside the rail (logarithmic scale) ──
+    import math
+    if vu_value > 0:
+        vu_db = 20 * math.log10(max(vu_value, 0.0001))
+        vu_disp = max(0.0, min(1.0, (vu_db + 60) / 60))  # -60 dB → 0 dB
+    else:
+        vu_disp = 0.0
+    
+    vu_h = int(h * vu_disp)
     if vu_h > 0:
-        # Draw by blocks for performance
         for y_px in range(vu_h):
-            y_pos = bar_y + bar_height - y_px
-            pct = y_px / bar_height
+            y_pos = y + h - y_px - 1
+            pct = y_px / h
             if pct < 0.65:
                 c = (30, 180, 30)    # Green
             elif pct < 0.85:
                 c = (200, 200, 30)   # Yellow
             else:
                 c = (220, 40, 40)    # Red
-            draw.line([(vu_x + 1, y_pos), (vu_x + vu_w - 1, y_pos)], fill=c)
+            draw.line([(rail_x + 1, y_pos), (rail_x_end - 2, y_pos)], fill=c)
     
-    # ── Value in dB ──
+    # ── Peak clipped: red blink frame ──
+    if peak_clipped:
+        import time
+        blink = int(time.time() * 4) % 2 == 0  # ~4Hz
+        border = (255, 0, 0) if blink else (100, 0, 0)
+        draw.rectangle([rail_x - 1, y - 1, rail_x_end + 1, y + h + 1],
+                       outline=border, width=1)
+    
+    # ── Reference ticks on either side of the rail ──
+    # Positions roughly correspond to -6, -12, -18, -24 dB on Nuendo's CC fader taper
+    for ref_pos in [0.559, 0.369, 0.250, 0.129]:
+        ty = y + h - int(ref_pos * h)
+        draw.line([(rail_x - 4, ty), (rail_x - 1, ty)], fill=(70, 70, 70))
+        draw.line([(rail_x_end + 1, ty), (rail_x_end + 4, ty)], fill=(70, 70, 70))
+    
+    # ── Unity line at 0 dB (75.1% from bottom on Nuendo's taper) ──
+    unity_y = y + h - int(0.751 * h)
+    draw.line([(x + 2, unity_y), (x + w - 3, unity_y)], fill=(140, 140, 140))
+    
+    # ── Fader cap (centered on rail, slightly wider than it for the 'handle' look) ──
+    cap_y = y + h - int(volume_value * h)
+    cap_h = 6
+    cap_w = 24
+    cap_x = rail_center - cap_w // 2
+    cap_x_end = rail_center + cap_w // 2
+    cap_color = COLOR_WARNING if volume_db > 0.1 else (210, 210, 210)
+    draw.rectangle([cap_x, cap_y - cap_h // 2,
+                    cap_x_end, cap_y + cap_h // 2],
+                   fill=cap_color)
+    # Center groove on the cap (gives it the "physical fader handle" look)
+    draw.line([(cap_x + 2, cap_y), (cap_x_end - 2, cap_y)],
+              fill=(40, 40, 40))
+
+
+def _draw_volume_cell(draw, cell_x, track):
+    """Draw a cell in Volume mode.
+    
+    Layout:
+      Header (y=0..21)            track color + name + M/S/●
+      Body (y=26..124)
+        Status icons   (x+4..x+32)  4 stacked: REC circle, Speaker, S, M
+        R/W chips      (x+34..x+45) 'r' beside S (auto-read); 'W' beside M (auto-write)
+        Fader+VU       (x+48..x+116)  shifted right; rail with VU; narrow centered cap
+      dB readout (y=128..142)
+    """
+    body_y_start = 26
+    body_y_end = 124
+    
+    # ── Status icons column (left): REC circle, Speaker, S, M ──
+    icon_x = cell_x + 4
+    icon_w = 28
+    icon_h = 21
+    icon_gap = 3
+    
+    icons = [
+        ("rec_circle", (220, 40, 40),  track.is_armed),       # Red — Rec armed
+        ("speaker",    (220, 140, 0),  track.is_monitored),   # Orange — Input monitor
+        ("S",          (0, 100, 220),  track.is_solo),        # Blue — Solo
+        ("M",          (220, 200, 0),  track.is_muted),       # Yellow — Mute
+    ]
+    
+    for j, (sym, color, active) in enumerate(icons):
+        iy = body_y_start + j * (icon_h + icon_gap)
+        _draw_status_icon(draw, icon_x, iy, icon_w, icon_h, sym, color, active)
+    
+    # ── Read/Write automation chips (right of S and M icons) ──
+    chip_x = cell_x + 34
+    chip_w = 12
+    chip_h = 14
+    s_y = body_y_start + 2 * (icon_h + icon_gap)  # Solo icon top
+    m_y = body_y_start + 3 * (icon_h + icon_gap)  # Mute icon top
+    chip_y_offset = (icon_h - chip_h) // 2        # Center chip vertically with icon
+    
+    _draw_automation_chip(draw, chip_x, s_y + chip_y_offset, chip_w, chip_h,
+                          "r", (40, 170, 90),  track.automation_read)   # Green
+    _draw_automation_chip(draw, chip_x, m_y + chip_y_offset, chip_w, chip_h,
+                          "W", (200, 60, 60),  track.automation_write)  # Red
+    
+    # ── Fader with embedded VU (right column, shifted to make room for chips) ──
+    fader_x = cell_x + 48
+    fader_w = CELL_WIDTH - 48 - 4  # leave 4px right padding
+    fader_y = body_y_start
+    fader_h = body_y_end - body_y_start
+    
+    _draw_fader_with_vu(
+        draw, fader_x, fader_y, fader_w, fader_h,
+        volume_value=track.volume,
+        vu_value=track.vu_meter,
+        peak_clipped=track.peak_clipped,
+        volume_db=track.volume_db,
+    )
+    
+    # ── dB readout (below body) ──
     if hasattr(track, 'volume_display') and track.volume_display:
         db_text = track.volume_display
     elif track.volume > 0:
         db_text = f"{track.volume_db:+.1f}"
     else:
         db_text = "-∞"
-    draw.text((cell_x + 4, 132), db_text, font=FONT_MD, fill=COLOR_TEXT_MAIN)
-    
-    # ── Monitor and Rec icons (to the right of VU meter) ──
-    icon_x = cell_x + 68
-    
-    # Monitor: speaker icon (upper part)
-    if track.is_monitored:
-        _draw_speaker_icon(draw, icon_x, 40, (220, 140, 0))  # Orange
-    
-    # Rec: red circle (lower part)
-    if track.is_armed:
-        cx_rec = icon_x + 10
-        cy_rec = 95
-        r_rec = 8
-        draw.ellipse([cx_rec - r_rec, cy_rec - r_rec, cx_rec + r_rec, cy_rec + r_rec],
-                     fill=(220, 40, 40))
-    
-    # Automation: R/W indicator below REC
-    if track.automation_write:
-        draw.text((icon_x + 2, 110), "W", font=FONT_SM, fill=(220, 40, 40))
-    elif track.automation_read:
-        draw.text((icon_x + 2, 110), "R", font=FONT_SM, fill=(0, 180, 80))
+    draw.text((cell_x + 4, 128), db_text, font=FONT_MD, fill=COLOR_TEXT_MAIN)
 
 
 def _draw_pan_cell(draw, cell_x, track):
@@ -1513,8 +1689,1136 @@ def _draw_velocity_preview(draw, x, y, w, h, vc_mode, color=None, fixed_vel=100)
         prev_px, prev_py = px, py
 
 # ─────────────────────────────────────────────
-# Splash screen
+# Channel Strip overview screen (v1.0.4)
 # ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Footer pill helper — single-line label centered in a slim pill.
+# Pill colour conveys state (green = on, gray = off); no ON/OFF text needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _draw_footer_pill(draw, fx, footer_top, cell_w, footer_h, label, is_on,
+                      on_color=(0, 180, 0)):
+    # on_color lets callers pick the lit colour (default green; the Edit
+    # button uses white to match Nuendo's window-open indication).
+    pill_color = on_color if is_on else (60, 60, 60)
+    draw.rectangle([fx + 4, footer_top + 2,
+                    fx + cell_w - 4, footer_top + footer_h - 4],
+                   fill=pill_color, outline=(30, 30, 30), width=1)
+    if not label:
+        return
+    label_short = label if len(label) <= 12 else label[:11] + '…'
+    bbox = draw.textbbox((0, 0), label_short, font=FONT_SM)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    # Center label vertically inside the pill
+    pill_h_avail = footer_h - 6
+    y_text = footer_top + 2 + (pill_h_avail - th) // 2 - 1
+    text_fill = _text_color_for_bg(pill_color)
+    draw.text((fx + (cell_w - tw) // 2, y_text),
+              label_short, font=FONT_SM, fill=text_fill)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EQ page helpers — parse display strings, compute filter magnitudes, render curve
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_freq_hz(display):
+    """Parse '30.0 Hz', '1.5 kHz', '12.0 kHz' → float Hz, or None."""
+    if not display:
+        return None
+    s = display.strip().lower().replace(' ', '')
+    try:
+        if s.endswith('khz'):
+            return float(s[:-3]) * 1000.0
+        if s.endswith('hz'):
+            return float(s[:-2])
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_db(display):
+    """Parse '0.0 dB', '-3.5 dB' → float dB, or None."""
+    if not display:
+        return None
+    s = display.strip().lower().replace(' ', '')
+    try:
+        if s.endswith('db'):
+            s = s[:-2]
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_q(display):
+    """Parse '0.71' → float, or None."""
+    if not display:
+        return None
+    try:
+        return float(display.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _peak_db(f, f0, gain_db, q):
+    """Bell/peak filter magnitude approximation."""
+    if f0 <= 0 or f <= 0 or q <= 0:
+        return 0.0
+    ratio = f / f0
+    dev = q * (ratio - 1.0 / ratio)
+    return gain_db / (1.0 + dev * dev)
+
+
+def _low_shelf_db(f, f0, gain_db):
+    """Low shelf magnitude — full gain below f0/2, zero above 2*f0."""
+    if f0 <= 0 or f <= 0:
+        return 0.0
+    x = math.log2(f / f0)
+    return gain_db / (1.0 + math.exp(x * 2.0))
+
+
+def _high_shelf_db(f, f0, gain_db):
+    """High shelf magnitude — zero below f0/2, full gain above 2*f0."""
+    if f0 <= 0 or f <= 0:
+        return 0.0
+    x = math.log2(f / f0)
+    return gain_db / (1.0 + math.exp(-x * 2.0))
+
+
+def _low_cut_db(f, f0, slope_db_oct=24):
+    """Low-cut (high-pass) filter: 0 dB above f0, slope rolloff below."""
+    if f0 <= 0 or f <= 0:
+        return -60.0
+    if f >= f0:
+        return 0.0
+    return max(-60.0, -slope_db_oct * math.log2(f0 / f))
+
+
+def _high_cut_db(f, f0, slope_db_oct=24):
+    """High-cut (low-pass) filter: 0 dB below f0, slope rolloff above."""
+    if f0 <= 0 or f <= 0:
+        return -60.0
+    if f <= f0:
+        return 0.0
+    return max(-60.0, -slope_db_oct * math.log2(f / f0))
+
+
+def _norm_to_freq_hz(norm):
+    """Cubase EQ freq mapping (20 Hz → 20 kHz log scale)."""
+    n = max(0.0, min(1.0, norm))
+    return 20.0 * (1000.0 ** n)
+
+
+def _norm_to_db(norm):
+    """Cubase EQ gain mapping (−24 dB → +24 dB linear, centered at 0.5)."""
+    n = max(0.0, min(1.0, norm))
+    return (n - 0.5) * 48.0
+
+
+def _norm_to_q(norm):
+    """Cubase EQ Q mapping (~0.5 → ~12, log-like)."""
+    n = max(0.0, min(1.0, norm))
+    return 0.5 * (24.0 ** n)
+
+
+def _norm_to_eq_type(norm, band_idx):
+    """Map normalized Type value to a name. Band 0/3 have Cut/Shelf/Peak,
+    Band 1/2 are always Peak."""
+    if band_idx in (1, 2):
+        return 'peak'
+    n = max(0.0, min(1.0, norm))
+    # Approximation — Cubase actual mapping may have more discrete steps
+    if n < 0.33:
+        return 'cut'
+    if n < 0.67:
+        return 'shelf'
+    return 'peak'
+
+
+def _collect_eq_data(state):
+    """Gather all 4 EQ bands + PreFilter HC/LC params for the curve renderer.
+
+    Pulls fresh display strings for the SELECTED band from
+    state.insert_param_values[1..4]; estimates other bands' values from the
+    normalized cache in state.da_strip_toggle_values[('EQ', param_idx)].
+
+    Returns a dict, or None if no EQ data is available.
+    """
+    selected = getattr(state, 'eq_selected_band', 0)
+    toggle_mirror = getattr(state, 'da_strip_toggle_values', {}) or {}
+
+    # Sanity: do we have any EQ data at all?
+    if not any(k[0] == 'EQ' for k in toggle_mirror.keys()):
+        return None
+
+    ipv = getattr(state, 'insert_param_values', []) or []
+
+    band_cache = getattr(state, 'eq_band_cache', None)
+    if band_cache is None or len(band_cache) < 4:
+        state.eq_band_cache = [{}, {}, {}, {}]
+        band_cache = state.eq_band_cache
+
+    bands = []
+    for band_idx in range(4):
+        base = band_idx * 6
+        on_idx   = 5 + base
+        type_idx = 6 + base
+        gain_idx = 7 + base
+        freq_idx = 8 + base
+        q_idx    = 9 + base
+        cache_entry = band_cache[band_idx]
+
+        # Fresh display for selected band only.
+        if band_idx == selected and len(ipv) >= 5:
+            type_disp = ipv[1] or ''
+            freq_disp = ipv[2] or ''
+            q_disp    = ipv[3] or ''
+            gain_disp = ipv[4] or ''
+            freq = _parse_freq_hz(freq_disp)
+            gain = _parse_db(gain_disp)
+            q    = _parse_q(q_disp)
+            type_str = type_disp.lower() if type_disp else None
+            # Stash freshly parsed values into the per-band cache so the
+            # curve stays stable when the user later switches selection.
+            if freq is not None: cache_entry['freq'] = freq
+            if gain is not None: cache_entry['gain'] = gain
+            if q is not None:    cache_entry['q'] = q
+            if type_str:         cache_entry['type'] = type_str
+        else:
+            freq = cache_entry.get('freq')
+            gain = cache_entry.get('gain')
+            q    = cache_entry.get('q')
+            type_str = cache_entry.get('type')
+
+        # Final fallback: estimate from normalized cache when nothing is known.
+        if freq is None:
+            freq = _norm_to_freq_hz(toggle_mirror.get(('EQ', freq_idx), 0.5))
+        if gain is None:
+            gain = _norm_to_db(toggle_mirror.get(('EQ', gain_idx), 0.5))
+        if q is None:
+            q = _norm_to_q(toggle_mirror.get(('EQ', q_idx), 0.5))
+        if not type_str:
+            type_str = _norm_to_eq_type(
+                toggle_mirror.get(('EQ', type_idx), 0.5), band_idx)
+
+        on_val = toggle_mirror.get(('EQ', on_idx), 0.0)
+
+        bands.append({
+            'on':   on_val >= 0.5,
+            'type': type_str,
+            'freq': freq,
+            'gain': gain,
+            'q':    q,
+        })
+
+    # PreFilter — read directly from state.channel_strip.prefilter
+    pf = state.channel_strip.prefilter
+    lc_disp = pf.get(0x05, {}).get('display', '')
+    hc_disp = pf.get(0x02, {}).get('display', '')
+    lc_val  = pf.get(0x06, {}).get('value', 0)
+    hc_val  = pf.get(0x03, {}).get('value', 0)
+    pregain_disp = pf.get(0x00, {}).get('display', '')
+
+    return {
+        'bands':     bands,
+        'selected':  selected,
+        'lc_on':     lc_val >= 64,
+        'lc_freq':   _parse_freq_hz(lc_disp),
+        'hc_on':     hc_val >= 64,
+        'hc_freq':   _parse_freq_hz(hc_disp),
+        'pregain':   _parse_db(pregain_disp) or 0.0,
+    }
+
+
+def _render_eq_curve(draw, x_left, y_top, width, height, eq):
+    """Draw the EQ magnitude curve into the given rect.
+
+    Combines PreGain + PreFilter HC/LC + 4 EQ bands. Each band's filter type
+    is determined from the display string ('peak', 'shelf', 'cut') + band
+    index (band 0-1 → low side, band 2-3 → high side for shelf/cut).
+    """
+    if eq is None:
+        return
+
+    N = max(width // 3, 80)  # number of curve sample points
+    log_min = math.log10(20.0)
+    log_max = math.log10(20000.0)
+    db_range = 24.0  # ±24 dB → top to bottom (matches Cubase EQ gain range)
+
+    points = []
+    for i in range(N):
+        x_frac = i / (N - 1)
+        freq = 10 ** (log_min + (log_max - log_min) * x_frac)
+
+        # PreGain is upstream gain staging — it shifts the whole signal but
+        # doesn't reshape the spectrum, so we exclude it from the curve.
+        mag = 0.0
+
+        # PreFilter cuts
+        if eq.get('lc_on') and eq.get('lc_freq'):
+            mag += _low_cut_db(freq, eq['lc_freq'])
+        if eq.get('hc_on') and eq.get('hc_freq'):
+            mag += _high_cut_db(freq, eq['hc_freq'])
+
+        # EQ bands
+        for band_idx, band in enumerate(eq['bands']):
+            if not band['on'] or band['freq'] is None:
+                continue
+            t = band['type']
+            if 'peak' in t:
+                mag += _peak_db(freq, band['freq'], band['gain'], band['q'])
+            elif 'shelf' in t:
+                if band_idx <= 1:
+                    mag += _low_shelf_db(freq, band['freq'], band['gain'])
+                else:
+                    mag += _high_shelf_db(freq, band['freq'], band['gain'])
+            elif 'cut' in t:
+                if band_idx <= 1:
+                    mag += _low_cut_db(freq, band['freq'])
+                else:
+                    mag += _high_cut_db(freq, band['freq'])
+            else:
+                # Default to peak
+                mag += _peak_db(freq, band['freq'], band['gain'], band['q'])
+
+        x_px = x_left + int(round(x_frac * (width - 1)))
+        y_frac = (db_range - mag) / (2 * db_range)
+        y_frac = max(0.0, min(1.0, y_frac))
+        y_px = y_top + int(round(y_frac * (height - 1)))
+        points.append((x_px, y_px))
+
+    # 0 dB reference line
+    y_mid = y_top + height // 2
+    draw.line([(x_left, y_mid), (x_left + width - 1, y_mid)],
+              fill=(50, 50, 50), width=1)
+
+    # Curve polyline (cyan/teal like Ableton)
+    if len(points) > 1:
+        draw.line(points, fill=(0, 200, 220), width=2)
+
+    # Vertical tick for the selected band
+    sel = eq['selected']
+    if 0 <= sel < len(eq['bands']) and eq['bands'][sel]['freq']:
+        sf = eq['bands'][sel]['freq']
+        if 20 <= sf <= 20000:
+            sx_frac = (math.log10(sf) - log_min) / (log_max - log_min)
+            sx_px = x_left + int(round(sx_frac * (width - 1)))
+            draw.line([(sx_px, y_top), (sx_px, y_top + height - 1)],
+                      fill=(0, 200, 100), width=1)
+
+    # Per-band markers: numbered circle at (freq, gain).
+    #   active   → white-filled circle, grey digit
+    #   inactive → grey outline circle, grey digit
+    R = 8
+    for band_idx, band in enumerate(eq['bands']):
+        bf = band.get('freq')
+        if bf is None or not (20 <= bf <= 20000):
+            continue
+        bx_frac = (math.log10(bf) - log_min) / (log_max - log_min)
+        bx = x_left + int(round(bx_frac * (width - 1)))
+        # Cut filters have no meaningful gain → anchor on the 0 dB line.
+        t = band.get('type', '')
+        if 'cut' in t:
+            by = y_mid
+        else:
+            g = band.get('gain', 0.0) or 0.0
+            gy_frac = (db_range - g) / (2 * db_range)
+            gy_frac = max(0.0, min(1.0, gy_frac))
+            by = y_top + int(round(gy_frac * (height - 1)))
+        # Clamp the circle fully inside the canvas
+        bx = max(x_left + R, min(x_left + width - 1 - R, bx))
+        by = max(y_top + R, min(y_top + height - 1 - R, by))
+
+        active = bool(band.get('on'))
+        if active:
+            draw.ellipse([bx - R, by - R, bx + R, by + R],
+                         fill=(255, 255, 255), outline=(255, 255, 255))
+            digit_color = (90, 90, 90)
+        else:
+            draw.ellipse([bx - R, by - R, bx + R, by + R],
+                         outline=(120, 120, 120), width=1)
+            digit_color = (120, 120, 120)
+
+        dch = str(band_idx + 1)
+        dbbox = draw.textbbox((0, 0), dch, font=FONT_SM_BOLD)
+        dw = dbbox[2] - dbbox[0]
+        dh = dbbox[3] - dbbox[1]
+        draw.text((bx - dw // 2, by - dh // 2 - 1),
+                  dch, font=FONT_SM_BOLD, fill=digit_color)
+
+
+def _render_channel_strip_screen(state):
+    """
+    Channel Strip overview of the selected track.
+    
+    Layout (8 columns of 120px each):
+      Col 1: Gate         (variant + on/off)
+      Col 2: Comp         (variant + on/off)
+      Col 3: EQ           (4 bands status)
+      Col 4: Tools        (variant + on/off)
+      Col 5: Sat          (variant + on/off)
+      Col 6: Limiter      (variant + on/off)
+      Col 7: Phase        (PreFilter Phase Switch on/off)
+      Col 8: PreGain      (PreFilter Gain value)
+    
+    From Matthieu's plan:
+      - Upper row buttons 1-6 = enter that module's drill-down page
+      - Lower row buttons 1-6 = toggle module on/off
+      - Encoders 7-8 = adjust Phase / PreGain
+    
+    This is a first-pass overview; the per-module drill-down pages come later.
+    """
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+    
+    cs = state.channel_strip
+    selected = state.selected_track
+    
+    # ── Header (track name + mode label) ──
+    track_color = selected.color if selected.color else (60, 60, 60)
+    draw.rectangle([0, 0, SCREEN_WIDTH, 22], fill=track_color)
+    header_text_color = _text_color_for_bg(track_color)
+    draw.text((6, 4), f"CHANNEL STRIP — {selected.name}",
+              fill=header_text_color, font=FONT_MD_BOLD)
+    
+    # ── 8 column cells ──
+    columns = [
+        ('slot',  'Gate',    STRIP_MOD_GATE),
+        ('slot',  'Comp',    STRIP_MOD_COMPRESSOR),
+        ('eq',    'EQ',      None),
+        ('slot',  'Tools',   STRIP_MOD_TOOLS),
+        ('slot',  'Sat',     STRIP_MOD_SATURATOR),
+        ('slot',  'Limiter', STRIP_MOD_LIMITER),
+        ('pf',    'Phase',   0x01),  # PreFilter PhaseSwitch
+        ('pf',    'PreGain', 0x00),  # PreFilter Gain
+    ]
+    
+    section_colors = CS_SECTION_COLORS
+    # Map column index → section key for colouring
+    col_section_key = ['gate', 'comp', 'eq', 'tools', 'sat', 'limiter', None, None]
+    # Capture each section's active state for the footer pills (Lower 1-6).
+    col_active = [True] * 8
+
+    for col_idx, (kind, label, key) in enumerate(columns):
+        x = col_idx * CELL_WIDTH
+        sect = col_section_key[col_idx]
+        col = section_colors.get(sect) if sect else None
+
+        # Cell separator on the right
+        draw.line([(x + CELL_WIDTH - 1, 24), (x + CELL_WIDTH - 1, SCREEN_HEIGHT)],
+                  fill=COLOR_SEPARATOR)
+
+        # Decide on/off state (drives the colour intensity)
+        is_active = True
+        empty = False
+        if kind == 'slot':
+            slot = cs.slots.get(key)
+            empty = (slot is None or not slot.plugin_name)
+            is_active = (not empty) and (not slot.bypassed) if slot else False
+        elif kind == 'eq':
+            # Prefer DA mirror (the overview lower-row 3 toggles via DA flip,
+            # which updates state.da_strip_toggle_values[('EQ', 0)]).
+            bypass_da = state.da_strip_toggle_values.get(('EQ', 0), None)
+            if bypass_da is not None:
+                bypassed = bypass_da >= 0.5
+            else:
+                bypass_val = cs.eq.get(0x7F, {}).get('value', 0)
+                bypass_disp = cs.eq.get(0x7F, {}).get('display', '')
+                bypassed = (bypass_disp == 'On') or (bypass_val >= 64)
+            is_active = not bypassed
+
+        col_active[col_idx] = is_active
+
+        # Section bar (Cubase-style coloured banner across most of the cell).
+        # Colour brightness reflects active/bypassed state.
+        if col is not None:
+            band_top = 26
+            band_bot = 116
+            if is_active:
+                fill_col = col
+            else:
+                # Darken when bypassed (~25% brightness)
+                fill_col = tuple(int(c * 0.25) for c in col)
+            draw.rectangle([x + 4, band_top, x + CELL_WIDTH - 6, band_bot],
+                           fill=fill_col)
+            text_col = _text_color_for_bg(fill_col)
+            # Section name — bold, centred-ish in the band
+            bbox = draw.textbbox((0, 0), label, font=FONT_LG_BOLD)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((x + (CELL_WIDTH - tw) // 2, band_top + 6),
+                      label, fill=text_col, font=FONT_LG_BOLD)
+
+            # Variant / status under the name (where applicable)
+            if kind == 'slot' and slot is not None:
+                variant_text = slot.plugin_name if slot.plugin_name else "—"
+                if len(variant_text) > 14:
+                    variant_text = variant_text[:13] + '…'
+                bbox = draw.textbbox((0, 0), variant_text, font=FONT_SM)
+                tw = bbox[2] - bbox[0]
+                draw.text((x + (CELL_WIDTH - tw) // 2, band_top + 38),
+                          variant_text, fill=text_col, font=FONT_SM)
+            elif kind == 'eq':
+                active_bands = sum(
+                    1 for band_idx in range(1, 5)
+                    if cs.eq.get((band_idx * 0x10) + 0x04, {}).get('display') == 'On'
+                )
+                txt = f"{active_bands}/4 bands"
+                bbox = draw.textbbox((0, 0), txt, font=FONT_SM)
+                tw = bbox[2] - bbox[0]
+                draw.text((x + (CELL_WIDTH - tw) // 2, band_top + 38),
+                          txt, fill=text_col, font=FONT_SM)
+        else:
+            # Phase / PreGain cells — no colour band, just label + value
+            draw.text((x + 6, 28), label, fill=COLOR_TEXT_MAIN, font=FONT_MD_BOLD)
+            if kind == 'pf':
+                param = cs.prefilter.get(key, {})
+                display = param.get('display', '—')
+                if len(display) > 12:
+                    display = display[:11] + '…'
+                color = COLOR_TEXT_MAIN
+                if label == 'Phase':
+                    is_on = (display == 'On')
+                    color = COLOR_TEXT_MAIN if is_on else COLOR_TEXT_DIM
+                draw.text((x + 6, 60), display, fill=color, font=FONT_MD)
+
+    # ── Lower-row button labels footer (overview) ──
+    # Lower 1-6 = bypass each section (Gate..Limiter), Lower 7 = Phase On/Off,
+    # Lower 8 = Edit Channel Settings window.
+    if state.cs_page == "overview":
+        f_top = SCREEN_HEIGHT - 22
+        phase_val  = cs.prefilter.get(0x01, {}).get('value', 0)
+        phase_disp = cs.prefilter.get(0x01, {}).get('display', '')
+        phase_on   = (phase_disp == 'On') or (phase_val >= 64)
+        eo = bool(getattr(state, 'editor_open', False))
+
+        # (label, lit?, on_color). Bypass pills are lit AMBER when the section
+        # is BYPASSED (engaged) — matching Nuendo's bypass indicator. Phase is
+        # a normal On/Off (green when on). Edit is white when window open.
+        AMBER = (240, 200, 0)
+        footer_defs = [
+            ('Bypass', not col_active[0], AMBER),  # Lower 1 — Gate
+            ('Bypass', not col_active[1], AMBER),  # Lower 2 — Comp
+            ('Bypass', not col_active[2], AMBER),  # Lower 3 — EQ
+            ('Bypass', not col_active[3], AMBER),  # Lower 4 — Tools
+            ('Bypass', not col_active[4], AMBER),  # Lower 5 — Sat
+            ('Bypass', not col_active[5], AMBER),  # Lower 6 — Limiter
+            ('On/Off', phase_on,          (0, 180, 0)),   # Lower 7 — Phase
+            ('Edit',   eo,                (255, 255, 255)),  # Lower 8 — Settings
+        ]
+        for fi, (flbl, fon, on_col) in enumerate(footer_defs):
+            fx = fi * CELL_WIDTH
+            pill_col = on_col if fon else (60, 60, 60)
+            draw.rectangle([fx + 4, f_top + 2, fx + CELL_WIDTH - 4,
+                            SCREEN_HEIGHT - 4],
+                           fill=pill_col, outline=(30, 30, 30), width=1)
+            bbox = draw.textbbox((0, 0), flbl, font=FONT_SM)
+            tw = bbox[2] - bbox[0]
+            draw.text((fx + (CELL_WIDTH - tw) // 2, f_top + 5),
+                      flbl, font=FONT_SM, fill=_text_color_for_bg(pill_col))
+
+    # Drill-down rendering
+    if state.cs_page != "overview":
+        page_labels = {
+            "gate": "GATE",
+            "comp": "COMPRESSOR",
+            "eq": "CHANNEL EQ",
+            "tools": "TOOLS",
+            "sat": "SATURATOR",
+            "limiter": "LIMITER",
+        }
+        page_to_modid = {
+            "gate": 0x10,
+            "comp": 0x11,
+            "eq":   0x01,   # ChannelEQ section (binding-path mod 0x01)
+            "tools": 0x12,
+            "sat": 0x13,
+            "limiter": 0x14,
+        }
+        
+        # Per-page layout: which paramId goes in each cell position (top row,
+        # indexed by encoder 0..7) and footer position (bottom row, indexed
+        # by lower button 0..7). null entries are left blank.
+        # Per-variant layouts: which paramId goes in each cell position
+        # (top row, encoder 0..7) and footer position (lower button 0..7).
+        # Lookup key is (cs_page, variant_name). variant_name=None is the
+        # primary fallback.
+        #
+        # `toggle_labels` overrides Cubase's API names with the in-GUI labels
+        # (e.g. Gate's paramId 0x06 is API-named "side chain on/off" but the
+        # plugin GUI labels its behavior as "Activate Filter").
+        variant_layouts = {
+            # ── Gate (single variant) ──
+            ('gate', None): {
+                'encoders': [0x01, 0x02, 0x03, 0x04, 0x07, 0x08, None, None],
+                'toggles':  [0x0E, 0x06, 0x05, None, None, None, None, None],
+                'toggle_labels': {
+                    0x0E: 'Listen Filter',
+                    0x06: 'Activate Filter',
+                    0x05: 'Auto Release',
+                },
+            },
+            # ── Comp variants ──
+            ('comp', 'Standard Compressor'): {
+                'encoders': [0x01, 0x02, 0x03, 0x04, 0x06, None, None, None],
+                'toggles':  [0x05, 0x07, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'Auto Release',
+                    0x07: 'Auto MakeUp',
+                },
+                'da_toggles': {2: ('SoftKnee', 8)},
+            },
+            ('comp', 'Tube Compressor'): {
+                'encoders': [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, None, None],
+                'toggles':  [0x05, None, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'Auto Release',
+                },
+            },
+            ('comp', 'VintageCompressor'): {
+                'encoders': [0x01, 0x02, 0x03, 0x05, None, None, None, None],
+                'toggles':  [0x04, 0x06, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x04: 'Punch',          # API: "Att-Mode"
+                    0x06: 'Auto Release',   # API: "Au-Release"
+                },
+            },
+            # ── Tools variants ──
+            ('tools', 'DeEsser'): {
+                'encoders': [0x01, 0x03, 0x04, 0x05, 0x06, None, None, None],
+                'toggles':  [0x02, 0x07, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x02: 'Auto Threshold',
+                    0x07: 'Solo',
+                },
+                # DA-based footer toggles: {footer_pos: (label, da_param_idx)}
+                # Strip slot is resolved at runtime from cs_page's mod_id.
+                'da_toggles': {2: ('Diff', 6)},
+            },
+            # Custom layout: DeEsser may sit at the Saturator slot position.
+            ('sat', 'DeEsser'): {
+                'encoders': [0x01, 0x03, 0x04, 0x05, 0x06, None, None, None],
+                'toggles':  [0x02, 0x07, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x02: 'Auto Threshold',
+                    0x07: 'Solo',
+                },
+                'da_toggles': {2: ('Diff', 6)},
+            },
+            ('tools', 'EnvelopeShaper'): {
+                'encoders': [0x01, 0x02, 0x04, 0x06, None, None, None, None],
+                'toggles':  [None, None, None, None, None, None, None, None],
+                'toggle_labels': {},
+            },
+            # ── Sat variants ──
+            ('sat', 'Magneto II'): {
+                'encoders': [0x01, 0x02, 0x03, 0x04, 0x07, None, None, None],
+                'toggles':  [0x05, 0x06, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'HF On',
+                    0x06: 'Solo',
+                },
+                'da_toggles': {2: ('Dual', 1), 3: ('Oversample', 5)},
+            },
+            # Custom layout: Magneto II at Limiter slot position.
+            ('limiter', 'Magneto II'): {
+                'encoders': [0x01, 0x02, 0x03, 0x04, 0x07, None, None, None],
+                'toggles':  [0x05, 0x06, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'HF On',
+                    0x06: 'Solo',
+                },
+                'da_toggles': {2: ('Dual', 1), 3: ('Oversample', 5)},
+            },
+            ('sat', 'Tape Saturation'): {
+                'encoders': [0x01, 0x02, 0x03, 0x07, None, None, None, None],
+                'toggles':  [0x05, 0x06, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'Dual',
+                    0x06: 'Auto Gain',
+                },
+                'da_toggles': {2: ('Oversample', 6)},
+            },
+            # Custom layout: Tape Saturation at Limiter slot.
+            ('limiter', 'Tape Saturation'): {
+                'encoders': [0x01, 0x02, 0x03, 0x07, None, None, None, None],
+                'toggles':  [0x05, 0x06, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'Dual',
+                    0x06: 'Auto Gain',
+                },
+                'da_toggles': {2: ('Oversample', 6)},
+            },
+            ('sat', 'Tube Saturation'): {
+                'encoders': [0x01, 0x02, 0x03, 0x06, None, None, None, None],
+                'toggles':  [None, None, None, None, None, None, None, None],
+                'toggle_labels': {},
+            },
+            # Custom layout: Tube Saturation at Limiter slot.
+            ('limiter', 'Tube Saturation'): {
+                'encoders': [0x01, 0x02, 0x03, 0x06, None, None, None, None],
+                'toggles':  [None, None, None, None, None, None, None, None],
+                'toggle_labels': {},
+            },
+            # ── Channel EQ (single-variant) ──
+            # The encoder grid is fully driven by DA (cs_strip_da_active=True).
+            # da_toggles puts band 1-4 On/Off on footer positions 0-3.
+            ('eq', 'EQ'): {
+                'encoders': [None, None, None, None, None, None, None, None],
+                'toggles':  [None, None, None, None, None, None, None, None],
+                'toggle_labels': {},
+                # Band On at footer pos 0 acts on the SELECTED band; its DA
+                # param index is dynamic, so the renderer handles it via a
+                # custom branch (see eq_band_on_footer below) — not via da_toggles.
+                'da_toggles': {},
+                # Binding-path toggles at footer pos 5-7 (PreFilter LC/HC/Bypass).
+                # Format: {pos: (mod_id, param_id, label, invert_for_on)}
+                # invert_for_on=True means the param is a "bypass" flag → ON pill
+                # when value is 0 (not bypassed).
+                # Pos 7 is now the universal "Edit" (Channel Settings) button
+                # on all CS pages — PreFilter Bypass moved to pos 4.
+                'binding_toggles': {
+                    4: (0x00, 0x7F, 'PreFilt',  True),
+                    5: (0x00, 0x06, 'LC On',    False),
+                    6: (0x00, 0x03, 'HC On',    False),
+                },
+                # Binding-path encoders at cell 5-7 (PreFilter LC Freq, HC Freq, PreGain).
+                # Format: {cell_idx: (mod_id, param_id)}
+                'binding_encoders': {
+                    5: (0x00, 0x05),
+                    6: (0x00, 0x02),
+                    7: (0x00, 0x00),
+                },
+            },
+
+            # ── Limit variants ──
+            ('limiter', 'Brickwall Limiter'): {
+                'encoders': [0x01, 0x04, None, None, None, None, None, None],
+                'toggles':  [0x05, None, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'Auto Release',
+                },
+                'da_toggles': {1: ('Link', 4), 2: ('Oversample', 5)},
+            },
+            ('limiter', 'Maximizer'): {
+                'encoders': [0x01, 0x03, 0x06, None, None, None, None, None],
+                'toggles':  [None, None, None, None, None, None, None, None],
+                'toggle_labels': {},
+                'da_toggles': {0: ('SoftClip', 0), 1: ('Modern', 2)},
+            },
+            ('limiter', 'Standard Limiter'): {
+                'encoders': [0x01, 0x04, 0x07, None, None, None, None, None],
+                'toggles':  [0x05, None, None, None, None, None, None, None],
+                'toggle_labels': {
+                    0x05: 'Auto Release',
+                },
+            },
+        }
+        # Primary variant fallbacks (used when a slot has no plugin yet)
+        variant_layouts[('comp', None)]    = variant_layouts[('comp', 'Standard Compressor')]
+        variant_layouts[('tools', None)]   = variant_layouts[('tools', 'DeEsser')]
+        variant_layouts[('sat', None)]     = variant_layouts[('sat', 'Magneto II')]
+        variant_layouts[('limiter', None)] = variant_layouts[('limiter', 'Brickwall Limiter')]
+        variant_layouts[('eq', None)]      = variant_layouts[('eq', 'EQ')]
+        
+        # Resolve the active layout for the current page + variant
+        page_layouts = {}
+        if state.cs_page in page_to_modid:
+            mod_id_for_page = page_to_modid[state.cs_page]
+            slot_for_page = state.channel_strip.slots.get(mod_id_for_page)
+            variant_name = (slot_for_page.plugin_name
+                            if (slot_for_page and slot_for_page.plugin_name)
+                            else None)
+            layout = variant_layouts.get((state.cs_page, variant_name))
+            if layout is None:
+                layout = variant_layouts.get((state.cs_page, None))
+            if layout is not None:
+                page_layouts[state.cs_page] = layout
+        
+        if state.cs_page in page_to_modid and state.cs_page in page_layouts:
+            mod_id = page_to_modid[state.cs_page]
+            slot = state.channel_strip.slots.get(mod_id)
+            layout = page_layouts[state.cs_page]
+            
+            # Full overlay so the overview underneath doesn't bleed through
+            img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+            draw = ImageDraw.Draw(img)
+            
+            # Standard header (page label + Back hint) is now merged into the
+            # chip strip below (col 0 = module name, col 7 = Back), so we no
+            # longer draw a separate header line — this frees vertical space.
+
+            # ── Header chip strip (upper row 3-4-5 variants, 7 Edit, 8 On/Off) ──
+            _CS_VARIANT_NAMES = {
+                'comp':    ['Standard Compressor', 'Tube Compressor', 'VintageCompressor'],
+                'tools':   ['DeEsser', 'EnvelopeShaper'],
+                'sat':     ['Magneto II', 'Tape Saturation', 'Tube Saturation'],
+                'limiter': ['Brickwall Limiter', 'Maximizer', 'Standard Limiter'],
+            }
+            variant_names = _CS_VARIANT_NAMES.get(state.cs_page, [])
+            cell_w = SCREEN_WIDTH // 8
+            # Chip strip moved up to y=4-26 (header is gone) so cells get
+            # more vertical room.
+            chip_y_top = 4
+            chip_y_bot = 26
+
+            def _draw_chip(col, label, is_active, dim=False, accent='green'):
+                # accent: 'green' (variant active) or 'yellow' (bypass engaged,
+                # matches Nuendo's amber bypass indicator).
+                cx = col * cell_w
+                if is_active and accent == 'yellow':
+                    fill, outline = (120, 95, 0), (220, 180, 0)
+                elif is_active:
+                    fill, outline = (0, 110, 55), (0, 200, 100)
+                elif dim:
+                    fill, outline = (35, 35, 35), (60, 60, 60)
+                else:
+                    fill, outline = (40, 40, 40), (80, 80, 80)
+                draw.rectangle([cx + 4, chip_y_top, cx + cell_w - 4, chip_y_bot - 2],
+                               fill=fill, outline=outline, width=1)
+                text_color = COLOR_TEXT_MAIN if is_active else COLOR_TEXT_DIM
+                short = label if len(label) <= 14 else label[:13] + '…'
+                bbox = draw.textbbox((0, 0), short, font=FONT_SM)
+                tw = bbox[2] - bbox[0]
+                draw.text((cx + (cell_w - tw) // 2, chip_y_top + 4),
+                          short, font=FONT_SM, fill=text_color)
+
+            # ── Chip strip layout (new upper-row mapping) ──
+            #   col 0: module name (Upper 1, inactive label)
+            #   col 1: ON/OFF chip (Upper 2)
+            #   cols 2-4: variant chips (Upper 3-4-5)
+            #   col 7: [Back] label (Upper 8)
+            current_variant = slot.plugin_name if (slot and slot.plugin_name) else None
+
+            # Resolve the section/module on-off state once for the page
+            if state.cs_page == 'eq':
+                # Read EQ Bypass via the DA toggle mirror (DA idx 0 = Bypass,
+                # tag 4204). Binding-path state.channel_strip.eq[0x7F] is also
+                # populated but the DA path is more reliable since we toggle
+                # via DA flip on Upper 2.
+                bypass_val_norm = state.da_strip_toggle_values.get(('EQ', 0), 0.0)
+                bypassed = bypass_val_norm >= 0.5
+                # Cross-check the binding-path state (in case JS hasn't
+                # responded yet); fallback to it when DA mirror is unset.
+                if ('EQ', 0) not in state.da_strip_toggle_values:
+                    eq_dict = state.channel_strip.eq
+                    bypass_val  = eq_dict.get(0x7F, {}).get('value', 0)
+                    bypass_disp = eq_dict.get(0x7F, {}).get('display', '')
+                    bypassed = (bypass_disp == 'On') or (bypass_val >= 0.5)
+                is_on_state = not bypassed   # ON when NOT bypassed
+            else:
+                on_mod_id = page_to_modid.get(state.cs_page)
+                on_slot = (state.channel_strip.slots.get(on_mod_id)
+                           if on_mod_id is not None else None)
+                on_val  = on_slot.params.get(0x00, {}).get('value', 0)   if on_slot else 0
+                on_disp = on_slot.params.get(0x00, {}).get('display', '') if on_slot else ''
+                is_on_state = (on_disp == 'On') or (on_val >= 0.5)
+
+            if state.cs_page != 'eq':
+                # Col 0: module name with section-coloured background pill.
+                page_label_full = page_labels.get(state.cs_page, state.cs_page.upper())
+                short = (page_label_full if len(page_label_full) <= 13
+                         else page_label_full[:12] + '…')
+                sect_color = CS_SECTION_COLORS.get(state.cs_page)
+                if sect_color:
+                    draw.rectangle([4, chip_y_top, cell_w - 4, chip_y_bot - 2],
+                                   fill=sect_color, outline=sect_color, width=1)
+                    text_col = _text_color_for_bg(sect_color)
+                else:
+                    text_col = COLOR_TEXT_MAIN
+                bbox = draw.textbbox((0, 0), short, font=FONT_SM_BOLD)
+                tw = bbox[2] - bbox[0]
+                draw.text(((cell_w - tw) // 2, chip_y_top + 4),
+                          short, font=FONT_SM_BOLD, fill=text_col)
+
+                # Col 1: "Bypass" chip — amber/lit when bypass is ENGAGED
+                # (section NOT active), matching Nuendo's bypass indicator.
+                _draw_chip(1, 'Bypass', not is_on_state, accent='yellow')
+
+                # Cols 2-4: variant chips
+                for vi, vname in enumerate(variant_names[:3]):
+                    _draw_chip(vi + 2, vname, vname == current_variant)
+
+                # Col 7: Back label (no chip background)
+                back_lbl = '[Back]'
+                bbox = draw.textbbox((0, 0), back_lbl, font=FONT_SM)
+                tw = bbox[2] - bbox[0]
+                draw.text((7 * cell_w + (cell_w - tw) // 2, chip_y_top + 4),
+                          back_lbl, font=FONT_SM, fill=COLOR_TEXT_DIM)
+            else:
+                # ── EQ thin upper-row label strip (no header on EQ page) ──
+                page_label_full = page_labels.get('eq', 'EQ')
+                upper_labels = [
+                    page_label_full,    # Upper 1: module name (inactive)
+                    'Bypass',           # Upper 2: section bypass toggle
+                    '', '', '',         # Upper 3-5: no variants for EQ
+                    '', '',             # Upper 6-7: unassigned
+                    'Back',             # Upper 8
+                ]
+                # Upper 1 = module name with section colour background
+                sect_color = CS_SECTION_COLORS.get('eq')
+                if sect_color:
+                    draw.rectangle([4, 0, cell_w - 4, 11],
+                                   fill=sect_color, outline=sect_color, width=1)
+                for ui, lbl in enumerate(upper_labels):
+                    if not lbl:
+                        continue
+                    ux = ui * cell_w
+                    if ui == 0 and sect_color:
+                        color = _text_color_for_bg(sect_color)
+                    elif ui == 1:
+                        # Bypass: amber/lit when ENGAGED (section bypassed)
+                        color = (240, 200, 0) if not is_on_state else COLOR_TEXT_DIM
+                    else:
+                        color = COLOR_TEXT_DIM
+                    # Module name (Upper 1) in bold to match section banners
+                    fnt = FONT_SM_BOLD if ui == 0 else FONT_SM
+                    bbox = draw.textbbox((0, 0), lbl, font=fnt)
+                    tw = bbox[2] - bbox[0]
+                    draw.text((ux + (cell_w - tw) // 2, 0),
+                              lbl, font=fnt, fill=color)
+
+            # ── Layout dimensions ──
+            # Header: 0..26
+            # Chip strip: 28..50
+            # Main cells: 52..(SCREEN_HEIGHT - footer_h - 4)
+            # Footer: (SCREEN_HEIGHT - footer_h)..(SCREEN_HEIGHT - 4)
+            # EQ page: cells are COMPACT (top half of main area) and the
+            # EQ curve fills the bottom half.
+            # Slimmer footer (was 36) — the ON/OFF text below the pill label is
+            # redundant since the pill colour already conveys the state.
+            footer_h = 22
+            is_eq_page = (state.cs_page == 'eq')
+            if is_eq_page:
+                # EQ page: thin upper-row label strip at y=0..11, compact cells
+                # below, then curve. Footer at the bottom.
+                cells_top = 12
+                cells_bot = 38
+                eq_curve_top = 40
+                eq_curve_bot = SCREEN_HEIGHT - footer_h - 4
+            else:
+                # Chip strip y=4..26, cells y=28..(footer-4)
+                cells_top = 28
+                cells_bot = SCREEN_HEIGHT - footer_h - 4
+            
+            # ── Main cells (one per encoder position) ──
+            # EQ page uses compact cells (label + value on 2 short lines) to
+            # leave room for the EQ curve below.
+            compact = is_eq_page
+            name_y_off = 2 if compact else 22
+            value_y_off = 14 if compact else 50
+            value_font = FONT_SM if compact else FONT_MD
+            for ci in range(8):
+                paramId = layout['encoders'][ci]
+                cx = ci * cell_w
+                # Cell border (always drawn, dim for empty cells)
+                if getattr(state, 'cs_strip_da_active', False):
+                    da_names = getattr(state, 'insert_param_names', [])
+                    _has_da = bool(da_names[ci]) if ci < len(da_names) else False
+                    border_color = (50, 50, 50) if _has_da else (35, 35, 35)
+                    badge_color  = COLOR_TEXT_DIM if _has_da else (60, 60, 60)
+                else:
+                    border_color = (50, 50, 50) if paramId else (35, 35, 35)
+                    badge_color  = COLOR_TEXT_DIM if paramId else (60, 60, 60)
+                # EQ band selector (Enc 1) gets a distinctive green border.
+                if state.cs_page == 'eq' and ci == 0:
+                    border_color = (0, 200, 100)
+                draw.rectangle([cx + 2, cells_top, cx + cell_w - 2, cells_bot],
+                               outline=border_color, width=1)
+                # Encoder number badge top-left (skipped on compact cells)
+                if not compact:
+                    draw.text((cx + 6, cells_top + 4), f"{ci+1}",
+                              font=FONT_SM, fill=badge_color)
+                # DA encoder override: show names/values from DA when active
+                if getattr(state, 'cs_strip_da_active', False):
+                    da_names = getattr(state, 'insert_param_names', [])
+                    da_vals  = getattr(state, 'insert_param_values', [])
+                    name    = da_names[ci] if ci < len(da_names) else ''
+                    display = da_vals[ci]  if ci < len(da_vals)  else ''
+                    # Binding-path override for specific cells (e.g. EQ page
+                    # cells 5-7 reading PreFilter values from mod 0x00).
+                    be = layout.get('binding_encoders', {}).get(ci)
+                    if be is not None:
+                        bm, bp = be
+                        if bm == 0x00:
+                            pdata = state.channel_strip.prefilter.get(bp, {})
+                        elif bm == 0x01:
+                            pdata = state.channel_strip.eq.get(bp, {})
+                        else:
+                            bslot = state.channel_strip.slots.get(bm)
+                            pdata = bslot.params.get(bp, {}) if bslot else {}
+                        bdisp = pdata.get('display', '')
+                        if bdisp:
+                            display = bdisp
+                    if name:
+                        name_short = name if len(name) <= 13 else name[:12] + '…'
+                        draw.text((cx + 6, cells_top + name_y_off), name_short,
+                                  font=FONT_SM, fill=COLOR_TEXT_DIM)
+                    # Band selector cell: draw "1 2 3 4" with selected highlighted
+                    if is_eq_page and ci == 0:
+                        sel = getattr(state, 'eq_selected_band', 0)
+                        bands_str = '1 2 3 4'
+                        char_x = cx + 8
+                        for bi in range(4):
+                            tag = str(bi + 1)
+                            color = (0, 220, 120) if bi == sel else COLOR_TEXT_DIM
+                            draw.text((char_x, cells_top + value_y_off), tag,
+                                      font=value_font, fill=color)
+                            bbox = draw.textbbox((0, 0), tag + ' ', font=value_font)
+                            char_x += bbox[2] - bbox[0] + 4
+                    elif display:
+                        disp_short = display if len(display) <= 11 else display[:10] + '…'
+                        bbox = draw.textbbox((0, 0), disp_short, font=value_font)
+                        tw = bbox[2] - bbox[0]
+                        draw.text((cx + (cell_w - tw) // 2, cells_top + value_y_off),
+                                  disp_short, font=value_font, fill=COLOR_TEXT_MAIN)
+                    continue
+
+                if paramId is None or slot is None:
+                    continue
+                pdata = slot.params.get(paramId, {})
+                name = pdata.get('name', '')
+                display = pdata.get('display', '')
+                # Param name top of cell
+                if name:
+                    name_short = name if len(name) <= 13 else name[:12] + '…'
+                    draw.text((cx + 6, cells_top + name_y_off), name_short,
+                              font=FONT_SM, fill=COLOR_TEXT_DIM)
+                # Display value center, larger
+                if display:
+                    disp_short = display if len(display) <= 11 else display[:10] + '…'
+                    bbox = draw.textbbox((0, 0), disp_short, font=value_font)
+                    tw = bbox[2] - bbox[0]
+                    draw.text((cx + (cell_w - tw) // 2, cells_top + value_y_off),
+                              disp_short, font=value_font, fill=COLOR_TEXT_MAIN)
+
+            # ── EQ curve canvas (only on EQ page) ──
+            if is_eq_page:
+                # Background rectangle
+                draw.rectangle([8, eq_curve_top, SCREEN_WIDTH - 8, eq_curve_bot],
+                               outline=(40, 40, 40), width=1, fill=(15, 15, 18))
+                # Guard the curve computation: a transient bad value (mid-drag
+                # feedback, partial state snapshot) must not crash the frame.
+                try:
+                    eq_data = _collect_eq_data(state)
+                    if eq_data is not None:
+                        _render_eq_curve(draw, 10, eq_curve_top + 2,
+                                         SCREEN_WIDTH - 20,
+                                         eq_curve_bot - eq_curve_top - 4,
+                                         eq_data)
+                except Exception:
+                    pass  # skip curve this frame, retry next
+            
+            # ── Footer (one segment per lower row button) ──
+            # Separator line between cells and footer
+            sep_y = cells_bot + 2
+            draw.line([(0, sep_y), (SCREEN_WIDTH, sep_y)], fill=(40, 40, 40), width=1)
+            footer_top = SCREEN_HEIGHT - footer_h
+            toggle_labels = layout.get('toggle_labels', {})
+            da_toggles = layout.get('da_toggles', {})  # {pos: (label, da_param_idx)}
+            binding_toggles = layout.get('binding_toggles', {})  # {pos: (mod_id, param_id, label, invert)}
+            # DA values keyed by plugin name (current variant), so custom strip
+            # layouts where mod_id ≠ DA slot position still work correctly.
+            _current_variant = slot.plugin_name if (slot and slot.plugin_name) else None
+            # Reset all positions; renderer will set the ones that have a pill.
+            state.cs_footer_pill_states = [None] * 8
+            for fi in range(8):
+                paramId = layout['toggles'][fi]
+                fx = fi * cell_w
+                # Pos 7 (universal) → "Edit" button: toggles the Channel
+                # Settings window. Lit white when the window is open.
+                if fi == 7:
+                    eo = bool(getattr(state, 'editor_open', False))
+                    state.cs_footer_pill_states[fi] = eo
+                    _draw_footer_pill(draw, fx, footer_top, cell_w, footer_h,
+                                      'Edit', eo, on_color=(255, 255, 255))
+                    continue
+                # EQ-specific dynamic Band On pill at footer pos 0
+                if state.cs_page == 'eq' and fi == 0:
+                    sel = getattr(state, 'eq_selected_band', 0)
+                    on_idx = 5 + sel * 6
+                    val = state.da_strip_toggle_values.get(('EQ', on_idx), 0.0)
+                    is_band_on = val >= 0.5
+                    state.cs_footer_pill_states[fi] = is_band_on
+                    _draw_footer_pill(draw, fx, footer_top, cell_w, footer_h,
+                                      f"B{sel + 1} On", is_band_on)
+                    continue
+                # Binding-path toggle on a non-default mod_id (e.g. EQ page
+                # PreFilter HC/LC/Bypass on the EQ page that points to mod 0x01).
+                if fi in binding_toggles:
+                    bm, bp, blabel, binvert = binding_toggles[fi]
+                    # Resolve store: PreFilter (0x00) and ChannelEQ (0x01) have
+                    # their own dicts, strip slots (0x10+) are under .slots.
+                    if bm == 0x00:
+                        bpdata = state.channel_strip.prefilter.get(bp, {})
+                    elif bm == 0x01:
+                        bpdata = state.channel_strip.eq.get(bp, {})
+                    else:
+                        bslot = state.channel_strip.slots.get(bm)
+                        bpdata = bslot.params.get(bp, {}) if bslot else {}
+                    bdisp = bpdata.get('display', '')
+                    bvalue = bpdata.get('value', 0)
+                    if bdisp == 'On':
+                        is_on_bp = True
+                    elif bdisp == 'Off':
+                        is_on_bp = False
+                    else:
+                        is_on_bp = bvalue >= 0.5
+                    if binvert:
+                        is_on_bp = not is_on_bp
+                    state.cs_footer_pill_states[fi] = is_on_bp
+                    _draw_footer_pill(draw, fx, footer_top, cell_w, footer_h,
+                                      blabel, is_on_bp)
+                    continue
+                # DA-based toggle (overrides any None paramId at this position)
+                if fi in da_toggles and _current_variant:
+                    da_label, da_idx = da_toggles[fi]
+                    val = state.da_strip_toggle_values.get((_current_variant, da_idx), 0.0)
+                    is_on_da = val >= 0.5
+                    state.cs_footer_pill_states[fi] = is_on_da
+                    _draw_footer_pill(draw, fx, footer_top, cell_w, footer_h,
+                                      da_label, is_on_da)
+                    continue
+                if paramId is None or slot is None:
+                    continue
+                pdata = slot.params.get(paramId, {})
+                # Display label: page layout's override wins over API name, so
+                # we can rename Cubase's short/cryptic names to match what the
+                # user sees in the plugin GUI.
+                name = toggle_labels.get(paramId) or pdata.get('name', '')
+                display = pdata.get('display', '')
+                # Toggle state: prefer the "On"/"Off" string from SysEx 0x32, but
+                # fall back to the numeric value (SysEx 0x31) for binary params
+                # where Cubase doesn't fire mOnDisplayValueChange.
+                if display == 'On':
+                    is_on = True
+                elif display == 'Off':
+                    is_on = False
+                else:
+                    is_on = pdata.get('value', 0) >= 0.5
+                if name:
+                    state.cs_footer_pill_states[fi] = is_on
+                    _draw_footer_pill(draw, fx, footer_top, cell_w, footer_h,
+                                      name, is_on)
+        else:
+            # EQ + any future page that doesn't have a layout yet: placeholder.
+            overlay = Image.new('RGBA', (SCREEN_WIDTH, SCREEN_HEIGHT),
+                                (0, 0, 0, 200))
+            img = Image.alpha_composite(img.convert('RGBA'),
+                                        overlay).convert('RGB')
+            draw = ImageDraw.Draw(img)
+            label = page_labels.get(state.cs_page, state.cs_page.upper())
+            bbox = draw.textbbox((0, 0), label, font=FONT_LG)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text(((SCREEN_WIDTH - tw) // 2, (SCREEN_HEIGHT - th) // 2 - 20),
+                      label, font=FONT_LG, fill=(255, 255, 255))
+            hint = "Drill-down page — coming soon. Press [1] above to return."
+            bbox = draw.textbbox((0, 0), hint, font=FONT_SM)
+            tw = bbox[2] - bbox[0]
+            draw.text(((SCREEN_WIDTH - tw) // 2, SCREEN_HEIGHT - 30),
+                      hint, font=FONT_SM, fill=(180, 180, 180))
+    
+    return _to_push2_frame(img)
+
 
 def render_splash_screen():
     """
@@ -1591,6 +2895,9 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
     
     if state.mode == MODE_DEVICE:
         return _render_device_screen(state)
+    
+    if state.mode == MODE_CHANNEL_STRIP:
+        return _render_channel_strip_screen(state)
     
     # Main image
     img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)

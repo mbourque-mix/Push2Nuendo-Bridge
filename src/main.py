@@ -123,6 +123,38 @@ def start_plugin_mapper():
     return f"failed to start (check logs){pedalboard_status}"
 
 
+PLUGIN_MAPPER_URL = "http://localhost:8100"
+
+
+def _announce_plugin_mapper(mapper_status):
+    """
+    Print a prominent, clickable Plugin Mapper link in the console and
+    open it in the default browser once on startup.
+
+    Most modern terminals (Windows Terminal, macOS Terminal, iTerm2)
+    render bare ``http://`` URLs as clickable links, so we frame the URL
+    on its own line for easy access. Auto-open can be disabled with
+    ``--no-browser`` / ``-nb``.
+    """
+    if "running at" not in (mapper_status or ""):
+        return  # mapper not available — nothing to link to
+
+    print()
+    print("  +-----------------------------------------------+")
+    print("  |  Plugin Mapper - open in your browser:        |")
+    print(f"  |    {PLUGIN_MAPPER_URL:<43s}|")
+    print("  +-----------------------------------------------+")
+    print()
+
+    if "--no-browser" in sys.argv or "-nb" in sys.argv:
+        return
+    try:
+        import webbrowser
+        webbrowser.open(PLUGIN_MAPPER_URL)
+    except Exception:
+        pass  # browser auto-open is best-effort only
+
+
 def terminal_main():
     """Terminal-based bridge (all platforms)."""
     import time
@@ -144,6 +176,7 @@ def terminal_main():
     # ── Start Plugin Mapper server (optional) ──
     mapper_status = start_plugin_mapper()
     print(f"[0/3] Plugin Mapper: {mapper_status}")
+    _announce_plugin_mapper(mapper_status)
     
     # ── Start Nuendo MIDI link ──
     print("[1/3] Connecting to MIDI ports...")
@@ -198,5 +231,37 @@ def terminal_main():
         shutdown()
 
 
+def _run_with_crash_guard():
+    """
+    Run main() and, if it crashes, keep the console window open so the
+    user can read (and report) the traceback. Without this, a frozen
+    one-file .exe launched by double-click vanishes instantly on any
+    startup error.
+    """
+    try:
+        main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        pass
+    except BaseException:
+        import traceback
+        print()
+        print("=" * 60)
+        print("  The bridge crashed on startup. Details below:")
+        print("=" * 60)
+        traceback.print_exc()
+        print("=" * 60)
+        print("  Please report this error (with the lines above) at:")
+        print("  https://github.com/mbourque-mix/Push2Nuendo-Bridge/issues")
+        print("=" * 60)
+        try:
+            input("\nPress Enter to close this window...")
+        except (EOFError, RuntimeError):
+            import time
+            time.sleep(30)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    main()
+    _run_with_crash_guard()

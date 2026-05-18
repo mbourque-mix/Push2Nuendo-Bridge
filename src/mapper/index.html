@@ -105,6 +105,9 @@ body {
 .plugin-item .meta { font-size: 10px; color: var(--text-dim); display: flex; gap: 8px; margin-top: 2px; }
 .plugin-item .mapped { color: var(--green); }
 .plugin-item .instrument { color: var(--purple); }
+.plugin-item.errored { opacity: 0.6; cursor: default; border-left-color: var(--red); }
+.plugin-item.errored:hover { background: none; }
+.plugin-item .err { color: var(--red); }
 .sidebar-footer { padding: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
 
 /* Center: params */
@@ -346,10 +349,11 @@ function filterPlugins() { renderPluginList(); }
 function getFilteredPlugins() {
   const search = document.getElementById('searchInput').value.toLowerCase();
   return allPlugins.filter(p => {
-    if (p.error) return false;
     if (search && !p.name.toLowerCase().includes(search)) return false;
-    if (currentFilter === 'mapped' && !p.has_mapping) return false;
-    if (currentFilter === 'unmapped' && p.has_mapping) return false;
+    // Error plugins are shown (with their reason) under "All" and search,
+    // but excluded from the mapped/unmapped views since they can't be mapped.
+    if (currentFilter === 'mapped' && (!p.has_mapping || p.error)) return false;
+    if (currentFilter === 'unmapped' && (p.has_mapping || p.error)) return false;
     return true;
   });
 }
@@ -361,19 +365,35 @@ function renderPluginList() {
   list.innerHTML = '';
   filtered.forEach((p, i) => {
     const div = document.createElement('div');
-    div.className = 'plugin-item' + (selectedPlugin === p.name ? ' selected' : '');
-    div.innerHTML = `
-      <div class="name">${escapeHtml(p.name)}</div>
-      <div class="meta">
-        <span>${p.parameter_count} params</span>
-        ${p.has_mapping ? '<span class="mapped">● mapped</span>' : ''}
-        ${p.is_instrument ? '<span class="instrument">♪ instrument</span>' : ''}
-      </div>
-    `;
-    div.addEventListener('click', () => selectPlugin(p.name));
+    if (p.error) {
+      div.className = 'plugin-item errored';
+      div.innerHTML = `
+        <div class="name">${escapeHtml(p.name)}</div>
+        <div class="meta">
+          <span class="err">⚠ ignored — ${escapeHtml(p.error)}</span>
+        </div>
+      `;
+      // No click handler: an errored plugin has no parameters to map.
+    } else {
+      div.className = 'plugin-item' + (selectedPlugin === p.name ? ' selected' : '');
+      div.innerHTML = `
+        <div class="name">${escapeHtml(p.name)}</div>
+        <div class="meta">
+          <span>${p.parameter_count} params</span>
+          ${p.has_mapping ? '<span class="mapped">● mapped</span>' : ''}
+          ${p.is_instrument ? '<span class="instrument">♪ instrument</span>' : ''}
+        </div>
+      `;
+      div.addEventListener('click', () => selectPlugin(p.name));
+    }
     list.appendChild(div);
   });
-  document.getElementById('pluginCount').textContent = `${filtered.length} / ${allPlugins.length} plugins`;
+  const errCount = allPlugins.filter(p => p.error).length;
+  const okCount = allPlugins.length - errCount;
+  document.getElementById('pluginCount').textContent =
+    `${filtered.length} shown · ${okCount} OK` +
+    (errCount ? ` · ${errCount} ignored` : '') +
+    ` / ${allPlugins.length}`;
 }
 
 function escapeHtml(str) {
