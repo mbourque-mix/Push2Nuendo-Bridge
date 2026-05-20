@@ -182,7 +182,7 @@ Quick start:
 
 1. Download **`Push2NuendoBridge-vX.Y.Z-Windows.zip`** from the [Releases](https://github.com/mbourque-mix/Push2Nuendo-Bridge/releases) page and unzip it anywhere.
 2. Install **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** and create four ports: `NuendoBridge In`, `NuendoBridge Out`, `BridgeNotes`, `BridgeNotes In`.
-3. Install the **WinUSB driver for the Push 2 with [Zadig](https://zadig.akeo.ie/)** (one time).
+3. Install the **WinUSB driver for the Push 2 with [Zadig](https://zadig.akeo.ie/)** (one time). **Critical:** target the Push 2's **display/bulk interface** (USB ID `2982:1967`) — **not** the MIDI interface, or you will break MIDI on the Push. The Windows Installation Guide has the exact step-by-step.
 4. **Double-click the `.exe`.** A console shows the status and a clickable Plugin Mapper link (`http://localhost:8100`).
 
 > ⚠️ **Windows — important:** installing the WinUSB driver with Zadig **disables the Push 2 in Ableton Live** (Windows binds the device to one driver at a time; the bridge and Live cannot share it). It is fully reversible — see *“Reverting the Zadig driver”* in the [Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf) to switch back to Live. macOS is not affected.
