@@ -138,7 +138,8 @@ pip install git+https://github.com/ffont/push2-python.git
 
 For Windows, you also need:
 - **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** for virtual MIDI ports
-- **[Zadig](https://zadig.akeo.ie/)** for the Push 2 WinUSB driver
+
+(The Push 2's USB driver installs automatically on Windows — no Zadig needed.)
 
 For the Plugin Mapper (optional):
 ```bash
@@ -176,16 +177,16 @@ cd src && python3 main.py
 
 ### Windows
 
-Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** for the full step-by-step (loopMIDI, Zadig, Nuendo configuration).
+Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
 
 Quick start:
 
 1. Download **`Push2NuendoBridge-vX.Y.Z-Windows.zip`** from the [Releases](https://github.com/mbourque-mix/Push2Nuendo-Bridge/releases) page and unzip it anywhere.
 2. Install **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** and create four ports: `NuendoBridge In`, `NuendoBridge Out`, `BridgeNotes`, `BridgeNotes In`.
-3. Install the **WinUSB driver for the Push 2 with [Zadig](https://zadig.akeo.ie/)** (one time). **Critical:** target the Push 2's **display/bulk interface** (USB ID `2982:1967`) — **not** the MIDI interface, or you will break MIDI on the Push. The Windows Installation Guide has the exact step-by-step.
+3. **Plug in the Push 2** — Windows installs the USB driver (WinUSB) automatically the first time. No Zadig, no manual driver step.
 4. **Double-click the `.exe`.** A console shows the status and a clickable Plugin Mapper link (`http://localhost:8100`).
 
-> **Windows note:** the bridge and Ableton Live share the same Push 2 USB endpoint, so only one can control the Push at a time — close one to use the other. Recent Live versions (12.x tested) work fine with the WinUSB driver Zadig installs, so no driver swap is needed in normal use. See the [Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf) for how to restore Ableton's original driver if you ever need to (older Live setups). macOS is not affected.
+> **Windows note:** the bridge and Ableton Live share the same Push 2 USB connection, so only one can control the Push at a time — close one to use the other. No driver change is needed to go back and forth (tested with Live 12). macOS is not affected.
 
 > No Python install needed — the interpreter, all dependencies and the libusb runtime are bundled in the `.exe`.
 
