@@ -7,10 +7,17 @@ build/
 *.spec
 *.egg
 
+# Logs / scratch
+*.log
+
 # Virtual environments
 venv/
 .venv/
+.venv*/
 env/
+
+# Driver-switch helper runtime artifacts (Windows)
+tools/driver-switch/winusb-cache/
 
 # IDE
 .idea/
