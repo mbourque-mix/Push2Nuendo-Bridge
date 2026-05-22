@@ -438,7 +438,8 @@ class Push2Controller:
         # Layout button long-press (keyswitch config) + keyswitch latch tracking
         self._layout_press_active = False  # True while a non-shift Layout press is held
         self._layout_long_fired = False    # True once the long-press action fired
-        self._ks_held_note = None          # MIDI note currently held by keyswitch latch
+        self._ks_held_note = None          # MIDI note currently sounding from the KS section (mono)
+        self._ks_held_ksi = None           # KS index currently sounding, or None
 
         # Callback for initial scan when Nuendo connects
         self.nuendo_link._on_connected_callback = lambda: self._initial_bank_refresh()
@@ -2291,37 +2292,73 @@ class Push2Controller:
             pg.set_ks_override(ks_index, current + increment)
         self._update_pad_colors()
 
-    def _handle_ks_latch_press(self, ksi, row, col, velocity):
-        """Latch behavior: hold a keyswitch note until it (or another) is re-pressed."""
+    def _handle_ks_press(self, ksi, row, col, velocity):
+        """Keyswitch press — the KS section is monophonic (one note at a time).
+
+        Momentary: pressing a new KS releases the one currently sounding
+        (last-note priority); release sends note-off.
+        Latch: the note stays held until the same pad (toggle) or another
+        pad (radio) is pressed.
+        """
         pg = self.pad_grid
         note = pg.pad_to_note(row, col)
         if note < 0:
             return
         if self.state.accent_enabled:
             velocity = self.state.accent_velocity
-        if pg.ks_latched_index == ksi:
-            # Re-pressing the active keyswitch releases it
-            if self._ks_held_note is not None:
-                self.nuendo_link.send_note_off(self._ks_held_note)
-            pg.ks_latched_index = None
+
+        same = (self._ks_held_ksi == ksi)
+
+        # Release whatever KS note is currently sounding (monophonic section)
+        if self._ks_held_note is not None:
+            self.nuendo_link.send_note_off(self._ks_held_note)
+            if self._ks_held_ksi is not None:
+                pr, pc = pg._ks_pad_position(self._ks_held_ksi)
+                pg.pad_pressed[pr][pc] = False
             self._ks_held_note = None
-        else:
-            # Release the previous latched note, latch the new one
-            if self._ks_held_note is not None:
-                self.nuendo_link.send_note_off(self._ks_held_note)
+            self._ks_held_ksi = None
+            pg.ks_latched_index = None
+
+        # Latch + re-press of the same pad = leave it off (toggle release)
+        if not (pg.ks_latch and same):
             self.nuendo_link.send_note_on(note, velocity)
-            pg.ks_latched_index = ksi
             self._ks_held_note = note
+            self._ks_held_ksi = ksi
+            if pg.ks_latch:
+                pg.ks_latched_index = ksi
+            else:
+                pg.pad_pressed[row][col] = True
+
+        self._update_pad_colors()
+
+    def _handle_ks_release(self, ksi, row, col):
+        """Keyswitch release. Latch keeps the note; momentary sends note-off."""
+        pg = self.pad_grid
+        if pg.ks_latch:
+            return  # latched: note stays held until re-selected
+        # Momentary: release only the pad that is actually sounding
+        if self._ks_held_ksi == ksi and self._ks_held_note is not None:
+            self.nuendo_link.send_note_off(self._ks_held_note)
+            self._ks_held_note = None
+            self._ks_held_ksi = None
+        pg.pad_pressed[row][col] = False
         self._update_pad_colors()
 
     def _release_ks_latch(self):
-        """Send note-off for any held latch note and clear the latch state."""
+        """Send note-off for any held KS note and clear the held/latch state."""
         if self._ks_held_note is not None:
             try:
                 self.nuendo_link.send_note_off(self._ks_held_note)
             except Exception:
                 pass
+        if self._ks_held_ksi is not None:
+            try:
+                pr, pc = self.pad_grid._ks_pad_position(self._ks_held_ksi)
+                self.pad_grid.pad_pressed[pr][pc] = False
+            except Exception:
+                pass
         self._ks_held_note = None
+        self._ks_held_ksi = None
         self.pad_grid.ks_latched_index = None
 
     def _update_ks_edit_leds(self):
@@ -2348,11 +2385,11 @@ class Push2Controller:
             self._handle_overview_pad(row, col)
             return
 
-        # Keyswitch latch: hold the note until re-selected (radio + toggle)
-        if self.pad_grid.is_keyswitch_layout and self.pad_grid.ks_latch:
+        # Keyswitch section is monophonic (latch or momentary): handle separately
+        if self.pad_grid.is_keyswitch_layout:
             ksi = self.pad_grid._ks_index_for_pad(row, col)
             if ksi is not None:
-                self._handle_ks_latch_press(ksi, row, col, velocity)
+                self._handle_ks_press(ksi, row, col, velocity)
                 return
 
         self.pad_grid.pad_pressed[row][col] = True
@@ -2399,9 +2436,11 @@ class Push2Controller:
         if self.state.mode == MODE_OVERVIEW:
             return
 
-        # Keyswitch latch: ignore release, the note stays held until re-selected
-        if self.pad_grid.is_keyswitch_layout and self.pad_grid.ks_latch:
-            if self.pad_grid._ks_index_for_pad(row, col) is not None:
+        # Keyswitch section: monophonic release (latch keeps the note held)
+        if self.pad_grid.is_keyswitch_layout:
+            ksi = self.pad_grid._ks_index_for_pad(row, col)
+            if ksi is not None:
+                self._handle_ks_release(ksi, row, col)
                 return
 
         self.pad_grid.pad_pressed[row][col] = False
