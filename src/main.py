@@ -128,13 +128,12 @@ PLUGIN_MAPPER_URL = "http://localhost:8100"
 
 def _announce_plugin_mapper(mapper_status):
     """
-    Print a prominent, clickable Plugin Mapper link in the console and
-    open it in the default browser once on startup.
+    Print a prominent, clickable Plugin Mapper link in the console.
 
     Most modern terminals (Windows Terminal, macOS Terminal, iTerm2)
     render bare ``http://`` URLs as clickable links, so we frame the URL
-    on its own line for easy access. Auto-open can be disabled with
-    ``--no-browser`` / ``-nb``.
+    on its own line for easy access. The browser is NOT opened
+    automatically; pass ``--open-mapper`` to open it on startup.
     """
     if "running at" not in (mapper_status or ""):
         return  # mapper not available — nothing to link to
@@ -146,13 +145,14 @@ def _announce_plugin_mapper(mapper_status):
     print("  +-----------------------------------------------+")
     print()
 
-    if "--no-browser" in sys.argv or "-nb" in sys.argv:
-        return
-    try:
-        import webbrowser
-        webbrowser.open(PLUGIN_MAPPER_URL)
-    except Exception:
-        pass  # browser auto-open is best-effort only
+    # Auto-open is opt-in (the link above is clickable; the menu-bar / tray
+    # menus open it on demand). Use --open-mapper to open it at startup.
+    if "--open-mapper" in sys.argv:
+        try:
+            import webbrowser
+            webbrowser.open(PLUGIN_MAPPER_URL)
+        except Exception:
+            pass  # browser auto-open is best-effort only
 
 
 def terminal_main():

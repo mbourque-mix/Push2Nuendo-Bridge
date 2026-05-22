@@ -395,6 +395,26 @@ class PadGrid:
     def pad_to_note(self, row, col):
         """Converts a pad position to a MIDI note."""
         return self.note_map[row][col]
+
+    def note_range_label(self):
+        """Lowest-highest PLAYABLE note as a short label, e.g. 'C1-G5'.
+
+        Ignores inactive pads (note -1) and, in keyswitch layouts, the
+        keyswitch pads (whose absolute notes would skew the range).
+        Returns '' if no playable pad.
+        """
+        ks = self.is_keyswitch_layout
+        notes = []
+        for r in range(8):
+            for c in range(8):
+                if ks and self._ks_index_for_pad(r, c) is not None:
+                    continue  # skip keyswitch pads
+                n = self.note_map[r][c]
+                if n >= 0:
+                    notes.append(n)
+        if not notes:
+            return ""
+        return f"{midi_note_name(min(notes))}-{midi_note_name(max(notes))}"
     
     def midi_note_to_pad(self, midi_note):
         """Converts a Push 2 pad MIDI note (36-99) to (row, col) in note_map convention.

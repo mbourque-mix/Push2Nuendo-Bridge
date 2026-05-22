@@ -483,6 +483,9 @@ class AppState:
         self.aftertouch_mode = AT_POLY  # default: polyphonic aftertouch
         self.velocity_curve = VC_LINEAR  # default: linear velocity
         
+        # Pad note range label for the Mix footer (e.g. "C1-G5"), updated by the controller
+        self.pad_note_range = ""
+
         # ── XY pad (Shift+Device) ──
         # Each axis targets either a selected-track parameter or a raw MIDI CC.
         self.xy_cat_x = "track"      # 'track' or 'cc'

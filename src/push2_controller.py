@@ -1462,14 +1462,8 @@ class Push2Controller:
                     self._update_overview_pads()
                 return
         
-        # ── Rescan (Shift + 7th lower row button) ──
-        if button_name == BTN_RESCAN and state.shift_held:
-            for t in state.tracks:
-                t.name = f"Track {t.index + 1}"
-                t.color = (150, 150, 150)
-            self._full_scan()
-            return
-        
+        # (Rescan moved to the Setup page, lower row 8.)
+
         # ── Mode MIDI CC : intercepter les boutons ──
         if state.mode == MODE_MIDICC:
             # Upper row → toggle CC edit mode per channel
@@ -1506,6 +1500,14 @@ class Push2Controller:
             # Lower row → change settings on the current page
             for i, btn in enumerate(BUTTONS_LOWER_ROW):
                 if button_name == btn:
+                    if i == 7:
+                        # Rescan tracks (available on every Setup page)
+                        for t in state.tracks:
+                            t.name = f"Track {t.index + 1}"
+                            t.color = (150, 150, 150)
+                        self._full_scan()
+                        self._update_all_leds()
+                        return
                     if state.setup_page == 0:
                         # Page 0: MIDI Controller — Aftertouch mode (buttons 1-3)
                         if i == 0:
@@ -2730,6 +2732,11 @@ class Push2Controller:
 
     def _update_pad_colors(self):
         """Update all pad colors."""
+        # Keep the Mix-footer note range in sync with the current pad layout.
+        try:
+            self.state.pad_note_range = self.pad_grid.note_range_label()
+        except Exception:
+            pass
         if not self.push or not self.push.midi_is_configured():
             return
         
@@ -3811,7 +3818,9 @@ class Push2Controller:
             for i in range(8):
                 cc = 20 + i
                 try:
-                    if state.setup_page == 0:
+                    if i == 7:
+                        self._send_midi_to_push([0xB0, cc, BTN_DIM])  # Rescan (all pages)
+                    elif state.setup_page == 0:
                         if i < 3:
                             is_sel = (state.aftertouch_mode == AT_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])

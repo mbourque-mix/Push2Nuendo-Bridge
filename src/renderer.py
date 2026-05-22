@@ -1361,6 +1361,12 @@ def _draw_bottom_bar(draw, state):
     lower_mode = getattr(state, 'lower_mode', 'mute')
     label, color = lower_labels.get(lower_mode, ("MUTE", (200, 120, 0)))
     draw.text((120, 147), label, font=FONT_SM, fill=color)
+
+    # Pad MIDI note range (Mix page only)
+    if state.mode == MODE_VOLUME:
+        note_range = getattr(state, 'pad_note_range', '')
+        if note_range:
+            draw.text((172, 147), f"♪ {note_range}", font=FONT_SM, fill=(120, 170, 130))
     
     # Current bank (at center)
     bank_num = state.bank_offset // BANK_SIZE + 1
@@ -1393,9 +1399,6 @@ def _draw_bottom_bar(draw, state):
         draw.text((SCREEN_WIDTH - 110, 147), "○ WAITING", font=FONT_SM,
                   fill=COLOR_WARNING)
     
-    # RESCAN label above the 7th bottom button (index 6)
-    rescan_x = 6 * CELL_WIDTH + CELL_WIDTH // 2 - 16
-    draw.text((rescan_x, 147), "RESCAN", font=FONT_SM, fill=(120, 120, 120))
 
 
 # ─────────────────────────────────────────────
@@ -1726,7 +1729,12 @@ def _render_setup_screen(state):
             tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
             tx = x + (CELL_WIDTH - tw) // 2
             draw.text((tx, 146), label, fill=color, font=FONT_SM)
-    
+
+    # Rescan action on lower row 8 (available on every Setup page)
+    rx = 7 * CELL_WIDTH
+    rtw = FONT_SM.getlength("RESCAN") if hasattr(FONT_SM, 'getlength') else 36
+    draw.text((rx + (CELL_WIDTH - rtw) // 2, 146), "RESCAN", fill=(150, 150, 150), font=FONT_SM)
+
     return _to_push2_frame(img)
 
 def _draw_velocity_preview(draw, x, y, w, h, vc_mode, color=None, fixed_vel=100):
