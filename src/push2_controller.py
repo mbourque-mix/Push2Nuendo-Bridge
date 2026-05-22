@@ -21,7 +21,8 @@ import time
 from state import (
     AppState, BANK_SIZE,
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, AT_POLY, AT_CHANNEL, AT_OFF,
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
+    AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
     CC_ABSOLUTE, CC_PICKUP
 )
@@ -441,6 +442,11 @@ class Push2Controller:
         self._ks_held_note = None          # MIDI note currently sounding from the KS section (mono)
         self._ks_held_ksi = None           # KS index currently sounding, or None
 
+        # XY pad (MODE_XY): pressed-pad pressures + smoothed centroid reference
+        self._xy_pressures = {}            # {(row, col): pressure} for currently-touched pads
+        self._xy_centroid = None           # last smoothed (cx, cy) centroid, or None when lifted
+        self._xy_last_sent = (None, None)  # last integer (x, y) CC values sent
+
         # Callback for initial scan when Nuendo connects
         self.nuendo_link._on_connected_callback = lambda: self._initial_bank_refresh()
         
@@ -688,6 +694,27 @@ class Push2Controller:
                         self.state.cc_numbers[encoder_index], new_val)
             return
         
+        # XY pad mode: Enc1/2 pick the X/Y item (within its category), Enc3/4 = feel
+        if self.state.mode == MODE_XY:
+            st = self.state
+            if encoder_index == 0:                 # Enc1 = X param
+                if st.xy_cat_x == 'cc':
+                    st.xy_cc_x = max(0, min(127, st.xy_cc_x + increment))
+                else:
+                    st.xy_track_param_x = max(0, min(len(XY_TRACK_PARAMS) - 1,
+                                                     st.xy_track_param_x + increment))
+            elif encoder_index == 1:               # Enc2 = Y param
+                if st.xy_cat_y == 'cc':
+                    st.xy_cc_y = max(0, min(127, st.xy_cc_y + increment))
+                else:
+                    st.xy_track_param_y = max(0, min(len(XY_TRACK_PARAMS) - 1,
+                                                     st.xy_track_param_y + increment))
+            elif encoder_index == 3:               # Enc4 = Sensitivity
+                st.xy_sensitivity = max(0.1, min(4.0, st.xy_sensitivity + increment * 0.05))
+            elif encoder_index == 4:               # Enc5 = Smooth
+                st.xy_smooth = max(0.0, min(0.9, st.xy_smooth + increment * 0.05))
+            return
+
         # Control Room mode: redirect encoders to CR CCs
         if self.state.mode == MODE_CR:
             page_def = CR_PAGES.get(self.cr_state.page, {})
@@ -940,6 +967,26 @@ class Push2Controller:
             if self._handle_ks_edit_button(button_name):
                 return
 
+        # ── XY pad: upper row disabled; lower 1/2 toggle the X/Y category ──
+        if state.mode == MODE_XY:
+            if button_name in BUTTONS_UPPER_ROW:
+                return
+            if button_name in BUTTONS_LOWER_ROW:
+                idx = BUTTONS_LOWER_ROW.index(button_name)
+                if idx == 0:
+                    state.xy_cat_x = 'cc' if state.xy_cat_x == 'track' else 'track'
+                    self._update_lower_row_leds()
+                    return
+                if idx == 1:
+                    state.xy_cat_y = 'cc' if state.xy_cat_y == 'track' else 'track'
+                    self._update_lower_row_leds()
+                    return
+                if 4 <= idx <= 7:
+                    # Mute / Solo / Monitor / Rec on the selected track (like QC page)
+                    self._toggle_selected_track_function(idx - 4)
+                    return
+                return
+
         # ── User (toggle Control Room mode) ──
         if button_name == BTN_USER:
             state.user_held = True
@@ -1159,7 +1206,7 @@ class Push2Controller:
                     self._update_lower_row_leds()
                     self._update_nav_leds()
                 return
-            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE):
+            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY):
                 if state.selected_track_index > 0:
                     new_idx = state.selected_track_index - 1
                     need_bank = new_idx < state.bank_offset
@@ -1233,7 +1280,7 @@ class Push2Controller:
                     self._update_lower_row_leds()
                     self._update_nav_leds()
                 return
-            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE):
+            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY):
                 if state.selected_track_index < state.total_tracks - 1:
                     new_idx = state.selected_track_index + 1
                     current_mode = state.mode
@@ -1384,26 +1431,15 @@ class Push2Controller:
         
         # ── Overview mode ──
         if button_name == BTN_MODE_OVERVIEW:
-            if state.mode == MODE_OVERVIEW:
+            # Session = XY pad (Overview mode disabled for now)
+            if state.mode == MODE_XY:
                 self._set_mode(MODE_VOLUME)
-                # Reset modified palette entries to black
-                for idx in getattr(self, '_modified_palette', set()):
-                    self._send_midi_to_push([
-                        0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x03,
-                        idx & 0x7F,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0xF7
-                    ])
-                self._modified_palette = set()
-                # Flush palette reset
-                self._send_midi_to_push([0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x05, 0xF7])
-                # Turn off all pads then restore normal colors
-                for note in range(36, 100):
-                    self._send_midi_to_push([0x90, note, 0])
-                self._update_pad_colors()
             else:
-                state.overview_page = 0
-                self._set_mode(MODE_OVERVIEW)
-                self._update_overview_pads()
+                self._set_mode(MODE_XY)
+                self._xy_pressures = {}
+                self._xy_centroid = None
+                self._xy_last_sent = (None, None)
+            self._update_pad_colors()
             return
         
         # ── Page ◄/► for Overview pagination ──
@@ -2165,6 +2201,10 @@ class Push2Controller:
         if button_name == BTN_USER:
             self.state.user_held = False
 
+        # XY pad: upper row is disabled
+        if self.state.mode == MODE_XY and button_name in BUTTONS_UPPER_ROW:
+            return
+
         # ── Layout button release: short press = cycle layout / close KS config ──
         if BTN_LAYOUT and button_name == BTN_LAYOUT and self._layout_press_active:
             self._layout_press_active = False
@@ -2367,6 +2407,114 @@ class Push2Controller:
         self._update_lower_row_leds()
 
     # ─────────────────────────────────────────
+    # XY pad (MODE_XY) — relative input, absolute CC output
+    # ─────────────────────────────────────────
+
+    def _xy_update(self, event, row, col, pressure):
+        """Track pressed-pad pressures and reprocess the centroid on each event."""
+        if event == 'press':
+            self._xy_pressures[(row, col)] = max(1, int(pressure))
+        elif event == 'after':
+            if (row, col) in self._xy_pressures:
+                self._xy_pressures[(row, col)] = max(1, int(pressure))
+        elif event == 'release':
+            self._xy_pressures.pop((row, col), None)
+        self._xy_process()
+
+    def _xy_process(self):
+        """Compute the pressure-weighted centroid and feed its delta into the
+        per-axis accumulators (relative). Output is sent as absolute CC."""
+        st = self.state
+        if not self._xy_pressures:
+            # Finger lifted: drop the reference so the next touch causes no jump.
+            self._xy_centroid = None
+            return
+        total = sum(self._xy_pressures.values())
+        if total <= 0:
+            return
+        cx = sum(c * p for (r, c), p in self._xy_pressures.items()) / total
+        cy = sum(r * p for (r, c), p in self._xy_pressures.items()) / total
+
+        if self._xy_centroid is None:
+            # First contact = reference point only (no movement, no jump).
+            self._xy_centroid = (cx, cy)
+            return
+
+        # Smooth the centroid (low-pass) to tame pressure jitter.
+        a = max(0.0, min(0.9, st.xy_smooth))
+        scx = self._xy_centroid[0] * a + cx * (1 - a)
+        scy = self._xy_centroid[1] * a + cy * (1 - a)
+
+        dx = scx - self._xy_centroid[0]
+        dy = self._xy_centroid[1] - scy   # invert Y: moving up increases the value
+        self._xy_centroid = (scx, scy)
+
+        scale = (127.0 / 7.0) * max(0.1, st.xy_sensitivity)
+        st.xy_val_x = max(0.0, min(127.0, st.xy_val_x + dx * scale))
+        st.xy_val_y = max(0.0, min(127.0, st.xy_val_y + dy * scale))
+        self._xy_send()
+
+    def _xy_send(self):
+        """Route the current X/Y accumulators to their assigned targets (on change)."""
+        st = self.state
+        ix = int(round(st.xy_val_x))
+        iy = int(round(st.xy_val_y))
+        lx, ly = self._xy_last_sent
+        if ix != lx:
+            self._xy_route_axis(st.xy_cat_x, st.xy_track_param_x, st.xy_cc_x, ix)
+        if iy != ly:
+            self._xy_route_axis(st.xy_cat_y, st.xy_track_param_y, st.xy_cc_y, iy)
+        self._xy_last_sent = (ix, iy)
+        self._update_pad_colors()
+
+    def _xy_route_axis(self, category, track_param, cc_num, value):
+        """Send one axis value (0-127) to its assigned target on the selected track."""
+        st = self.state
+        if category == 'cc':
+            self.nuendo_link.send_midi_cc_to_notes(cc_num, value)
+            return
+        # Track parameter (selected track). Volume/Pan are addressed by bank slot.
+        slot = st.selected_track_index - st.bank_offset
+        norm = value / 127.0
+        if track_param == 0:        # Volume
+            if 0 <= slot < 8:
+                self.nuendo_link.send_volume_change(slot, norm)
+        elif track_param == 1:      # Pan
+            if 0 <= slot < 8:
+                self.nuendo_link.send_pan_change(slot, norm * 2.0 - 1.0)
+        else:                       # QC1-8 (index 2..9 -> qc 0..7)
+            self.nuendo_link.send_quick_control_change(track_param - 2, norm)
+
+    def xy_axis_label(self, axis):
+        """Human label for an axis assignment, e.g. 'Volume', 'QC3', 'CC16'."""
+        st = self.state
+        cat = st.xy_cat_x if axis == 'x' else st.xy_cat_y
+        if cat == 'cc':
+            return f"CC{st.xy_cc_x if axis == 'x' else st.xy_cc_y}"
+        idx = st.xy_track_param_x if axis == 'x' else st.xy_track_param_y
+        return XY_TRACK_PARAMS[idx]
+
+    def _update_xy_pads(self):
+        """Light a crosshair at the current X/Y position."""
+        from pad_grid import PAD_OFF, PAD_GREEN, PAD_CYAN
+        st = self.state
+        tx = int(round(st.xy_val_x / 127.0 * 7))
+        ty = 7 - int(round(st.xy_val_y / 127.0 * 7))   # row (0=top, 7=bottom)
+        for row in range(8):
+            for col in range(8):
+                if row == ty and col == tx:
+                    color = PAD_GREEN
+                elif row == ty or col == tx:
+                    color = PAD_CYAN
+                else:
+                    color = PAD_OFF
+                try:
+                    pad_note = 36 + (7 - row) * 8 + col
+                    self._send_midi_to_push([0x90, pad_note, color])
+                except Exception:
+                    pass
+
+    # ─────────────────────────────────────────
     # Pad handling
     # ─────────────────────────────────────────
 
@@ -2375,7 +2523,11 @@ class Push2Controller:
         row, col = pad_ij
         if row is None:
             return
-        
+
+        if self.state.mode == MODE_XY:
+            self._xy_update('press', row, col, velocity)
+            return
+
         if self.pad_grid.scale_mode:
             self._handle_scale_pad(row, col)
             return
@@ -2429,7 +2581,11 @@ class Push2Controller:
         row, col = pad_ij
         if row is None:
             return
-        
+
+        if self.state.mode == MODE_XY:
+            self._xy_update('release', row, col, velocity)
+            return
+
         if self.pad_grid.scale_mode:
             return
         
@@ -2484,6 +2640,9 @@ class Push2Controller:
         """
         row, col = pad_ij
         if row is None:
+            return
+        if self.state.mode == MODE_XY:
+            self._xy_update('after', row, col, velocity)
             return
         if self.state.aftertouch_mode == AT_OFF:
             return
@@ -2570,7 +2729,11 @@ class Push2Controller:
         if self.state.mode == MODE_OVERVIEW:
             self._update_overview_pads()
             return
-        
+
+        if self.state.mode == MODE_XY:
+            self._update_xy_pads()
+            return
+
         if self.pad_grid.scale_mode:
             self._update_scale_mode_pads()
             return
@@ -3343,9 +3506,18 @@ class Push2Controller:
         """Upper row LEDs (CC 102-109)."""
         if not self.push:
             return
-        
+
         state = self.state
-        
+
+        # ── XY pad: upper row disabled (all off) ──
+        if state.mode == MODE_XY:
+            for i in range(8):
+                try:
+                    self._send_midi_to_push([0xB0, 102 + i, LED_OFF])
+                except Exception:
+                    pass
+            return
+
         # ── Setup mode: upper row = page tabs ──
         if state.mode == MODE_SETUP:
             SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
@@ -3588,6 +3760,25 @@ class Push2Controller:
             return
 
         state = self.state
+
+        # ── XY pad: lower 1/2 = X/Y category (track=white, cc=yellow); 5-8 = M/S/Mon/R ──
+        if state.mode == MODE_XY:
+            sel = state.selected_track_index
+            track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
+            colors = [LED_OFF] * 8
+            colors[0] = BTN_YELLOW if state.xy_cat_x == 'cc' else BTN_WHITE
+            colors[1] = BTN_YELLOW if state.xy_cat_y == 'cc' else BTN_WHITE
+            if track:
+                colors[4] = BTN_YELLOW if track.is_muted else BTN_DIM
+                colors[5] = BTN_BLUE if track.is_solo else BTN_DIM
+                colors[6] = BTN_ORANGE if track.is_monitored else BTN_DIM
+                colors[7] = BTN_RED if track.is_armed else BTN_DIM
+            for i in range(8):
+                try:
+                    self._send_midi_to_push([0xB0, 20 + i, colors[i]])
+                except Exception:
+                    pass
+            return
 
         # ── Keyswitch config screen: lower row = config buttons ──
         if self.pad_grid.ks_edit:

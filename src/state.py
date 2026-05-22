@@ -24,6 +24,10 @@ MODE_SETUP   = "setup"    # Setup page (aftertouch mode, etc.)
 MODE_MIDICC  = "midicc"   # MIDI CC controller page
 MODE_BROWSER = "browser"  # Plugin browser (load plugins into insert slots)
 MODE_CHANNEL_STRIP = "channel_strip"  # Channel Strip view of the selected track
+MODE_XY      = "xy"       # XY pad: 64 pads control 2 assignable params (relative)
+
+# XY pad — selectable selected-track parameters (index order matters)
+XY_TRACK_PARAMS = ["Volume", "Pan", "QC1", "QC2", "QC3", "QC4", "QC5", "QC6", "QC7", "QC8"]
 
 # Channel Strip sub-pages (used when mode == MODE_CHANNEL_STRIP)
 CS_PAGE_OVERVIEW = "overview"
@@ -479,6 +483,19 @@ class AppState:
         self.aftertouch_mode = AT_POLY  # default: polyphonic aftertouch
         self.velocity_curve = VC_LINEAR  # default: linear velocity
         
+        # ── XY pad (Shift+Device) ──
+        # Each axis targets either a selected-track parameter or a raw MIDI CC.
+        self.xy_cat_x = "track"      # 'track' or 'cc'
+        self.xy_cat_y = "track"
+        self.xy_track_param_x = 0    # index into XY_TRACK_PARAMS (0=Vol,1=Pan,2-9=QC1-8)
+        self.xy_track_param_y = 1    # default Pan
+        self.xy_cc_x = 16            # raw CC number when category == 'cc'
+        self.xy_cc_y = 17
+        self.xy_val_x = 64.0         # current X value accumulator (0-127, float)
+        self.xy_val_y = 64.0         # current Y value accumulator (0-127, float)
+        self.xy_sensitivity = 1.0    # delta scale (0.1-4.0): <1 finer, >1 faster
+        self.xy_smooth = 0.5         # centroid smoothing 0..0.9 (higher = smoother)
+
         # ── MIDI CC page ──
         self.cc_numbers = [1, 2, 7, 8, 10, 11, 64, 65]  # default CC assignments
         self.cc_values = [0] * 8       # current CC values (0-127) — encoder position

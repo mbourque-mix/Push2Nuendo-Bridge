@@ -18,7 +18,8 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 from state import (
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, AT_POLY, AT_CHANNEL, AT_OFF,
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
+    AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
     CC_ABSOLUTE, CC_PICKUP,
     BRIDGE_VERSION, BANK_SIZE, AppState,
@@ -1412,6 +1413,73 @@ _CC_NAMES = {
     76: "Vib Rate", 77: "Vib Depth", 78: "Vib Delay",
     91: "Reverb", 92: "Tremolo", 93: "Chorus", 94: "Detune", 95: "Phaser",
 }
+
+def _xy_axis_label(state, axis):
+    """Human label for an XY axis assignment, e.g. 'Volume', 'QC3', 'CC16'."""
+    cat = state.xy_cat_x if axis == 'x' else state.xy_cat_y
+    if cat == 'cc':
+        return f"CC{state.xy_cc_x if axis == 'x' else state.xy_cc_y}"
+    idx = state.xy_track_param_x if axis == 'x' else state.xy_track_param_y
+    return XY_TRACK_PARAMS[idx]
+
+
+def _render_xy_screen(state):
+    """XY pad screen: selected-track header + X/Y assignments and live values."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    sel = state.selected_track
+    track_name = sel.name if sel else "---"
+    tcol = sel.color if sel else (90, 90, 90)
+    hdr = (min(tcol[0], 180), min(tcol[1], 180), min(tcol[2], 180))
+
+    # Header — selected track (like other modes)
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=hdr)
+    draw.text((8, 3), f"XY  -  {track_name}", font=FONT_MD, fill=_text_color_for_bg(hdr))
+
+    cw = SCREEN_WIDTH // 8
+    def col(i):
+        return i * cw + 8
+
+    x_lbl = _xy_axis_label(state, 'x')
+    y_lbl = _xy_axis_label(state, 'y')
+    cat_x = "CC" if state.xy_cat_x == 'cc' else "Track"
+    cat_y = "CC" if state.xy_cat_y == 'cc' else "Track"
+
+    # Encoder-aligned columns: Enc1=X, Enc2=Y, Enc4=Sens, Enc5=Smooth
+    draw.text((col(0), 28), "X param", font=FONT_SM, fill=(120, 160, 220))
+    draw.text((col(0), 42), x_lbl, font=FONT_MD, fill=(180, 210, 255))
+    draw.text((col(0), 64), f"{int(round(state.xy_val_x))}", font=FONT_LG_BOLD, fill=(255, 255, 255))
+    draw.text((col(0), 92), f"({cat_x})", font=FONT_SM, fill=(120, 120, 140))
+
+    draw.text((col(1), 28), "Y param", font=FONT_SM, fill=(120, 220, 170))
+    draw.text((col(1), 42), y_lbl, font=FONT_MD, fill=(180, 255, 210))
+    draw.text((col(1), 64), f"{int(round(state.xy_val_y))}", font=FONT_LG_BOLD, fill=(255, 255, 255))
+    draw.text((col(1), 92), f"({cat_y})", font=FONT_SM, fill=(120, 120, 140))
+
+    draw.text((col(3), 28), "Sens", font=FONT_SM, fill=(150, 150, 170))
+    draw.text((col(3), 42), f"{state.xy_sensitivity:.2f}", font=FONT_MD, fill=(220, 220, 230))
+    draw.text((col(4), 28), "Smooth", font=FONT_SM, fill=(150, 150, 170))
+    draw.text((col(4), 42), f"{state.xy_smooth:.2f}", font=FONT_MD, fill=(220, 220, 230))
+
+    draw.text((col(0), 118), "Lower 1/2: switch X/Y between Track params and MIDI CC",
+              font=FONT_SM, fill=(110, 110, 130))
+
+    # Footer — lower-row labels (1/2 = X/Y category, 5-8 = M/S/Mon/Rec, lit when active)
+    draw.rectangle([0, 143, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(22, 22, 28))
+    draw.text((col(0), 147), f"X:{cat_x}", font=FONT_SM, fill=(150, 200, 255))
+    draw.text((col(1), 147), f"Y:{cat_y}", font=FONT_SM, fill=(150, 255, 200))
+    foot = [
+        (4, "MUTE", (255, 200, 0),  bool(sel and sel.is_muted)),
+        (5, "SOLO", (90, 150, 255), bool(sel and sel.is_solo)),
+        (6, "MON",  (255, 150, 0),  bool(sel and sel.is_monitored)),
+        (7, "REC",  (255, 70, 70),  bool(sel and sel.is_armed)),
+    ]
+    for i, label, on_color, is_on in foot:
+        draw.text((col(i), 147), label, font=FONT_SM, fill=on_color if is_on else (110, 110, 130))
+
+    return _to_push2_frame(img)
+
 
 def _render_midicc_screen(state):
     """Render the MIDI CC controller page."""
@@ -2886,7 +2954,10 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
     
     if state.mode == MODE_MIDICC:
         return _render_midicc_screen(state)
-    
+
+    if state.mode == MODE_XY:
+        return _render_xy_screen(state)
+
     if state.mode == MODE_BROWSER:
         return _render_browser_screen(state)
     
