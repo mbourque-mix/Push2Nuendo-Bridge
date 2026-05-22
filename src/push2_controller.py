@@ -439,6 +439,7 @@ class Push2Controller:
         # Layout button long-press (keyswitch config) + keyswitch latch tracking
         self._layout_press_active = False  # True while a non-shift Layout press is held
         self._layout_long_fired = False    # True once the long-press action fired
+        self._layout_press_id = 0          # generation counter to cancel stale timers
         self._ks_held_note = None          # MIDI note currently sounding from the KS section (mono)
         self._ks_held_ksi = None           # KS index currently sounding, or None
 
@@ -1059,13 +1060,19 @@ class Push2Controller:
                 self.state._touchstrip_overlay = labels[self.state.touchstrip_mode]
                 self.state._touchstrip_overlay_until = time.time() + 2.0
                 return
-            # Non-shift: short press cycles layout, long press opens KS config
+            # Non-shift: short press cycles layout, long press opens KS config.
+            # A press id cancels stale long-press timers (so a fast double-click
+            # does not let a previous press's timer fire the KS config).
             self._layout_press_active = True
             self._layout_long_fired = False
+            self._layout_press_id += 1
+            my_id = self._layout_press_id
             import threading
-            def _layout_long_press():
+            def _layout_long_press(pid=my_id):
                 time.sleep(0.5)
-                if self._layout_press_active and self.pad_grid.is_keyswitch_layout:
+                if (self._layout_press_active and self._layout_press_id == pid
+                        and self.pad_grid.is_keyswitch_layout
+                        and self.state.mode != MODE_XY):
                     self._layout_long_fired = True
                     self.pad_grid.ks_edit = not self.pad_grid.ks_edit
                     if self.pad_grid.ks_edit:
@@ -1377,10 +1384,8 @@ class Push2Controller:
                     self._set_mode(MODE_MIDICC)
                     state.cc_edit_mode = False
                 return
-            # Return to MIDI note pads (exit Overview if active)
-            if state.mode == MODE_OVERVIEW:
-                self._set_mode(MODE_VOLUME)
-            if state.mode == MODE_MIDICC:
+            # Return to MIDI note pads (exit Overview / MIDI CC / XY if active)
+            if state.mode in (MODE_OVERVIEW, MODE_MIDICC, MODE_XY):
                 self._set_mode(MODE_VOLUME)
             self._update_pad_colors()
             return
@@ -2212,7 +2217,10 @@ class Push2Controller:
                 self._layout_long_fired = False
                 return
             # Short press
-            if self.pad_grid.ks_edit:
+            if self.state.mode == MODE_XY:
+                # In XY mode the pads are the XY surface — Layout returns to note pads
+                self._set_mode(MODE_VOLUME)
+            elif self.pad_grid.ks_edit:
                 self.pad_grid.ks_edit = False
             else:
                 self._release_ks_latch()
