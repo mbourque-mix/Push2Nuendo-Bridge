@@ -25,7 +25,10 @@ from state import (
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
     CC_ABSOLUTE, CC_PICKUP
 )
-from pad_grid import PadGrid
+from pad_grid import (
+    PadGrid, KS_CHROMATIC, KS_NATURALS,
+    LAYOUT_64, LAYOUT_KS8, LAYOUT_KS16, LAYOUT_DRUM,
+)
 from overview import compute_overview_layout, get_pad_color_for_overview
 from repeat import NoteRepeat
 from control_room import (
@@ -431,7 +434,12 @@ class Push2Controller:
         self._lower_row_press_time = {}  # {button_name: timestamp}
         self._lower_row_handled = {}     # {button_name: bool}
         self._lower_row_press_id = {}    # {button_name: int} — incremented each press to cancel stale timers
-        
+
+        # Layout button long-press (keyswitch config) + keyswitch latch tracking
+        self._layout_press_active = False  # True while a non-shift Layout press is held
+        self._layout_long_fired = False    # True once the long-press action fired
+        self._ks_held_note = None          # MIDI note currently held by keyswitch latch
+
         # Callback for initial scan when Nuendo connects
         self.nuendo_link._on_connected_callback = lambda: self._initial_bank_refresh()
         
@@ -619,7 +627,12 @@ class Push2Controller:
             return
         
         encoder_index = TRACK_ENCODERS.index(encoder_name)
-        
+
+        # Keyswitch config screen: encoders edit the keyswitch notes
+        if self.pad_grid.ks_edit:
+            self._handle_ks_edit_encoder(encoder_index, increment)
+            return
+
         # When Accent is held, the first encoder adjusts velocity
         if self.state.accent_held:
             if encoder_index == 0:
@@ -921,6 +934,11 @@ class Push2Controller:
                 pass
             return
         
+        # ── Keyswitch config screen: intercept lower row + arrows ──
+        if self.pad_grid.ks_edit:
+            if self._handle_ks_edit_button(button_name):
+                return
+
         # ── User (toggle Control Room mode) ──
         if button_name == BTN_USER:
             state.user_held = True
@@ -981,7 +999,7 @@ class Push2Controller:
             self._update_pad_colors()
             return
         
-        # ── Layout (toggle drum mode) ──
+        # ── Layout (cycle note layouts; Shift = touchstrip; long-press = KS config) ──
         if BTN_LAYOUT and button_name == BTN_LAYOUT:
             if state.shift_held:
                 modes = ["pitchbend", "modwheel", "volume"]
@@ -989,16 +1007,24 @@ class Push2Controller:
                 self.state.touchstrip_mode = modes[(current_idx + 1) % len(modes)]
                 self._configure_touchstrip_mode()
                 print(f"  Touchstrip mode: {self.state.touchstrip_mode}")
-                # Display mode temporarily
                 labels = {"pitchbend": "PITCH BEND", "modwheel": "MOD WHEEL", "volume": "VOLUME FADER"}
                 self.state._touchstrip_overlay = labels[self.state.touchstrip_mode]
                 self.state._touchstrip_overlay_until = time.time() + 2.0
-            else:
-                self.state.drum_mode = not self.state.drum_mode
-                self.pad_grid.drum_mode = self.state.drum_mode
-                self.pad_grid._update_note_map()
-                self._update_pad_colors()
-            self._set_button_led(BTN_LAYOUT, self.state.drum_mode)
+                return
+            # Non-shift: short press cycles layout, long press opens KS config
+            self._layout_press_active = True
+            self._layout_long_fired = False
+            import threading
+            def _layout_long_press():
+                time.sleep(0.5)
+                if self._layout_press_active and self.pad_grid.is_keyswitch_layout:
+                    self._layout_long_fired = True
+                    self.pad_grid.ks_edit = not self.pad_grid.ks_edit
+                    if self.pad_grid.ks_edit:
+                        self.pad_grid.ks_edit_page = 0
+                    self._update_pad_colors()
+                    self._update_ks_edit_leds()
+            threading.Thread(target=_layout_long_press, daemon=True).start()
             return
         
         # ── Metronome ──
@@ -2137,7 +2163,25 @@ class Push2Controller:
             self.state.accent_held = False
         if button_name == BTN_USER:
             self.state.user_held = False
-        
+
+        # ── Layout button release: short press = cycle layout / close KS config ──
+        if BTN_LAYOUT and button_name == BTN_LAYOUT and self._layout_press_active:
+            self._layout_press_active = False
+            if self._layout_long_fired:
+                self._layout_long_fired = False
+                return
+            # Short press
+            if self.pad_grid.ks_edit:
+                self.pad_grid.ks_edit = False
+            else:
+                self._release_ks_latch()
+                self.pad_grid.cycle_layout()
+                self.state.drum_mode = self.pad_grid.drum_mode  # keep state in sync
+            self._set_button_led(BTN_LAYOUT, self.pad_grid.note_layout != LAYOUT_64)
+            self._update_pad_colors()
+            self._update_ks_edit_leds()
+            return
+
         # Long press on upper row: clean up tracking
         if button_name in self._upper_row_press_time:
             was_long_press = (self._upper_row_press_time[button_name] < 0)
@@ -2200,6 +2244,92 @@ class Push2Controller:
                         break
 
     # ─────────────────────────────────────────
+    # Keyswitch config screen + latch
+    # ─────────────────────────────────────────
+
+    def _handle_ks_edit_button(self, button_name):
+        """Handle lower-row + arrow buttons while the KS config screen is open.
+
+        Returns True if the button was consumed.
+        """
+        pg = self.pad_grid
+        if button_name in BUTTONS_LOWER_ROW:
+            idx = BUTTONS_LOWER_ROW.index(button_name)
+            if idx == 0:                       # Chromatic
+                pg.set_ks_mode(KS_CHROMATIC)
+            elif idx == 1:                     # Naturals
+                pg.set_ks_mode(KS_NATURALS)
+            elif idx == 3:                     # Latch toggle
+                if not pg.toggle_ks_latch():
+                    self._release_ks_latch()
+            elif idx == 6:                     # Reset overrides
+                pg.reset_ks()
+            elif idx == 7:                     # Done — close config
+                pg.ks_edit = False
+            self._update_pad_colors()
+            self._update_ks_edit_leds()
+            return True
+        if button_name in (BTN_LEFT, BTN_RIGHT) and pg.note_layout == LAYOUT_KS16:
+            pg.ks_edit_page = 1 - pg.ks_edit_page
+            return True
+        return False
+
+    def _handle_ks_edit_encoder(self, encoder_index, increment):
+        """Edit keyswitch notes from the config screen.
+
+        Encoder for KS #0 sets the start note (regenerates, clears overrides);
+        the others set a per-pad override. Paginated for ks16 via ks_edit_page.
+        """
+        pg = self.pad_grid
+        ks_index = pg.ks_edit_page * 8 + encoder_index
+        if ks_index >= pg.ks_count():
+            return
+        if ks_index == 0:
+            pg.set_ks_start(pg.ks_start_note + increment)
+        else:
+            current = pg.ks_effective_notes()[ks_index]
+            pg.set_ks_override(ks_index, current + increment)
+        self._update_pad_colors()
+
+    def _handle_ks_latch_press(self, ksi, row, col, velocity):
+        """Latch behavior: hold a keyswitch note until it (or another) is re-pressed."""
+        pg = self.pad_grid
+        note = pg.pad_to_note(row, col)
+        if note < 0:
+            return
+        if self.state.accent_enabled:
+            velocity = self.state.accent_velocity
+        if pg.ks_latched_index == ksi:
+            # Re-pressing the active keyswitch releases it
+            if self._ks_held_note is not None:
+                self.nuendo_link.send_note_off(self._ks_held_note)
+            pg.ks_latched_index = None
+            self._ks_held_note = None
+        else:
+            # Release the previous latched note, latch the new one
+            if self._ks_held_note is not None:
+                self.nuendo_link.send_note_off(self._ks_held_note)
+            self.nuendo_link.send_note_on(note, velocity)
+            pg.ks_latched_index = ksi
+            self._ks_held_note = note
+        self._update_pad_colors()
+
+    def _release_ks_latch(self):
+        """Send note-off for any held latch note and clear the latch state."""
+        if self._ks_held_note is not None:
+            try:
+                self.nuendo_link.send_note_off(self._ks_held_note)
+            except Exception:
+                pass
+        self._ks_held_note = None
+        self.pad_grid.ks_latched_index = None
+
+    def _update_ks_edit_leds(self):
+        """Refresh the lower-row LEDs (delegates to the single LED updater so the
+        KS config buttons stay consistent and are not overwritten by the loop)."""
+        self._update_lower_row_leds()
+
+    # ─────────────────────────────────────────
     # Pad handling
     # ─────────────────────────────────────────
 
@@ -2217,7 +2347,14 @@ class Push2Controller:
         if self.state.mode == MODE_OVERVIEW:
             self._handle_overview_pad(row, col)
             return
-        
+
+        # Keyswitch latch: hold the note until re-selected (radio + toggle)
+        if self.pad_grid.is_keyswitch_layout and self.pad_grid.ks_latch:
+            ksi = self.pad_grid._ks_index_for_pad(row, col)
+            if ksi is not None:
+                self._handle_ks_latch_press(ksi, row, col, velocity)
+                return
+
         self.pad_grid.pad_pressed[row][col] = True
         
         # Send Note On to Nuendo
@@ -2261,9 +2398,14 @@ class Push2Controller:
         
         if self.state.mode == MODE_OVERVIEW:
             return
-        
+
+        # Keyswitch latch: ignore release, the note stays held until re-selected
+        if self.pad_grid.is_keyswitch_layout and self.pad_grid.ks_latch:
+            if self.pad_grid._ks_index_for_pad(row, col) is not None:
+                return
+
         self.pad_grid.pad_pressed[row][col] = False
-        
+
         # Send Note Off to Nuendo
         midi_note = self.pad_grid.pad_to_note(row, col)
         if midi_note < 0:
@@ -3405,9 +3547,25 @@ class Push2Controller:
         """Lower row LEDs based on mode (mute/solo/monitor/rec)."""
         if not self.push:
             return
-        
+
         state = self.state
-        
+
+        # ── Keyswitch config screen: lower row = config buttons ──
+        if self.pad_grid.ks_edit:
+            pg = self.pad_grid
+            colors = [LED_OFF] * 8
+            colors[0] = BTN_WHITE if pg.ks_mode == KS_CHROMATIC else BTN_DIM  # Chromatic
+            colors[1] = BTN_WHITE if pg.ks_mode == KS_NATURALS else BTN_DIM   # Naturals
+            colors[3] = LED_ORANGE if pg.ks_latch else BTN_DIM                # Latch
+            colors[6] = BTN_DIM   # Reset
+            colors[7] = BTN_DIM   # Done
+            for i in range(8):
+                try:
+                    self._send_midi_to_push([0xB0, 20 + i, colors[i]])
+                except Exception:
+                    pass
+            return
+
         # ── Setup mode: lower row = option buttons ──
         if state.mode == MODE_SETUP:
             AT_OPTIONS = [AT_POLY, AT_CHANNEL, AT_OFF]

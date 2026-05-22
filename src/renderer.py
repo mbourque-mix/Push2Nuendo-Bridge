@@ -2871,7 +2871,10 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
     
     if pad_grid and pad_grid.scale_mode:
         return _render_scale_screen(pad_grid)
-    
+
+    if pad_grid and getattr(pad_grid, 'ks_edit', False):
+        return _render_ks_edit_screen(pad_grid)
+
     if state.accent_held:
         return _render_accent_screen(state)
     
@@ -3142,6 +3145,78 @@ def _render_accent_screen(state):
     except Exception as e:
         print(f"  ✗ Accent screen error: {e}")
         return None
+
+
+def _render_ks_edit_screen(pad_grid):
+    """Display the keyswitch configuration screen (long-press Layout)."""
+    from pad_grid import midi_note_name, KS_CHROMATIC, KS_NATURALS, LAYOUT_KS16
+
+    ORANGE = (255, 150, 0)
+    ORANGE_DIM = (120, 70, 0)
+
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=(15, 15, 20))
+    draw = ImageDraw.Draw(img)
+
+    count = pad_grid.ks_count()
+    notes = pad_grid.ks_effective_notes()
+    page = pad_grid.ks_edit_page if pad_grid.note_layout == LAYOUT_KS16 else 0
+    base = page * 8
+
+    # ── Title + status line ──
+    draw.text((8, 2), "KEYSWITCH CONFIG", font=FONT_MD, fill=ORANGE)
+    mode_txt = "Chromatic" if pad_grid.ks_mode == KS_CHROMATIC else "Naturals"
+    latch_txt = "Latch ON" if pad_grid.ks_latch else "Latch off"
+    status = f"{count} keys   {mode_txt}   {latch_txt}"
+    if pad_grid.note_layout == LAYOUT_KS16:
+        status += f"   Page {page + 1}/2"
+    draw.text((SCREEN_WIDTH - 360, 4), status, font=FONT_SM, fill=(150, 150, 170))
+
+    # ── Encoder cells: one per encoder (8), showing the keyswitch note ──
+    col_w = SCREEN_WIDTH // 8
+    cell_top = 26
+    cell_bot = 132
+    for c in range(8):
+        ks_index = base + c
+        x = c * col_w
+        if ks_index >= count:
+            continue
+        note = notes[ks_index]
+        is_start = (ks_index == 0)
+        is_override = ks_index in pad_grid.ks_overrides
+
+        # cell frame
+        draw.rectangle([x + 3, cell_top, x + col_w - 3, cell_bot],
+                       outline=(45, 45, 55), width=1)
+        # KS number (1-based), with markers
+        label = f"KS{ks_index + 1}"
+        if is_start:
+            label += "*"            # start note
+        draw.text((x + 10, cell_top + 4), label, font=FONT_SM,
+                  fill=ORANGE if not is_override else (255, 210, 120))
+        # note name (big)
+        name = midi_note_name(note)
+        draw.text((x + 10, cell_top + 30), name, font=FONT_LG_BOLD,
+                  fill=(255, 255, 255) if not is_override else (255, 210, 120))
+        # markers legend per cell
+        if is_start:
+            draw.text((x + 10, cell_bot - 22), "start", font=FONT_SM, fill=(110, 110, 130))
+        elif is_override:
+            draw.text((x + 10, cell_bot - 22), "set", font=FONT_SM, fill=(150, 110, 60))
+
+    # ── Bottom bar: lower-row button labels ──
+    draw.rectangle([0, 138, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(22, 22, 28))
+    labels = ["Chromatic", "Naturals", "", "Latch", "", "", "Reset", "Done"]
+    for i, lbl in enumerate(labels):
+        if not lbl:
+            continue
+        x = i * col_w + 8
+        active = ((i == 0 and pad_grid.ks_mode == KS_CHROMATIC) or
+                  (i == 1 and pad_grid.ks_mode == KS_NATURALS) or
+                  (i == 3 and pad_grid.ks_latch))
+        color = ORANGE if active else (130, 130, 145)
+        draw.text((x, 144), lbl, font=FONT_SM, fill=color)
+
+    return _to_push2_frame(img)
 
 
 def _render_scale_screen(pad_grid):
