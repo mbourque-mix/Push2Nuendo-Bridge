@@ -13,9 +13,54 @@ Access it at http://localhost:8100 to create parameter mappings.
 import sys
 
 
+def _ensure_windows_console():
+    """In a windowed (--noconsole) build, allocate a console for --terminal mode."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.GetConsoleWindow() == 0:
+            kernel32.AllocConsole()
+            sys.stdout = open("CONOUT$", "w")
+            sys.stderr = open("CONOUT$", "w")
+            try:
+                sys.stdin = open("CONIN$", "r")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _ensure_libusb_on_windows():
+    """Make libusb-1.0.dll discoverable when running from source on Windows.
+
+    The frozen .exe bundles the DLL (via PyInstaller --add-binary), but a
+    source run relies on it being on the DLL search path. If the optional
+    ``libusb-package`` is installed, add its bundled DLL folder so pyusb's
+    libusb1 backend can find it. No-op elsewhere / if not installed.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import os
+        from pathlib import Path
+        import libusb_package
+        pkg_dir = Path(libusb_package.__file__).parent
+        for dll in pkg_dir.rglob("libusb-1.0.dll"):
+            d = str(dll.parent)
+            try:
+                os.add_dll_directory(d)
+            except Exception:
+                pass
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            break
+    except Exception:
+        pass  # best-effort; falls back to the system libusb if present
+
+
 def main():
     force_terminal = "--terminal" in sys.argv or "-t" in sys.argv
-    
+    _ensure_libusb_on_windows()
+
     if sys.platform == "darwin" and not force_terminal:
         try:
             from main_macos import main as macos_main
@@ -25,7 +70,17 @@ def main():
             print("  Install it with: pip install rumps")
             print()
             terminal_main()
+    elif sys.platform == "win32" and not force_terminal:
+        try:
+            from main_windows import main as win_main
+            win_main()
+        except ImportError:
+            # pystray missing — fall back to the console version
+            _ensure_windows_console()
+            terminal_main()
     else:
+        if sys.platform == "win32":
+            _ensure_windows_console()
         terminal_main()
 
 

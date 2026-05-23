@@ -43,6 +43,8 @@ python -m pip install libusb-package >nul
 REM Plugin Mapper deps must be in the build env so PyInstaller bundles them
 REM (a frozen .exe cannot pip-install them at runtime).
 python -m pip install fastapi uvicorn pedalboard >nul
+REM pystray powers the system tray icon (windowed mode).
+python -m pip install pystray >nul
 python -m pip install -r "%PROJECT_DIR%\requirements.txt"
 if errorlevel 1 (
     echo   X Dependency install failed.
@@ -77,11 +79,11 @@ if exist "%PROJECT_DIR%\build" rmdir /s /q "%PROJECT_DIR%\build"
 cd /d "%SRC_DIR%"
 
 REM ── Build the onefile console .exe ──
-echo [3/4] Running PyInstaller (onefile, console)...
+echo [3/4] Running PyInstaller (onefile, windowed/tray)...
 pyinstaller ^
     --name "%APP_NAME%" ^
     --onefile ^
-    --console ^
+    --windowed ^
     --noconfirm ^
     --clean ^
     --paths . ^
@@ -95,6 +97,9 @@ pyinstaller ^
     --add-data "control_room.py;." ^
     --add-data "repeat.py;." ^
     --add-data "overview.py;." ^
+    --add-data "main_windows.py;." ^
+    --collect-all pystray ^
+    --hidden-import main_windows ^
     --hidden-import state ^
     --hidden-import nuendo_link ^
     --hidden-import push2_controller ^
