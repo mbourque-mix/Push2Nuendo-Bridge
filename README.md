@@ -157,9 +157,9 @@ pip install fastapi uvicorn pedalboard
 
 ## Installation
 
-### macOS — Standalone App (Recommended)
+### macOS — Standalone App (Apple Silicon, Recommended)
 
-No Homebrew, libusb or Python required — everything (including the libusb USB runtime) is bundled in the app.
+The pre-built `.app` is **Apple Silicon (arm64) only**. On an M1/M2/M3 Mac, no Homebrew, libusb or Python is required — everything (including the libusb USB runtime) is bundled in the app. **Intel Macs:** use *From Source* below (or build an Intel `.app` with `scripts/build.sh` on an Intel machine).
 
 1. Copy **Push2 Nuendo Bridge.app** to `/Applications`
 2. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
@@ -173,14 +173,16 @@ No Homebrew, libusb or Python required — everything (including the libusb USB 
 4. Launch the app — a **P2** icon appears in the menu bar
 5. Open Nuendo — the MIDI Remote script configures itself automatically
 
-### macOS — From Source
+### macOS — From Source (also the path for Intel Macs)
 
 ```bash
 brew install libusb python@3.11
-pip3 install -r requirements.txt
-pip3 install git+https://github.com/ffont/push2-python.git
-cd src && python3 main.py
+pip3.11 install -r requirements.txt
+pip3.11 install git+https://github.com/ffont/push2-python.git
+cd src && python3.11 main.py
 ```
+
+To build a native standalone `.app` for your architecture (e.g. an Intel `.app` on an Intel Mac), run `bash scripts/build.sh` with the dependencies above installed.
 
 ### Windows
 
