@@ -313,6 +313,27 @@ for (var i = 0; i < 8; i++) {
     page.makeValueBinding(recButtons[i].mSurfaceValue, ch.mValue.mRecordEnable);
     page.makeValueBinding(editorOpenButtons[i].mSurfaceValue, ch.mValue.mEditorOpen).setTypeToggle();
 
+    // Per-track automation Read/Write feedback → bridge (SysEx tag 0x0E).
+    // [F0 00 21 09 0E idx kind value F7]  kind: 0=read, 1=write.
+    // Selected-track CC 17/18 only covered the selected track, so non-selected
+    // bank tracks never reflected automation-mode changes (#2).
+    var autoReadVar = surface.makeCustomValueVariable('autoRead_' + i);
+    page.makeValueBinding(autoReadVar, ch.mValue.mAutomationRead);
+    autoReadVar.mOnProcessValueChange = (function(idx) {
+        return function(activeDevice, value, diff) {
+            midiOutput_Loop.sendMidi(activeDevice,
+                [0xF0, 0x00, 0x21, 0x09, 0x0E, idx & 0x7F, 0, value > 0.5 ? 1 : 0, 0xF7]);
+        };
+    })(i);
+    var autoWriteVar = surface.makeCustomValueVariable('autoWrite_' + i);
+    page.makeValueBinding(autoWriteVar, ch.mValue.mAutomationWrite);
+    autoWriteVar.mOnProcessValueChange = (function(idx) {
+        return function(activeDevice, value, diff) {
+            midiOutput_Loop.sendMidi(activeDevice,
+                [0xF0, 0x00, 0x21, 0x09, 0x0E, idx & 0x7F, 1, value > 0.5 ? 1 : 0, 0xF7]);
+        };
+    })(i);
+
     // Instrument Open : CC 15 channel 2 + index via Note (on utilise un bouton dédié par canal)
     // Note 80+i channel 1 = toggle instrument UI pour canal i
     var instrOpenBtn = surface.makeButton(80 + i, 88, 2, 2);

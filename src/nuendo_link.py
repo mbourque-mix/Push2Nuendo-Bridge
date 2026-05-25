@@ -1399,6 +1399,22 @@ class NuendoLink:
             if qc_index < len(selected.quick_controls):
                 selected.quick_controls[qc_index].value = norm_val
         
+        # ── Per-track automation Read/Write (type 0x0E) ──
+        # Payload: [rel_index, kind, value]  kind: 0=read, 1=write
+        elif msg_type == 0x0E and len(payload) >= 3:
+            if getattr(self, '_scanning', False):
+                return
+            rel_index = payload[0]
+            kind = payload[1]
+            on = payload[2] > 0
+            abs_index = self.state.bank_offset + rel_index
+            if abs_index < len(self.state.tracks):
+                if kind == 0:
+                    self.state.tracks[abs_index].automation_read = on
+                else:
+                    self.state.tracks[abs_index].automation_write = on
+                self._leds_dirty = True
+
         # ── JS Script version (type 0x10) ──
         elif msg_type == 0x10 and len(payload) >= 1:
             try:

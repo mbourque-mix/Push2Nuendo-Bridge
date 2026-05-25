@@ -3406,14 +3406,7 @@ class Push2Controller:
             # Rec (CC 86, colored): orange=idle, blink red=armed, solid red=recording
             self._update_rec_led()
             
-            if BTN_AUTOMATE:
-                track = self.state.selected_track
-                if track and track.automation_write:
-                    self._send_midi_to_push([0xB0, 89, 4])    # Red
-                elif track and track.automation_read:
-                    self._send_midi_to_push([0xB0, 89, 21])   # Green
-                else:
-                    self._send_midi_to_push([0xB0, 89, BTN_WHITE])
+            self._update_automate_led()
             # Metronome (monochrome)
             if BTN_METRONOME:
                 self._set_mono_led(BTN_METRONOME, 127 if self.state.metronome_on else 0)
@@ -3684,6 +3677,26 @@ class Push2Controller:
             else:
                 # Orange when idle
                 self._send_midi_to_push([0xB0, 86, LED_ORANGE])
+        except Exception:
+            pass
+
+    def _update_automate_led(self):
+        """Update Automate button LED (CC 89) from the SELECTED track only.
+
+        Write → red, Read → green, neither → white. (The API only reports
+        automation mode for the current bank, so a reliable project-wide
+        indicator isn't possible — we keep it to the selected track.)
+        """
+        if not (self.push and BTN_AUTOMATE):
+            return
+        try:
+            sel = self.state.selected_track
+            if sel and sel.automation_write:
+                self._send_midi_to_push([0xB0, 89, 4])     # Red
+            elif sel and sel.automation_read:
+                self._send_midi_to_push([0xB0, 89, 21])    # Green
+            else:
+                self._send_midi_to_push([0xB0, 89, BTN_WHITE])
         except Exception:
             pass
 
