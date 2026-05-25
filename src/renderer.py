@@ -21,7 +21,6 @@ from state import (
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
     AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
-    CC_ABSOLUTE, CC_PICKUP,
     BRIDGE_VERSION, BANK_SIZE, AppState,
     STRIP_MOD_GATE, STRIP_MOD_COMPRESSOR, STRIP_MOD_TOOLS,
     STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER,
@@ -1569,7 +1568,7 @@ def _render_midicc_screen(state):
 # ─────────────────────────────────────────────
 
 # Setup page definitions
-SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
+SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
 
 # Per-page options: list of (label, value) for lower row buttons
 SETUP_PAGE_OPTIONS = {
@@ -1584,10 +1583,6 @@ SETUP_PAGE_OPTIONS = {
         ('Exp',     VC_EXP),
         ('S-Curve', VC_SCURVE),
         ('Fixed',   VC_FIXED),
-    ],
-    2: [  # CC Mode page
-        ('Absolute', CC_ABSOLUTE),
-        ('Pick-up',  CC_PICKUP),
     ],
 }
 
@@ -1672,23 +1667,6 @@ def _render_setup_screen(state):
             # Separator
             draw.line([(x, 42), (x, 140)], fill=COLOR_SEPARATOR)
     
-    elif page_idx == 2:
-        # ── Page 2: CC Mode ──
-        draw.text((20, 50), "MIDI CC Encoder Mode", fill=(200, 200, 200), font=FONT_MD)
-        
-        if state.cc_mode == CC_ABSOLUTE:
-            mode_name = "Absolute"
-            desc = "Encoder value sent immediately"
-            desc2 = "May cause parameter jumps"
-        else:
-            mode_name = "Pick-up"
-            desc = "Encoder catches up to current value"
-            desc2 = "No jumps, smoother transitions"
-        
-        draw.text((20, 75), mode_name, fill=COLOR_ACCENT, font=FONT_LG)
-        draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
-        draw.text((20, 116), desc2, fill=(80, 80, 80), font=FONT_SM)
-    
     elif page_idx == 7:
         # ── Page 7: About ──
         # Bridge version
@@ -1716,8 +1694,6 @@ def _render_setup_screen(state):
                 is_selected = (state.aftertouch_mode == value)
             elif page_idx == 1:
                 is_selected = (state.velocity_curve == value)
-            elif page_idx == 2:
-                is_selected = (state.cc_mode == value)
             else:
                 is_selected = False
             

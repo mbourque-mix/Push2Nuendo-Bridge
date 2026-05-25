@@ -727,10 +727,22 @@ try {
         })(ci);
     }
 
-    // Main Level Reset (absolu)
-    var crMainResetKnob = surface.makeKnob(78, 40, 2, 2);
-    crMainResetKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 78).setTypeAbsolute();
-    page.makeValueBinding(crMainResetKnob.mSurfaceValue, crMain.mLevelValue);
+    // Main Level Reset -> exact 0.00 dB
+    // CC 78 (any value > 0) writes the precise normalized value that maps to
+    // 0.00 dB on crMain.mLevelValue. A 7-bit absolute value binding cannot hit
+    // this exactly (it lands at ~-0.01 dB). Host values have no setProcessValue,
+    // so we bind a dedicated surface value to crMain.mLevelValue and write the
+    // exact float through it (setProcessValue propagates via the binding).
+    var CR_MAIN_0DB = 0.748222231;  // measured via high-res feedback
+    var crMainResetValue = surface.makeCustomValueVariable('crMainReset');
+    page.makeValueBinding(crMainResetValue, crMain.mLevelValue);
+    var crMainResetBtn = surface.makeButton(78, 40, 2, 2);
+    crMainResetBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 78);
+    crMainResetBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, numValue) {
+        if (numValue > 0) {
+            crMainResetValue.setProcessValue(activeDevice, CR_MAIN_0DB);
+        }
+    };
 
     // Main Mute
     var crMainMuteBtn = makeCRBtn(73);

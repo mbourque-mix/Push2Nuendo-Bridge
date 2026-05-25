@@ -2383,12 +2383,9 @@ class NuendoLink:
             state = self.state
             for i in range(8):
                 if state.cc_numbers[i] == cc_num:
-                    # Always track the Nuendo value
+                    # Mirror the incoming Nuendo value on the encoder position
                     state.cc_nuendo_values[i] = cc_val
-                    # In absolute mode, also update the encoder position
-                    from state import CC_PICKUP
-                    if state.cc_mode != CC_PICKUP:
-                        state.cc_values[i] = cc_val
+                    state.cc_values[i] = cc_val
                     break
 
     def send_mode_change(self, mode):

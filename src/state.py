@@ -53,10 +53,6 @@ VC_EXP     = "exp"       # Exponential (more sensitive at high velocities)
 VC_SCURVE  = "s-curve"   # S-curve (compressed extremes, expanded middle)
 VC_FIXED   = "fixed"     # Fixed velocity (always 100)
 
-# MIDI CC encoder modes
-CC_ABSOLUTE = "absolute"  # Encoder value sent immediately (can cause jumps)
-CC_PICKUP   = "pickup"    # Encoder only sends after catching up to Nuendo value
-
 # Number of tracks displayed simultaneously (= number of encoders)
 BANK_SIZE = 8
 
@@ -503,10 +499,7 @@ class AppState:
         self.cc_numbers = [1, 2, 7, 8, 10, 11, 64, 65]  # default CC assignments
         self.cc_values = [0] * 8       # current CC values (0-127) — encoder position
         self.cc_edit_mode = False      # True = encoders change CC number instead of value
-        self.cc_mode = CC_ABSOLUTE     # CC_ABSOLUTE or CC_PICKUP
         self.cc_nuendo_values = [-1] * 8  # last known value from Nuendo (-1 = unknown)
-        self.cc_picked_up = [True] * 8    # whether each encoder has caught up
-        self.cc_pickup_direction = [0] * 8  # initial turn direction (0=none, 1=CW, -1=CCW)
         
         # ── Version info ──
         self.js_version = "?"         # will be set by JS via SysEx

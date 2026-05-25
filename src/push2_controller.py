@@ -24,7 +24,6 @@ from state import (
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
     AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
-    CC_ABSOLUTE, CC_PICKUP
 )
 from pad_grid import (
     PadGrid, KS_CHROMATIC, KS_NATURALS,
@@ -665,34 +664,13 @@ class Push2Controller:
                 cc = self.state.cc_numbers[encoder_index]
                 cc = max(0, min(127, cc + increment))
                 self.state.cc_numbers[encoder_index] = cc
-                # Reset pick-up when CC number changes
-                self.state.cc_picked_up[encoder_index] = False
-                self.state.cc_pickup_direction[encoder_index] = 0
-                self.state.cc_nuendo_values[encoder_index] = -1
             else:
-                # Normal mode: encoder changes CC value
+                # Normal mode: encoder changes CC value (sent immediately)
                 old_val = self.state.cc_values[encoder_index]
                 new_val = max(0, min(127, old_val + increment))
                 self.state.cc_values[encoder_index] = new_val
-                
-                if self.state.cc_mode == CC_PICKUP and not self.state.cc_picked_up[encoder_index]:
-                    # Pick-up mode: don't send until direction reverses
-                    direction = 1 if increment > 0 else -1
-                    prev_dir = self.state.cc_pickup_direction[encoder_index]
-                    
-                    if prev_dir == 0:
-                        # First movement — record direction, don't send
-                        self.state.cc_pickup_direction[encoder_index] = direction
-                    elif direction != prev_dir:
-                        # Direction changed — pick up and start sending
-                        self.state.cc_picked_up[encoder_index] = True
-                        self.nuendo_link.send_midi_cc_to_notes(
-                            self.state.cc_numbers[encoder_index], new_val)
-                    # else: same direction, keep moving but don't send
-                else:
-                    # Absolute mode or already picked up: send immediately
-                    self.nuendo_link.send_midi_cc_to_notes(
-                        self.state.cc_numbers[encoder_index], new_val)
+                self.nuendo_link.send_midi_cc_to_notes(
+                    self.state.cc_numbers[encoder_index], new_val)
             return
         
         # XY pad mode: Enc1/2 pick the X/Y item (within its category), Enc3/4 = feel
@@ -1487,7 +1465,7 @@ class Push2Controller:
         
         # ── Mode Setup : intercepter les boutons ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
             
             # Upper row → select setup page
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
@@ -1525,17 +1503,6 @@ class Push2Controller:
                         if i < len(VC_LIST):
                             state.velocity_curve = VC_LIST[i]
                             self._apply_velocity_curve()
-                    elif state.setup_page == 2:
-                        # Page 2: CC Mode (buttons 1-2)
-                        CC_LIST = [CC_ABSOLUTE, CC_PICKUP]
-                        if i < len(CC_LIST):
-                            state.cc_mode = CC_LIST[i]
-                            # Reset pick-up state when switching modes
-                            if state.cc_mode == CC_ABSOLUTE:
-                                state.cc_picked_up = [True] * 8
-                            else:
-                                state.cc_picked_up = [False] * 8
-                            state.cc_pickup_direction = [0] * 8
                     self._update_all_leds()
                     return
             return
@@ -3535,7 +3502,7 @@ class Push2Controller:
 
         # ── Setup mode: upper row = page tabs ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
             for i in range(8):
                 cc = 102 + i
                 try:
@@ -3829,13 +3796,6 @@ class Push2Controller:
                     elif state.setup_page == 1:
                         if i < len(VC_OPTIONS):
                             is_sel = (state.velocity_curve == VC_OPTIONS[i])
-                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
-                        else:
-                            self._send_midi_to_push([0xB0, cc, LED_OFF])
-                    elif state.setup_page == 2:
-                        CC_OPTIONS = [CC_ABSOLUTE, CC_PICKUP]
-                        if i < len(CC_OPTIONS):
-                            is_sel = (state.cc_mode == CC_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
