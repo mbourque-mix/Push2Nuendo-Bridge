@@ -23,6 +23,13 @@ on:
       - 'scripts/build_windows.bat'
   workflow_dispatch:
 
+# Needed so softprops/action-gh-release can create/update the Release and
+# upload assets — without this the GITHUB_TOKEN is read-only and the
+# "Attach to GitHub Release" step fails with "Resource not accessible by
+# integration" (403).
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
