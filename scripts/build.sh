@@ -27,6 +27,27 @@ echo ""
 # app cannot pip-install them at runtime.
 pip3 install pyinstaller rumps fastapi uvicorn pedalboard 2>/dev/null
 
+# Locate libusb so we can bundle it into the .app — this removes the Homebrew /
+# `brew install libusb` requirement for end users (the runtime shim in main.py
+# points pyusb at the bundled dylib). Resolve the real file (it's a symlink).
+LIBUSB_DYLIB=""
+if command -v brew >/dev/null 2>&1; then
+    _brew_libusb="$(brew --prefix libusb 2>/dev/null)/lib/libusb-1.0.0.dylib"
+    [ -f "$_brew_libusb" ] && LIBUSB_DYLIB="$(readlink -f "$_brew_libusb" 2>/dev/null || python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$_brew_libusb")"
+fi
+if [ -z "$LIBUSB_DYLIB" ]; then
+    for _p in /opt/homebrew/lib/libusb-1.0.0.dylib /usr/local/lib/libusb-1.0.0.dylib; do
+        [ -f "$_p" ] && LIBUSB_DYLIB="$(python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$_p")" && break
+    done
+fi
+LIBUSB_ARG=()
+if [ -n "$LIBUSB_DYLIB" ] && [ -f "$LIBUSB_DYLIB" ]; then
+    echo "  Bundling libusb: $LIBUSB_DYLIB"
+    LIBUSB_ARG=(--add-binary "$LIBUSB_DYLIB:.")
+else
+    echo "  ⚠ libusb not found — the .app will require the system libusb (brew install libusb)"
+fi
+
 # Clean previous build
 rm -rf "$PROJECT_DIR/dist" "$PROJECT_DIR/build"
 
@@ -44,6 +65,7 @@ pyinstaller \
     --noconfirm \
     --clean \
     --osx-bundle-identifier "com.push2nuendo.bridge" \
+    "${LIBUSB_ARG[@]}" \
     --add-data "state.py:." \
     --add-data "nuendo_link.py:." \
     --add-data "push2_controller.py:." \

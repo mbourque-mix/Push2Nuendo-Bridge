@@ -57,9 +57,59 @@ def _ensure_libusb_on_windows():
         pass  # best-effort; falls back to the system libusb if present
 
 
+def _ensure_libusb_on_macos():
+    """Make a bundled libusb-1.0 dylib discoverable inside a frozen .app.
+
+    The .app bundles ``libusb-1.0.0.dylib`` (via PyInstaller --add-binary) so
+    end users no longer need Homebrew / ``brew install libusb``. pyusb's
+    libusb1 backend resolves the native library through
+    ``ctypes.util.find_library('usb-1.0')``; on a clean Mac that returns None.
+    We locate the bundled dylib and patch find_library to return it BEFORE
+    push2-python initialises its backend. No-op when not frozen (a source run
+    falls back to the system / Homebrew libusb).
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes.util
+        from pathlib import Path
+
+        candidates = []
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            candidates.append(Path(base))
+            candidates.append(Path(base) / "Frameworks")
+            candidates.append(Path(base).parent / "Frameworks")
+        candidates.append(Path(sys.executable).parent)
+
+        found = None
+        for d in candidates:
+            for name in ("libusb-1.0.0.dylib", "libusb-1.0.dylib"):
+                p = d / name
+                if p.exists():
+                    found = str(p)
+                    break
+            if found:
+                break
+        if not found:
+            return  # source run / not bundled → rely on system libusb
+
+        _orig_find = ctypes.util.find_library
+
+        def _patched_find(name):
+            if name and "usb" in name:
+                return found
+            return _orig_find(name)
+
+        ctypes.util.find_library = _patched_find
+    except Exception:
+        pass  # best-effort; falls back to the system libusb if present
+
+
 def main():
     force_terminal = "--terminal" in sys.argv or "-t" in sys.argv
     _ensure_libusb_on_windows()
+    _ensure_libusb_on_macos()
 
     if sys.platform == "darwin" and not force_terminal:
         try:

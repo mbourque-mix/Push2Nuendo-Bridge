@@ -133,11 +133,10 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - **Ableton Push 2** (connected via USB)
 - **Steinberg Nuendo 14+** (or Cubase 14+)
 - **macOS 11+** or **Windows 10/11**
-- **libusb** (macOS: `brew install libusb`)
 
 **Nuendo 15+ features:** Plugin Browser (Add Device) and DirectAccess-based insert control require MIDI Remote API 1.3. All other features work with Nuendo 14+.
 
-**No Python needed for end users** — the Windows `.exe` and the macOS `.app` bundle the interpreter and all dependencies. Python is only required to **run from source** or **build** the app.
+**Nothing to install for end users** — the Windows `.exe` and the macOS `.app` bundle the Python interpreter, every dependency **and the libusb USB runtime**. No Homebrew, no `brew install libusb`, no Python. (libusb is only needed when **running from source**, where `brew install libusb` is still required on macOS.)
 
 **Python (source / build only):** 3.9 – **3.11.9 maximum** (3.12 / 3.13 are not yet supported by the audio/MIDI dependencies). When running from source, `push2-python` must be installed from source:
 ```bash
@@ -160,19 +159,19 @@ pip install fastapi uvicorn pedalboard
 
 ### macOS — Standalone App (Recommended)
 
-1. Install Homebrew (if needed): visit [brew.sh](https://brew.sh)
-2. Install libusb: `brew install libusb`
-3. Copy **Push2 Nuendo Bridge.app** to `/Applications`
-4. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
+No Homebrew, libusb or Python required — everything (including the libusb USB runtime) is bundled in the app.
+
+1. Copy **Push2 Nuendo Bridge.app** to `/Applications`
+2. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
    ```bash
    xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.5.app"
    ```
-5. Copy **Ableton_Push2.js** to:
+3. Copy **Ableton_Push2.js** to:
    ```
    ~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/
    ```
-6. Launch the app — a **P2** icon appears in the menu bar
-7. Open Nuendo — the MIDI Remote script configures itself automatically
+4. Launch the app — a **P2** icon appears in the menu bar
+5. Open Nuendo — the MIDI Remote script configures itself automatically
 
 ### macOS — From Source
 
