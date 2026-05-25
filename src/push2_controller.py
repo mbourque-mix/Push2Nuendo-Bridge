@@ -21,11 +21,14 @@ import time
 from state import (
     AppState, BANK_SIZE,
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, AT_POLY, AT_CHANNEL, AT_OFF,
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
+    AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
-    CC_ABSOLUTE, CC_PICKUP
 )
-from pad_grid import PadGrid
+from pad_grid import (
+    PadGrid, KS_CHROMATIC, KS_NATURALS,
+    LAYOUT_64, LAYOUT_KS8, LAYOUT_KS16, LAYOUT_DRUM,
+)
 from overview import compute_overview_layout, get_pad_color_for_overview
 from repeat import NoteRepeat
 from control_room import (
@@ -431,7 +434,19 @@ class Push2Controller:
         self._lower_row_press_time = {}  # {button_name: timestamp}
         self._lower_row_handled = {}     # {button_name: bool}
         self._lower_row_press_id = {}    # {button_name: int} — incremented each press to cancel stale timers
-        
+
+        # Layout button long-press (keyswitch config) + keyswitch latch tracking
+        self._layout_press_active = False  # True while a non-shift Layout press is held
+        self._layout_long_fired = False    # True once the long-press action fired
+        self._layout_press_id = 0          # generation counter to cancel stale timers
+        self._ks_held_note = None          # MIDI note currently sounding from the KS section (mono)
+        self._ks_held_ksi = None           # KS index currently sounding, or None
+
+        # XY pad (MODE_XY): pressed-pad pressures + smoothed centroid reference
+        self._xy_pressures = {}            # {(row, col): pressure} for currently-touched pads
+        self._xy_centroid = None           # last smoothed (cx, cy) centroid, or None when lifted
+        self._xy_last_sent = (None, None)  # last integer (x, y) CC values sent
+
         # Callback for initial scan when Nuendo connects
         self.nuendo_link._on_connected_callback = lambda: self._initial_bank_refresh()
         
@@ -619,7 +634,12 @@ class Push2Controller:
             return
         
         encoder_index = TRACK_ENCODERS.index(encoder_name)
-        
+
+        # Keyswitch config screen: encoders edit the keyswitch notes
+        if self.pad_grid.ks_edit:
+            self._handle_ks_edit_encoder(encoder_index, increment)
+            return
+
         # When Accent is held, the first encoder adjusts velocity
         if self.state.accent_held:
             if encoder_index == 0:
@@ -644,36 +664,36 @@ class Push2Controller:
                 cc = self.state.cc_numbers[encoder_index]
                 cc = max(0, min(127, cc + increment))
                 self.state.cc_numbers[encoder_index] = cc
-                # Reset pick-up when CC number changes
-                self.state.cc_picked_up[encoder_index] = False
-                self.state.cc_pickup_direction[encoder_index] = 0
-                self.state.cc_nuendo_values[encoder_index] = -1
             else:
-                # Normal mode: encoder changes CC value
+                # Normal mode: encoder changes CC value (sent immediately)
                 old_val = self.state.cc_values[encoder_index]
                 new_val = max(0, min(127, old_val + increment))
                 self.state.cc_values[encoder_index] = new_val
-                
-                if self.state.cc_mode == CC_PICKUP and not self.state.cc_picked_up[encoder_index]:
-                    # Pick-up mode: don't send until direction reverses
-                    direction = 1 if increment > 0 else -1
-                    prev_dir = self.state.cc_pickup_direction[encoder_index]
-                    
-                    if prev_dir == 0:
-                        # First movement — record direction, don't send
-                        self.state.cc_pickup_direction[encoder_index] = direction
-                    elif direction != prev_dir:
-                        # Direction changed — pick up and start sending
-                        self.state.cc_picked_up[encoder_index] = True
-                        self.nuendo_link.send_midi_cc_to_notes(
-                            self.state.cc_numbers[encoder_index], new_val)
-                    # else: same direction, keep moving but don't send
-                else:
-                    # Absolute mode or already picked up: send immediately
-                    self.nuendo_link.send_midi_cc_to_notes(
-                        self.state.cc_numbers[encoder_index], new_val)
+                self.nuendo_link.send_midi_cc_to_notes(
+                    self.state.cc_numbers[encoder_index], new_val)
             return
         
+        # XY pad mode: Enc1/2 pick the X/Y item (within its category), Enc3/4 = feel
+        if self.state.mode == MODE_XY:
+            st = self.state
+            if encoder_index == 0:                 # Enc1 = X param
+                if st.xy_cat_x == 'cc':
+                    st.xy_cc_x = max(0, min(127, st.xy_cc_x + increment))
+                else:
+                    st.xy_track_param_x = max(0, min(len(XY_TRACK_PARAMS) - 1,
+                                                     st.xy_track_param_x + increment))
+            elif encoder_index == 1:               # Enc2 = Y param
+                if st.xy_cat_y == 'cc':
+                    st.xy_cc_y = max(0, min(127, st.xy_cc_y + increment))
+                else:
+                    st.xy_track_param_y = max(0, min(len(XY_TRACK_PARAMS) - 1,
+                                                     st.xy_track_param_y + increment))
+            elif encoder_index == 3:               # Enc4 = Sensitivity
+                st.xy_sensitivity = max(0.1, min(4.0, st.xy_sensitivity + increment * 0.05))
+            elif encoder_index == 4:               # Enc5 = Smooth
+                st.xy_smooth = max(0.0, min(0.9, st.xy_smooth + increment * 0.05))
+            return
+
         # Control Room mode: redirect encoders to CR CCs
         if self.state.mode == MODE_CR:
             page_def = CR_PAGES.get(self.cr_state.page, {})
@@ -921,6 +941,31 @@ class Push2Controller:
                 pass
             return
         
+        # ── Keyswitch config screen: intercept lower row + arrows ──
+        if self.pad_grid.ks_edit:
+            if self._handle_ks_edit_button(button_name):
+                return
+
+        # ── XY pad: upper row disabled; lower 1/2 toggle the X/Y category ──
+        if state.mode == MODE_XY:
+            if button_name in BUTTONS_UPPER_ROW:
+                return
+            if button_name in BUTTONS_LOWER_ROW:
+                idx = BUTTONS_LOWER_ROW.index(button_name)
+                if idx == 0:
+                    state.xy_cat_x = 'cc' if state.xy_cat_x == 'track' else 'track'
+                    self._update_lower_row_leds()
+                    return
+                if idx == 1:
+                    state.xy_cat_y = 'cc' if state.xy_cat_y == 'track' else 'track'
+                    self._update_lower_row_leds()
+                    return
+                if 4 <= idx <= 7:
+                    # Mute / Solo / Monitor / Rec on the selected track (like QC page)
+                    self._toggle_selected_track_function(idx - 4)
+                    return
+                return
+
         # ── User (toggle Control Room mode) ──
         if button_name == BTN_USER:
             state.user_held = True
@@ -981,7 +1026,7 @@ class Push2Controller:
             self._update_pad_colors()
             return
         
-        # ── Layout (toggle drum mode) ──
+        # ── Layout (cycle note layouts; Shift = touchstrip; long-press = KS config) ──
         if BTN_LAYOUT and button_name == BTN_LAYOUT:
             if state.shift_held:
                 modes = ["pitchbend", "modwheel", "volume"]
@@ -989,16 +1034,30 @@ class Push2Controller:
                 self.state.touchstrip_mode = modes[(current_idx + 1) % len(modes)]
                 self._configure_touchstrip_mode()
                 print(f"  Touchstrip mode: {self.state.touchstrip_mode}")
-                # Display mode temporarily
                 labels = {"pitchbend": "PITCH BEND", "modwheel": "MOD WHEEL", "volume": "VOLUME FADER"}
                 self.state._touchstrip_overlay = labels[self.state.touchstrip_mode]
                 self.state._touchstrip_overlay_until = time.time() + 2.0
-            else:
-                self.state.drum_mode = not self.state.drum_mode
-                self.pad_grid.drum_mode = self.state.drum_mode
-                self.pad_grid._update_note_map()
-                self._update_pad_colors()
-            self._set_button_led(BTN_LAYOUT, self.state.drum_mode)
+                return
+            # Non-shift: short press cycles layout, long press opens KS config.
+            # A press id cancels stale long-press timers (so a fast double-click
+            # does not let a previous press's timer fire the KS config).
+            self._layout_press_active = True
+            self._layout_long_fired = False
+            self._layout_press_id += 1
+            my_id = self._layout_press_id
+            import threading
+            def _layout_long_press(pid=my_id):
+                time.sleep(0.5)
+                if (self._layout_press_active and self._layout_press_id == pid
+                        and self.pad_grid.is_keyswitch_layout
+                        and self.state.mode != MODE_XY):
+                    self._layout_long_fired = True
+                    self.pad_grid.ks_edit = not self.pad_grid.ks_edit
+                    if self.pad_grid.ks_edit:
+                        self.pad_grid.ks_edit_page = 0
+                    self._update_pad_colors()
+                    self._update_ks_edit_leds()
+            threading.Thread(target=_layout_long_press, daemon=True).start()
             return
         
         # ── Metronome ──
@@ -1132,7 +1191,7 @@ class Push2Controller:
                     self._update_lower_row_leds()
                     self._update_nav_leds()
                 return
-            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE):
+            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY):
                 if state.selected_track_index > 0:
                     new_idx = state.selected_track_index - 1
                     need_bank = new_idx < state.bank_offset
@@ -1206,7 +1265,7 @@ class Push2Controller:
                     self._update_lower_row_leds()
                     self._update_nav_leds()
                 return
-            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE):
+            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY):
                 if state.selected_track_index < state.total_tracks - 1:
                     new_idx = state.selected_track_index + 1
                     current_mode = state.mode
@@ -1303,10 +1362,8 @@ class Push2Controller:
                     self._set_mode(MODE_MIDICC)
                     state.cc_edit_mode = False
                 return
-            # Return to MIDI note pads (exit Overview if active)
-            if state.mode == MODE_OVERVIEW:
-                self._set_mode(MODE_VOLUME)
-            if state.mode == MODE_MIDICC:
+            # Return to MIDI note pads (exit Overview / MIDI CC / XY if active)
+            if state.mode in (MODE_OVERVIEW, MODE_MIDICC, MODE_XY):
                 self._set_mode(MODE_VOLUME)
             self._update_pad_colors()
             return
@@ -1357,26 +1414,15 @@ class Push2Controller:
         
         # ── Overview mode ──
         if button_name == BTN_MODE_OVERVIEW:
-            if state.mode == MODE_OVERVIEW:
+            # Session = XY pad (Overview mode disabled for now)
+            if state.mode == MODE_XY:
                 self._set_mode(MODE_VOLUME)
-                # Reset modified palette entries to black
-                for idx in getattr(self, '_modified_palette', set()):
-                    self._send_midi_to_push([
-                        0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x03,
-                        idx & 0x7F,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0xF7
-                    ])
-                self._modified_palette = set()
-                # Flush palette reset
-                self._send_midi_to_push([0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x05, 0xF7])
-                # Turn off all pads then restore normal colors
-                for note in range(36, 100):
-                    self._send_midi_to_push([0x90, note, 0])
-                self._update_pad_colors()
             else:
-                state.overview_page = 0
-                self._set_mode(MODE_OVERVIEW)
-                self._update_overview_pads()
+                self._set_mode(MODE_XY)
+                self._xy_pressures = {}
+                self._xy_centroid = None
+                self._xy_last_sent = (None, None)
+            self._update_pad_colors()
             return
         
         # ── Page ◄/► for Overview pagination ──
@@ -1394,14 +1440,8 @@ class Push2Controller:
                     self._update_overview_pads()
                 return
         
-        # ── Rescan (Shift + 7th lower row button) ──
-        if button_name == BTN_RESCAN and state.shift_held:
-            for t in state.tracks:
-                t.name = f"Track {t.index + 1}"
-                t.color = (150, 150, 150)
-            self._full_scan()
-            return
-        
+        # (Rescan moved to the Setup page, lower row 8.)
+
         # ── Mode MIDI CC : intercepter les boutons ──
         if state.mode == MODE_MIDICC:
             # Upper row → toggle CC edit mode per channel
@@ -1425,7 +1465,7 @@ class Push2Controller:
         
         # ── Mode Setup : intercepter les boutons ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
             
             # Upper row → select setup page
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
@@ -1438,6 +1478,14 @@ class Push2Controller:
             # Lower row → change settings on the current page
             for i, btn in enumerate(BUTTONS_LOWER_ROW):
                 if button_name == btn:
+                    if i == 7:
+                        # Rescan tracks (available on every Setup page)
+                        for t in state.tracks:
+                            t.name = f"Track {t.index + 1}"
+                            t.color = (150, 150, 150)
+                        self._full_scan()
+                        self._update_all_leds()
+                        return
                     if state.setup_page == 0:
                         # Page 0: MIDI Controller — Aftertouch mode (buttons 1-3)
                         if i == 0:
@@ -1455,17 +1503,6 @@ class Push2Controller:
                         if i < len(VC_LIST):
                             state.velocity_curve = VC_LIST[i]
                             self._apply_velocity_curve()
-                    elif state.setup_page == 2:
-                        # Page 2: CC Mode (buttons 1-2)
-                        CC_LIST = [CC_ABSOLUTE, CC_PICKUP]
-                        if i < len(CC_LIST):
-                            state.cc_mode = CC_LIST[i]
-                            # Reset pick-up state when switching modes
-                            if state.cc_mode == CC_ABSOLUTE:
-                                state.cc_picked_up = [True] * 8
-                            else:
-                                state.cc_picked_up = [False] * 8
-                            state.cc_pickup_direction = [0] * 8
                     self._update_all_leds()
                     return
             return
@@ -2137,7 +2174,32 @@ class Push2Controller:
             self.state.accent_held = False
         if button_name == BTN_USER:
             self.state.user_held = False
-        
+
+        # XY pad: upper row is disabled
+        if self.state.mode == MODE_XY and button_name in BUTTONS_UPPER_ROW:
+            return
+
+        # ── Layout button release: short press = cycle layout / close KS config ──
+        if BTN_LAYOUT and button_name == BTN_LAYOUT and self._layout_press_active:
+            self._layout_press_active = False
+            if self._layout_long_fired:
+                self._layout_long_fired = False
+                return
+            # Short press
+            if self.state.mode == MODE_XY:
+                # In XY mode the pads are the XY surface — Layout returns to note pads
+                self._set_mode(MODE_VOLUME)
+            elif self.pad_grid.ks_edit:
+                self.pad_grid.ks_edit = False
+            else:
+                self._release_ks_latch()
+                self.pad_grid.cycle_layout()
+                self.state.drum_mode = self.pad_grid.drum_mode  # keep state in sync
+            self._set_button_led(BTN_LAYOUT, self.pad_grid.note_layout != LAYOUT_64)
+            self._update_pad_colors()
+            self._update_ks_edit_leds()
+            return
+
         # Long press on upper row: clean up tracking
         if button_name in self._upper_row_press_time:
             was_long_press = (self._upper_row_press_time[button_name] < 0)
@@ -2200,6 +2262,236 @@ class Push2Controller:
                         break
 
     # ─────────────────────────────────────────
+    # Keyswitch config screen + latch
+    # ─────────────────────────────────────────
+
+    def _handle_ks_edit_button(self, button_name):
+        """Handle lower-row + arrow buttons while the KS config screen is open.
+
+        Returns True if the button was consumed.
+        """
+        pg = self.pad_grid
+        if button_name in BUTTONS_LOWER_ROW:
+            idx = BUTTONS_LOWER_ROW.index(button_name)
+            if idx == 0:                       # Chromatic
+                pg.set_ks_mode(KS_CHROMATIC)
+            elif idx == 1:                     # Naturals
+                pg.set_ks_mode(KS_NATURALS)
+            elif idx == 3:                     # Latch toggle
+                if not pg.toggle_ks_latch():
+                    self._release_ks_latch()
+            elif idx == 6:                     # Reset overrides
+                pg.reset_ks()
+            elif idx == 7:                     # Done — close config
+                pg.ks_edit = False
+            self._update_pad_colors()
+            self._update_ks_edit_leds()
+            return True
+        if button_name in (BTN_LEFT, BTN_RIGHT) and pg.note_layout == LAYOUT_KS16:
+            pg.ks_edit_page = 1 - pg.ks_edit_page
+            return True
+        return False
+
+    def _handle_ks_edit_encoder(self, encoder_index, increment):
+        """Edit keyswitch notes from the config screen.
+
+        Encoder for KS #0 sets the start note (regenerates, clears overrides);
+        the others set a per-pad override. Paginated for ks16 via ks_edit_page.
+        """
+        pg = self.pad_grid
+        ks_index = pg.ks_edit_page * 8 + encoder_index
+        if ks_index >= pg.ks_count():
+            return
+        if ks_index == 0:
+            pg.set_ks_start(pg.ks_start_note + increment)
+        else:
+            current = pg.ks_effective_notes()[ks_index]
+            pg.set_ks_override(ks_index, current + increment)
+        self._update_pad_colors()
+
+    def _handle_ks_press(self, ksi, row, col, velocity):
+        """Keyswitch press — the KS section is monophonic (one note at a time).
+
+        Momentary: pressing a new KS releases the one currently sounding
+        (last-note priority); release sends note-off.
+        Latch: the note stays held until the same pad (toggle) or another
+        pad (radio) is pressed.
+        """
+        pg = self.pad_grid
+        note = pg.pad_to_note(row, col)
+        if note < 0:
+            return
+        if self.state.accent_enabled:
+            velocity = self.state.accent_velocity
+
+        same = (self._ks_held_ksi == ksi)
+
+        # Release whatever KS note is currently sounding (monophonic section)
+        if self._ks_held_note is not None:
+            self.nuendo_link.send_note_off(self._ks_held_note)
+            if self._ks_held_ksi is not None:
+                pr, pc = pg._ks_pad_position(self._ks_held_ksi)
+                pg.pad_pressed[pr][pc] = False
+            self._ks_held_note = None
+            self._ks_held_ksi = None
+            pg.ks_latched_index = None
+
+        # Latch + re-press of the same pad = leave it off (toggle release)
+        if not (pg.ks_latch and same):
+            self.nuendo_link.send_note_on(note, velocity)
+            self._ks_held_note = note
+            self._ks_held_ksi = ksi
+            if pg.ks_latch:
+                pg.ks_latched_index = ksi
+            else:
+                pg.pad_pressed[row][col] = True
+
+        self._update_pad_colors()
+
+    def _handle_ks_release(self, ksi, row, col):
+        """Keyswitch release. Latch keeps the note; momentary sends note-off."""
+        pg = self.pad_grid
+        if pg.ks_latch:
+            return  # latched: note stays held until re-selected
+        # Momentary: release only the pad that is actually sounding
+        if self._ks_held_ksi == ksi and self._ks_held_note is not None:
+            self.nuendo_link.send_note_off(self._ks_held_note)
+            self._ks_held_note = None
+            self._ks_held_ksi = None
+        pg.pad_pressed[row][col] = False
+        self._update_pad_colors()
+
+    def _release_ks_latch(self):
+        """Send note-off for any held KS note and clear the held/latch state."""
+        if self._ks_held_note is not None:
+            try:
+                self.nuendo_link.send_note_off(self._ks_held_note)
+            except Exception:
+                pass
+        if self._ks_held_ksi is not None:
+            try:
+                pr, pc = self.pad_grid._ks_pad_position(self._ks_held_ksi)
+                self.pad_grid.pad_pressed[pr][pc] = False
+            except Exception:
+                pass
+        self._ks_held_note = None
+        self._ks_held_ksi = None
+        self.pad_grid.ks_latched_index = None
+
+    def _update_ks_edit_leds(self):
+        """Refresh the lower-row LEDs (delegates to the single LED updater so the
+        KS config buttons stay consistent and are not overwritten by the loop)."""
+        self._update_lower_row_leds()
+
+    # ─────────────────────────────────────────
+    # XY pad (MODE_XY) — relative input, absolute CC output
+    # ─────────────────────────────────────────
+
+    def _xy_update(self, event, row, col, pressure):
+        """Track pressed-pad pressures and reprocess the centroid on each event."""
+        if event == 'press':
+            self._xy_pressures[(row, col)] = max(1, int(pressure))
+        elif event == 'after':
+            if (row, col) in self._xy_pressures:
+                self._xy_pressures[(row, col)] = max(1, int(pressure))
+        elif event == 'release':
+            self._xy_pressures.pop((row, col), None)
+        self._xy_process()
+
+    def _xy_process(self):
+        """Compute the pressure-weighted centroid and feed its delta into the
+        per-axis accumulators (relative). Output is sent as absolute CC."""
+        st = self.state
+        if not self._xy_pressures:
+            # Finger lifted: drop the reference so the next touch causes no jump.
+            self._xy_centroid = None
+            return
+        total = sum(self._xy_pressures.values())
+        if total <= 0:
+            return
+        cx = sum(c * p for (r, c), p in self._xy_pressures.items()) / total
+        cy = sum(r * p for (r, c), p in self._xy_pressures.items()) / total
+
+        if self._xy_centroid is None:
+            # First contact = reference point only (no movement, no jump).
+            self._xy_centroid = (cx, cy)
+            return
+
+        # Smooth the centroid (low-pass) to tame pressure jitter.
+        a = max(0.0, min(0.9, st.xy_smooth))
+        scx = self._xy_centroid[0] * a + cx * (1 - a)
+        scy = self._xy_centroid[1] * a + cy * (1 - a)
+
+        dx = scx - self._xy_centroid[0]
+        dy = self._xy_centroid[1] - scy   # invert Y: moving up increases the value
+        self._xy_centroid = (scx, scy)
+
+        scale = (127.0 / 7.0) * max(0.1, st.xy_sensitivity)
+        st.xy_val_x = max(0.0, min(127.0, st.xy_val_x + dx * scale))
+        st.xy_val_y = max(0.0, min(127.0, st.xy_val_y + dy * scale))
+        self._xy_send()
+
+    def _xy_send(self):
+        """Route the current X/Y accumulators to their assigned targets (on change)."""
+        st = self.state
+        ix = int(round(st.xy_val_x))
+        iy = int(round(st.xy_val_y))
+        lx, ly = self._xy_last_sent
+        if ix != lx:
+            self._xy_route_axis(st.xy_cat_x, st.xy_track_param_x, st.xy_cc_x, ix)
+        if iy != ly:
+            self._xy_route_axis(st.xy_cat_y, st.xy_track_param_y, st.xy_cc_y, iy)
+        self._xy_last_sent = (ix, iy)
+        self._update_pad_colors()
+
+    def _xy_route_axis(self, category, track_param, cc_num, value):
+        """Send one axis value (0-127) to its assigned target on the selected track."""
+        st = self.state
+        if category == 'cc':
+            self.nuendo_link.send_midi_cc_to_notes(cc_num, value)
+            return
+        # Track parameter (selected track). Volume/Pan are addressed by bank slot.
+        slot = st.selected_track_index - st.bank_offset
+        norm = value / 127.0
+        if track_param == 0:        # Volume
+            if 0 <= slot < 8:
+                self.nuendo_link.send_volume_change(slot, norm)
+        elif track_param == 1:      # Pan
+            if 0 <= slot < 8:
+                self.nuendo_link.send_pan_change(slot, norm * 2.0 - 1.0)
+        else:                       # QC1-8 (index 2..9 -> qc 0..7)
+            self.nuendo_link.send_quick_control_change(track_param - 2, norm)
+
+    def xy_axis_label(self, axis):
+        """Human label for an axis assignment, e.g. 'Volume', 'QC3', 'CC16'."""
+        st = self.state
+        cat = st.xy_cat_x if axis == 'x' else st.xy_cat_y
+        if cat == 'cc':
+            return f"CC{st.xy_cc_x if axis == 'x' else st.xy_cc_y}"
+        idx = st.xy_track_param_x if axis == 'x' else st.xy_track_param_y
+        return XY_TRACK_PARAMS[idx]
+
+    def _update_xy_pads(self):
+        """Light a crosshair at the current X/Y position."""
+        from pad_grid import PAD_OFF, PAD_GREEN, PAD_CYAN
+        st = self.state
+        tx = int(round(st.xy_val_x / 127.0 * 7))
+        ty = 7 - int(round(st.xy_val_y / 127.0 * 7))   # row (0=top, 7=bottom)
+        for row in range(8):
+            for col in range(8):
+                if row == ty and col == tx:
+                    color = PAD_GREEN
+                elif row == ty or col == tx:
+                    color = PAD_CYAN
+                else:
+                    color = PAD_OFF
+                try:
+                    pad_note = 36 + (7 - row) * 8 + col
+                    self._send_midi_to_push([0x90, pad_note, color])
+                except Exception:
+                    pass
+
+    # ─────────────────────────────────────────
     # Pad handling
     # ─────────────────────────────────────────
 
@@ -2208,7 +2500,11 @@ class Push2Controller:
         row, col = pad_ij
         if row is None:
             return
-        
+
+        if self.state.mode == MODE_XY:
+            self._xy_update('press', row, col, velocity)
+            return
+
         if self.pad_grid.scale_mode:
             self._handle_scale_pad(row, col)
             return
@@ -2217,7 +2513,14 @@ class Push2Controller:
         if self.state.mode == MODE_OVERVIEW:
             self._handle_overview_pad(row, col)
             return
-        
+
+        # Keyswitch section is monophonic (latch or momentary): handle separately
+        if self.pad_grid.is_keyswitch_layout:
+            ksi = self.pad_grid._ks_index_for_pad(row, col)
+            if ksi is not None:
+                self._handle_ks_press(ksi, row, col, velocity)
+                return
+
         self.pad_grid.pad_pressed[row][col] = True
         
         # Send Note On to Nuendo
@@ -2255,15 +2558,26 @@ class Push2Controller:
         row, col = pad_ij
         if row is None:
             return
-        
+
+        if self.state.mode == MODE_XY:
+            self._xy_update('release', row, col, velocity)
+            return
+
         if self.pad_grid.scale_mode:
             return
         
         if self.state.mode == MODE_OVERVIEW:
             return
-        
+
+        # Keyswitch section: monophonic release (latch keeps the note held)
+        if self.pad_grid.is_keyswitch_layout:
+            ksi = self.pad_grid._ks_index_for_pad(row, col)
+            if ksi is not None:
+                self._handle_ks_release(ksi, row, col)
+                return
+
         self.pad_grid.pad_pressed[row][col] = False
-        
+
         # Send Note Off to Nuendo
         midi_note = self.pad_grid.pad_to_note(row, col)
         if midi_note < 0:
@@ -2303,6 +2617,9 @@ class Push2Controller:
         """
         row, col = pad_ij
         if row is None:
+            return
+        if self.state.mode == MODE_XY:
+            self._xy_update('after', row, col, velocity)
             return
         if self.state.aftertouch_mode == AT_OFF:
             return
@@ -2382,6 +2699,11 @@ class Push2Controller:
 
     def _update_pad_colors(self):
         """Update all pad colors."""
+        # Keep the Mix-footer note range in sync with the current pad layout.
+        try:
+            self.state.pad_note_range = self.pad_grid.note_range_label()
+        except Exception:
+            pass
         if not self.push or not self.push.midi_is_configured():
             return
         
@@ -2389,7 +2711,11 @@ class Push2Controller:
         if self.state.mode == MODE_OVERVIEW:
             self._update_overview_pads()
             return
-        
+
+        if self.state.mode == MODE_XY:
+            self._update_xy_pads()
+            return
+
         if self.pad_grid.scale_mode:
             self._update_scale_mode_pads()
             return
@@ -2843,6 +3169,11 @@ class Push2Controller:
         old_mode = self.state.mode
         self.state.mode = new_mode
         self.state.insert_params_mode = False  # Always reset when changing mode
+        # Leaving Channel Strip: clear the CS-DA ownership flag so the insert
+        # viewer's 0x16/0x17 param feedback is no longer suppressed (the two
+        # share insert_param_names/values).
+        if old_mode == MODE_CHANNEL_STRIP and new_mode != MODE_CHANNEL_STRIP:
+            self.state.cs_strip_da_active = False
         self.nuendo_link._da_mapping_active = False
         self.state.active_mapping = None
         self.nuendo_link.send_mode_change(new_mode)
@@ -3075,14 +3406,7 @@ class Push2Controller:
             # Rec (CC 86, colored): orange=idle, blink red=armed, solid red=recording
             self._update_rec_led()
             
-            if BTN_AUTOMATE:
-                track = self.state.selected_track
-                if track and track.automation_write:
-                    self._send_midi_to_push([0xB0, 89, 4])    # Red
-                elif track and track.automation_read:
-                    self._send_midi_to_push([0xB0, 89, 21])   # Green
-                else:
-                    self._send_midi_to_push([0xB0, 89, BTN_WHITE])
+            self._update_automate_led()
             # Metronome (monochrome)
             if BTN_METRONOME:
                 self._set_mono_led(BTN_METRONOME, 127 if self.state.metronome_on else 0)
@@ -3162,12 +3486,21 @@ class Push2Controller:
         """Upper row LEDs (CC 102-109)."""
         if not self.push:
             return
-        
+
         state = self.state
-        
+
+        # ── XY pad: upper row disabled (all off) ──
+        if state.mode == MODE_XY:
+            for i in range(8):
+                try:
+                    self._send_midi_to_push([0xB0, 102 + i, LED_OFF])
+                except Exception:
+                    pass
+            return
+
         # ── Setup mode: upper row = page tabs ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
             for i in range(8):
                 cc = 102 + i
                 try:
@@ -3347,6 +3680,26 @@ class Push2Controller:
         except Exception:
             pass
 
+    def _update_automate_led(self):
+        """Update Automate button LED (CC 89) from the SELECTED track only.
+
+        Write → red, Read → green, neither → white. (The API only reports
+        automation mode for the current bank, so a reliable project-wide
+        indicator isn't possible — we keep it to the selected track.)
+        """
+        if not (self.push and BTN_AUTOMATE):
+            return
+        try:
+            sel = self.state.selected_track
+            if sel and sel.automation_write:
+                self._send_midi_to_push([0xB0, 89, 4])     # Red
+            elif sel and sel.automation_read:
+                self._send_midi_to_push([0xB0, 89, 21])    # Green
+            else:
+                self._send_midi_to_push([0xB0, 89, BTN_WHITE])
+        except Exception:
+            pass
+
     def _update_accent_led(self):
         """Update Accent button LED."""
         if not self.push:
@@ -3405,9 +3758,44 @@ class Push2Controller:
         """Lower row LEDs based on mode (mute/solo/monitor/rec)."""
         if not self.push:
             return
-        
+
         state = self.state
-        
+
+        # ── XY pad: lower 1/2 = X/Y category (track=white, cc=yellow); 5-8 = M/S/Mon/R ──
+        if state.mode == MODE_XY:
+            sel = state.selected_track_index
+            track = state.tracks[sel] if 0 <= sel < len(state.tracks) else None
+            colors = [LED_OFF] * 8
+            colors[0] = BTN_YELLOW if state.xy_cat_x == 'cc' else BTN_WHITE
+            colors[1] = BTN_YELLOW if state.xy_cat_y == 'cc' else BTN_WHITE
+            if track:
+                colors[4] = BTN_YELLOW if track.is_muted else BTN_DIM
+                colors[5] = BTN_BLUE if track.is_solo else BTN_DIM
+                colors[6] = BTN_ORANGE if track.is_monitored else BTN_DIM
+                colors[7] = BTN_RED if track.is_armed else BTN_DIM
+            for i in range(8):
+                try:
+                    self._send_midi_to_push([0xB0, 20 + i, colors[i]])
+                except Exception:
+                    pass
+            return
+
+        # ── Keyswitch config screen: lower row = config buttons ──
+        if self.pad_grid.ks_edit:
+            pg = self.pad_grid
+            colors = [LED_OFF] * 8
+            colors[0] = BTN_WHITE if pg.ks_mode == KS_CHROMATIC else BTN_DIM  # Chromatic
+            colors[1] = BTN_WHITE if pg.ks_mode == KS_NATURALS else BTN_DIM   # Naturals
+            colors[3] = LED_ORANGE if pg.ks_latch else BTN_DIM                # Latch
+            colors[6] = BTN_DIM   # Reset
+            colors[7] = BTN_DIM   # Done
+            for i in range(8):
+                try:
+                    self._send_midi_to_push([0xB0, 20 + i, colors[i]])
+                except Exception:
+                    pass
+            return
+
         # ── Setup mode: lower row = option buttons ──
         if state.mode == MODE_SETUP:
             AT_OPTIONS = [AT_POLY, AT_CHANNEL, AT_OFF]
@@ -3415,7 +3803,9 @@ class Push2Controller:
             for i in range(8):
                 cc = 20 + i
                 try:
-                    if state.setup_page == 0:
+                    if i == 7:
+                        self._send_midi_to_push([0xB0, cc, BTN_DIM])  # Rescan (all pages)
+                    elif state.setup_page == 0:
                         if i < 3:
                             is_sel = (state.aftertouch_mode == AT_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
@@ -3424,13 +3814,6 @@ class Push2Controller:
                     elif state.setup_page == 1:
                         if i < len(VC_OPTIONS):
                             is_sel = (state.velocity_curve == VC_OPTIONS[i])
-                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
-                        else:
-                            self._send_midi_to_push([0xB0, cc, LED_OFF])
-                    elif state.setup_page == 2:
-                        CC_OPTIONS = [CC_ABSOLUTE, CC_PICKUP]
-                        if i < len(CC_OPTIONS):
-                            is_sel = (state.cc_mode == CC_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])

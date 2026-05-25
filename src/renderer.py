@@ -18,9 +18,9 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 from state import (
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
-    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, AT_POLY, AT_CHANNEL, AT_OFF,
+    MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
+    AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
-    CC_ABSOLUTE, CC_PICKUP,
     BRIDGE_VERSION, BANK_SIZE, AppState,
     STRIP_MOD_GATE, STRIP_MOD_COMPRESSOR, STRIP_MOD_TOOLS,
     STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER,
@@ -1360,6 +1360,12 @@ def _draw_bottom_bar(draw, state):
     lower_mode = getattr(state, 'lower_mode', 'mute')
     label, color = lower_labels.get(lower_mode, ("MUTE", (200, 120, 0)))
     draw.text((120, 147), label, font=FONT_SM, fill=color)
+
+    # Pad MIDI note range (Mix page only)
+    if state.mode == MODE_VOLUME:
+        note_range = getattr(state, 'pad_note_range', '')
+        if note_range:
+            draw.text((172, 147), f"♪ {note_range}", font=FONT_SM, fill=(120, 170, 130))
     
     # Current bank (at center)
     bank_num = state.bank_offset // BANK_SIZE + 1
@@ -1392,9 +1398,6 @@ def _draw_bottom_bar(draw, state):
         draw.text((SCREEN_WIDTH - 110, 147), "○ WAITING", font=FONT_SM,
                   fill=COLOR_WARNING)
     
-    # RESCAN label above the 7th bottom button (index 6)
-    rescan_x = 6 * CELL_WIDTH + CELL_WIDTH // 2 - 16
-    draw.text((rescan_x, 147), "RESCAN", font=FONT_SM, fill=(120, 120, 120))
 
 
 # ─────────────────────────────────────────────
@@ -1412,6 +1415,73 @@ _CC_NAMES = {
     76: "Vib Rate", 77: "Vib Depth", 78: "Vib Delay",
     91: "Reverb", 92: "Tremolo", 93: "Chorus", 94: "Detune", 95: "Phaser",
 }
+
+def _xy_axis_label(state, axis):
+    """Human label for an XY axis assignment, e.g. 'Volume', 'QC3', 'CC16'."""
+    cat = state.xy_cat_x if axis == 'x' else state.xy_cat_y
+    if cat == 'cc':
+        return f"CC{state.xy_cc_x if axis == 'x' else state.xy_cc_y}"
+    idx = state.xy_track_param_x if axis == 'x' else state.xy_track_param_y
+    return XY_TRACK_PARAMS[idx]
+
+
+def _render_xy_screen(state):
+    """XY pad screen: selected-track header + X/Y assignments and live values."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    sel = state.selected_track
+    track_name = sel.name if sel else "---"
+    tcol = sel.color if sel else (90, 90, 90)
+    hdr = (min(tcol[0], 180), min(tcol[1], 180), min(tcol[2], 180))
+
+    # Header — selected track (like other modes)
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=hdr)
+    draw.text((8, 3), f"XY  -  {track_name}", font=FONT_MD, fill=_text_color_for_bg(hdr))
+
+    cw = SCREEN_WIDTH // 8
+    def col(i):
+        return i * cw + 8
+
+    x_lbl = _xy_axis_label(state, 'x')
+    y_lbl = _xy_axis_label(state, 'y')
+    cat_x = "CC" if state.xy_cat_x == 'cc' else "Track"
+    cat_y = "CC" if state.xy_cat_y == 'cc' else "Track"
+
+    # Encoder-aligned columns: Enc1=X, Enc2=Y, Enc4=Sens, Enc5=Smooth
+    draw.text((col(0), 28), "X param", font=FONT_SM, fill=(120, 160, 220))
+    draw.text((col(0), 42), x_lbl, font=FONT_MD, fill=(180, 210, 255))
+    draw.text((col(0), 64), f"{int(round(state.xy_val_x))}", font=FONT_LG_BOLD, fill=(255, 255, 255))
+    draw.text((col(0), 92), f"({cat_x})", font=FONT_SM, fill=(120, 120, 140))
+
+    draw.text((col(1), 28), "Y param", font=FONT_SM, fill=(120, 220, 170))
+    draw.text((col(1), 42), y_lbl, font=FONT_MD, fill=(180, 255, 210))
+    draw.text((col(1), 64), f"{int(round(state.xy_val_y))}", font=FONT_LG_BOLD, fill=(255, 255, 255))
+    draw.text((col(1), 92), f"({cat_y})", font=FONT_SM, fill=(120, 120, 140))
+
+    draw.text((col(3), 28), "Sens", font=FONT_SM, fill=(150, 150, 170))
+    draw.text((col(3), 42), f"{state.xy_sensitivity:.2f}", font=FONT_MD, fill=(220, 220, 230))
+    draw.text((col(4), 28), "Smooth", font=FONT_SM, fill=(150, 150, 170))
+    draw.text((col(4), 42), f"{state.xy_smooth:.2f}", font=FONT_MD, fill=(220, 220, 230))
+
+    draw.text((col(0), 118), "Lower 1/2: switch X/Y between Track params and MIDI CC",
+              font=FONT_SM, fill=(110, 110, 130))
+
+    # Footer — lower-row labels (1/2 = X/Y category, 5-8 = M/S/Mon/Rec, lit when active)
+    draw.rectangle([0, 143, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(22, 22, 28))
+    draw.text((col(0), 147), f"X:{cat_x}", font=FONT_SM, fill=(150, 200, 255))
+    draw.text((col(1), 147), f"Y:{cat_y}", font=FONT_SM, fill=(150, 255, 200))
+    foot = [
+        (4, "MUTE", (255, 200, 0),  bool(sel and sel.is_muted)),
+        (5, "SOLO", (90, 150, 255), bool(sel and sel.is_solo)),
+        (6, "MON",  (255, 150, 0),  bool(sel and sel.is_monitored)),
+        (7, "REC",  (255, 70, 70),  bool(sel and sel.is_armed)),
+    ]
+    for i, label, on_color, is_on in foot:
+        draw.text((col(i), 147), label, font=FONT_SM, fill=on_color if is_on else (110, 110, 130))
+
+    return _to_push2_frame(img)
+
 
 def _render_midicc_screen(state):
     """Render the MIDI CC controller page."""
@@ -1498,7 +1568,7 @@ def _render_midicc_screen(state):
 # ─────────────────────────────────────────────
 
 # Setup page definitions
-SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CC Mode', None, None, None, None, 'About']
+SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
 
 # Per-page options: list of (label, value) for lower row buttons
 SETUP_PAGE_OPTIONS = {
@@ -1513,10 +1583,6 @@ SETUP_PAGE_OPTIONS = {
         ('Exp',     VC_EXP),
         ('S-Curve', VC_SCURVE),
         ('Fixed',   VC_FIXED),
-    ],
-    2: [  # CC Mode page
-        ('Absolute', CC_ABSOLUTE),
-        ('Pick-up',  CC_PICKUP),
     ],
 }
 
@@ -1601,23 +1667,6 @@ def _render_setup_screen(state):
             # Separator
             draw.line([(x, 42), (x, 140)], fill=COLOR_SEPARATOR)
     
-    elif page_idx == 2:
-        # ── Page 2: CC Mode ──
-        draw.text((20, 50), "MIDI CC Encoder Mode", fill=(200, 200, 200), font=FONT_MD)
-        
-        if state.cc_mode == CC_ABSOLUTE:
-            mode_name = "Absolute"
-            desc = "Encoder value sent immediately"
-            desc2 = "May cause parameter jumps"
-        else:
-            mode_name = "Pick-up"
-            desc = "Encoder catches up to current value"
-            desc2 = "No jumps, smoother transitions"
-        
-        draw.text((20, 75), mode_name, fill=COLOR_ACCENT, font=FONT_LG)
-        draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
-        draw.text((20, 116), desc2, fill=(80, 80, 80), font=FONT_SM)
-    
     elif page_idx == 7:
         # ── Page 7: About ──
         # Bridge version
@@ -1645,8 +1694,6 @@ def _render_setup_screen(state):
                 is_selected = (state.aftertouch_mode == value)
             elif page_idx == 1:
                 is_selected = (state.velocity_curve == value)
-            elif page_idx == 2:
-                is_selected = (state.cc_mode == value)
             else:
                 is_selected = False
             
@@ -1658,7 +1705,12 @@ def _render_setup_screen(state):
             tw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
             tx = x + (CELL_WIDTH - tw) // 2
             draw.text((tx, 146), label, fill=color, font=FONT_SM)
-    
+
+    # Rescan action on lower row 8 (available on every Setup page)
+    rx = 7 * CELL_WIDTH
+    rtw = FONT_SM.getlength("RESCAN") if hasattr(FONT_SM, 'getlength') else 36
+    draw.text((rx + (CELL_WIDTH - rtw) // 2, 146), "RESCAN", fill=(150, 150, 150), font=FONT_SM)
+
     return _to_push2_frame(img)
 
 def _draw_velocity_preview(draw, x, y, w, h, vc_mode, color=None, fixed_vel=100):
@@ -2871,7 +2923,10 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
     
     if pad_grid and pad_grid.scale_mode:
         return _render_scale_screen(pad_grid)
-    
+
+    if pad_grid and getattr(pad_grid, 'ks_edit', False):
+        return _render_ks_edit_screen(pad_grid)
+
     if state.accent_held:
         return _render_accent_screen(state)
     
@@ -2883,7 +2938,10 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
     
     if state.mode == MODE_MIDICC:
         return _render_midicc_screen(state)
-    
+
+    if state.mode == MODE_XY:
+        return _render_xy_screen(state)
+
     if state.mode == MODE_BROWSER:
         return _render_browser_screen(state)
     
@@ -3142,6 +3200,78 @@ def _render_accent_screen(state):
     except Exception as e:
         print(f"  ✗ Accent screen error: {e}")
         return None
+
+
+def _render_ks_edit_screen(pad_grid):
+    """Display the keyswitch configuration screen (long-press Layout)."""
+    from pad_grid import midi_note_name, KS_CHROMATIC, KS_NATURALS, LAYOUT_KS16
+
+    ORANGE = (255, 150, 0)
+    ORANGE_DIM = (120, 70, 0)
+
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=(15, 15, 20))
+    draw = ImageDraw.Draw(img)
+
+    count = pad_grid.ks_count()
+    notes = pad_grid.ks_effective_notes()
+    page = pad_grid.ks_edit_page if pad_grid.note_layout == LAYOUT_KS16 else 0
+    base = page * 8
+
+    # ── Title + status line ──
+    draw.text((8, 2), "KEYSWITCH CONFIG", font=FONT_MD, fill=ORANGE)
+    mode_txt = "Chromatic" if pad_grid.ks_mode == KS_CHROMATIC else "Naturals"
+    latch_txt = "Latch ON" if pad_grid.ks_latch else "Latch off"
+    status = f"{count} keys   {mode_txt}   {latch_txt}"
+    if pad_grid.note_layout == LAYOUT_KS16:
+        status += f"   Page {page + 1}/2"
+    draw.text((SCREEN_WIDTH - 360, 4), status, font=FONT_SM, fill=(150, 150, 170))
+
+    # ── Encoder cells: one per encoder (8), showing the keyswitch note ──
+    col_w = SCREEN_WIDTH // 8
+    cell_top = 26
+    cell_bot = 132
+    for c in range(8):
+        ks_index = base + c
+        x = c * col_w
+        if ks_index >= count:
+            continue
+        note = notes[ks_index]
+        is_start = (ks_index == 0)
+        is_override = ks_index in pad_grid.ks_overrides
+
+        # cell frame
+        draw.rectangle([x + 3, cell_top, x + col_w - 3, cell_bot],
+                       outline=(45, 45, 55), width=1)
+        # KS number (1-based), with markers
+        label = f"KS{ks_index + 1}"
+        if is_start:
+            label += "*"            # start note
+        draw.text((x + 10, cell_top + 4), label, font=FONT_SM,
+                  fill=ORANGE if not is_override else (255, 210, 120))
+        # note name (big)
+        name = midi_note_name(note)
+        draw.text((x + 10, cell_top + 30), name, font=FONT_LG_BOLD,
+                  fill=(255, 255, 255) if not is_override else (255, 210, 120))
+        # markers legend per cell
+        if is_start:
+            draw.text((x + 10, cell_bot - 22), "start", font=FONT_SM, fill=(110, 110, 130))
+        elif is_override:
+            draw.text((x + 10, cell_bot - 22), "set", font=FONT_SM, fill=(150, 110, 60))
+
+    # ── Bottom bar: lower-row button labels ──
+    draw.rectangle([0, 138, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(22, 22, 28))
+    labels = ["Chromatic", "Naturals", "", "Latch", "", "", "Reset", "Done"]
+    for i, lbl in enumerate(labels):
+        if not lbl:
+            continue
+        x = i * col_w + 8
+        active = ((i == 0 and pad_grid.ks_mode == KS_CHROMATIC) or
+                  (i == 1 and pad_grid.ks_mode == KS_NATURALS) or
+                  (i == 3 and pad_grid.ks_latch))
+        color = ORANGE if active else (130, 130, 145)
+        draw.text((x, 144), lbl, font=FONT_SM, fill=color)
+
+    return _to_push2_frame(img)
 
 
 def _render_scale_screen(pad_grid):

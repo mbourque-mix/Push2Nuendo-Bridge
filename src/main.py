@@ -13,9 +13,54 @@ Access it at http://localhost:8100 to create parameter mappings.
 import sys
 
 
+def _ensure_windows_console():
+    """In a windowed (--noconsole) build, allocate a console for --terminal mode."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.GetConsoleWindow() == 0:
+            kernel32.AllocConsole()
+            sys.stdout = open("CONOUT$", "w")
+            sys.stderr = open("CONOUT$", "w")
+            try:
+                sys.stdin = open("CONIN$", "r")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _ensure_libusb_on_windows():
+    """Make libusb-1.0.dll discoverable when running from source on Windows.
+
+    The frozen .exe bundles the DLL (via PyInstaller --add-binary), but a
+    source run relies on it being on the DLL search path. If the optional
+    ``libusb-package`` is installed, add its bundled DLL folder so pyusb's
+    libusb1 backend can find it. No-op elsewhere / if not installed.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import os
+        from pathlib import Path
+        import libusb_package
+        pkg_dir = Path(libusb_package.__file__).parent
+        for dll in pkg_dir.rglob("libusb-1.0.dll"):
+            d = str(dll.parent)
+            try:
+                os.add_dll_directory(d)
+            except Exception:
+                pass
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            break
+    except Exception:
+        pass  # best-effort; falls back to the system libusb if present
+
+
 def main():
     force_terminal = "--terminal" in sys.argv or "-t" in sys.argv
-    
+    _ensure_libusb_on_windows()
+
     if sys.platform == "darwin" and not force_terminal:
         try:
             from main_macos import main as macos_main
@@ -25,7 +70,17 @@ def main():
             print("  Install it with: pip install rumps")
             print()
             terminal_main()
+    elif sys.platform == "win32" and not force_terminal:
+        try:
+            from main_windows import main as win_main
+            win_main()
+        except ImportError:
+            # pystray missing — fall back to the console version
+            _ensure_windows_console()
+            terminal_main()
     else:
+        if sys.platform == "win32":
+            _ensure_windows_console()
         terminal_main()
 
 
@@ -128,13 +183,12 @@ PLUGIN_MAPPER_URL = "http://localhost:8100"
 
 def _announce_plugin_mapper(mapper_status):
     """
-    Print a prominent, clickable Plugin Mapper link in the console and
-    open it in the default browser once on startup.
+    Print a prominent, clickable Plugin Mapper link in the console.
 
     Most modern terminals (Windows Terminal, macOS Terminal, iTerm2)
     render bare ``http://`` URLs as clickable links, so we frame the URL
-    on its own line for easy access. Auto-open can be disabled with
-    ``--no-browser`` / ``-nb``.
+    on its own line for easy access. The browser is NOT opened
+    automatically; pass ``--open-mapper`` to open it on startup.
     """
     if "running at" not in (mapper_status or ""):
         return  # mapper not available — nothing to link to
@@ -146,13 +200,14 @@ def _announce_plugin_mapper(mapper_status):
     print("  +-----------------------------------------------+")
     print()
 
-    if "--no-browser" in sys.argv or "-nb" in sys.argv:
-        return
-    try:
-        import webbrowser
-        webbrowser.open(PLUGIN_MAPPER_URL)
-    except Exception:
-        pass  # browser auto-open is best-effort only
+    # Auto-open is opt-in (the link above is clickable; the menu-bar / tray
+    # menus open it on demand). Use --open-mapper to open it at startup.
+    if "--open-mapper" in sys.argv:
+        try:
+            import webbrowser
+            webbrowser.open(PLUGIN_MAPPER_URL)
+        except Exception:
+            pass  # browser auto-open is best-effort only
 
 
 def terminal_main():

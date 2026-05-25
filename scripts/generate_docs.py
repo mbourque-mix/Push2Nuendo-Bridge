@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate PDF documents for Push2Nuendo-Bridge v1.0.4
+"""Generate PDF documents for Push2Nuendo-Bridge v1.0.5
 
 Usage: python scripts/generate_docs.py
 Output: docs/*.pdf
@@ -53,10 +53,28 @@ def footer(c,d):
     c.drawCentredString(letter[0]/2,0.5*inch,f"Push 2 / Nuendo Bridge \u2014 Page {d.page}"); c.restoreState()
 
 def build_release_notes():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
     s.append(Paragraph("Release Notes", sSub))
+
+    # \u2500\u2500 Version 1.0.5 \u2500\u2500
+    s.append(Paragraph("Version 1.0.5 \u2014 May 2026", sH1))
+    s.append(Paragraph("New Features", sH2))
+    s.append(B("<b>Keyswitch pad layouts</b>: the Layout button now cycles through four pad layouts \u2014 64 notes, 56 notes + 8 keyswitches, 48 notes + 16 keyswitches, and Drum. Keyswitch pads sit on the bottom row(s), light orange, and trigger user-defined absolute notes (ideal for articulation keyswitches). Long-press Layout to configure: Enc 1 sets the starting note, Enc 2-8 override individual pads, and the lower row toggles Chromatic / Naturals layout, Latch (the keyswitch section is monophonic \u2014 only one active at a time), Reset, and Done. Note names follow Cubase convention (C-2 = MIDI 0). Configuration is in-memory (not persisted)."))
+    s.append(B("<b>Two octatonic scales</b>: <i>Octatonic WH</i> and <i>Octatonic HW</i> added to the Scale menu."))
+    s.append(B("<b>XY pad</b> (Session button): the 64 pads become an XY morphing surface controlling two parameters of the selected track (Volume, Pan, Quick Controls 1-8) or raw MIDI CC. Relative, pressure-weighted input means no jump when you touch down, and two-finger input interpolates smoothly. Lower 1/2 pick the X/Y category (Track / CC), Enc 1/2 pick the X/Y parameter, Enc 4/5 set sensitivity and smoothing, Lower 5-8 toggle Mute/Solo/Monitor/Record for the selected track, and the arrows navigate tracks."))
+    s.append(B("<b>Pad note range in the Mix footer</b>: the Mix page footer now shows the MIDI note range currently mapped to the pads (keyswitch pads excluded in keyswitch layouts)."))
+    s.append(B("<b>Per-track automation feedback</b>: each bank track's Read/Write automation mode is now reflected on screen, not just the selected track's."))
+    s.append(B("<b>Windows System Tray app</b>: on Windows the bridge now runs from the system tray (status, Open Plugin Mapper, Show Log, Quit) instead of a console window. Run with <i>--terminal</i> for the classic console version. The Plugin Mapper no longer opens a browser automatically."))
+    s.append(B("<b>Rescan moved to the Setup page</b> (lower-row button 8, available on every Setup page)."))
+    s.append(Paragraph("Bug Fixes", sH2))
+    s.append(B("<b>Control Room Main reset</b> (Shift+Touch on the rightmost encoder) now lands on an exact 0.00 dB instead of -0.01 dB."))
+    s.append(B("<b>Channel Strip module values</b> now appear immediately on entering a module (Gate, Comp, EQ, etc.) and stay visible, instead of only showing after you nudge a parameter."))
+    s.append(B("<b>Saturator and Limiter encoders</b> now respond to changes (the sub-page activation could fail silently for those two slots)."))
+    s.append(B("<b>Inserts page</b>: an insert is no longer occasionally shown duplicated in another slot (display only)."))
+    s.append(B("<b>CC Pick-up mode removed</b>: the MIDI CC page is Absolute only. Pick-up required parameter feedback that a normal setup does not provide, so it behaved identically to Absolute."))
+    s.append(PageBreak())
 
     # \u2500\u2500 Version 1.0.4 \u2500\u2500
     s.append(Paragraph("Version 1.0.4 \u2014 May 2026", sH1))
@@ -77,7 +95,7 @@ def build_release_notes():
     s.append(B("Dedicated read bindings for PreFilter Phase / section bypass and ChannelEQ bypass so the on-screen state stays in sync."))
     s.append(B("SysEx range 0x34\u20130x3E and ch8 CC 70\u201378 allocated for strip slot cache, bypass, edit, param-flip, variant probe and live feedback."))
     s.append(Paragraph("Known Limitations", sH2))
-    s.append(B("<b>Windows — Push 2 cannot be used by the bridge and Ableton Live at the same time.</b> The Push 2 USB endpoint is exclusive: only one app can talk to it at a moment. Close one to use the other. On recent Live versions (12.x tested) the WinUSB driver Zadig installs works fine for Live as well, so no driver swap is needed in normal use. If you ever need to fully restore Ableton's original driver (older Live setups, or returning to a Live-only workflow), see <i>“Restoring the original driver”</i> in the Windows Installation Guide. (macOS is not affected.)"))
+    s.append(B("<b>Windows — the bridge and Ableton Live cannot use the Push 2 at the same time.</b> Windows installs the Push 2's WinUSB driver automatically (no Zadig needed); the bridge and Live share that same driver, but only one app can hold the USB connection at a moment — close one to use the other. (macOS is not affected.)"))
     s.append(B("Channel Strip modules must be <b>activated manually in Nuendo</b> first — an empty or disabled strip slot (Gate, Comp, EQ, Tools, Sat, Limiter) is not exposed to the Push 2. Load/enable the module in the Nuendo channel strip before controlling it from the controller."))
     s.append(B("Strip slot <b>variant switching from the Push is not possible</b> \u2014 Cubase locks strip-slot plugin selection; the MIDI Remote API (trySetSlotPlugin / the slot 'Effect Type' tag) is silently rejected. Switch variants in Nuendo's strip-slot menu; the on-screen chip mirrors the active variant in real time."))
     s.append(B("Opening a strip-slot plugin's <b>Edit UI from the Push is not exposed</b> by the MIDI Remote API (mEdit toggles a flag but Nuendo does not open the window). Use the 'e' button in the mixer console."))
@@ -197,10 +215,10 @@ def build_mapper_guide():
     print("  done: Plugin Mapper Guide")
 
 def build_user_guide():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
-    s.append(Paragraph("User Guide &amp; Installation Manual \u2014 Version 1.0.4", sSub))
+    s.append(Paragraph("User Guide &amp; Installation Manual \u2014 Version 1.0.5", sSub))
     s.append(Paragraph("Compatible with Nuendo 14+ and Cubase 14+ \u2014 macOS and Windows", sCtr))
     s.append(Paragraph("This guide covers installation, configuration, and use of the Push 2 / Nuendo Bridge.", sB))
     # TOC
@@ -223,7 +241,7 @@ def build_user_guide():
     s.append(B("Step 2: Install libusb \u2014 <font face='Courier'>brew install libusb</font>"))
     s.append(B("Step 3: Copy Push2 Nuendo Bridge.app to /Applications"))
     s.append(B("Step 4: The app is <b>not code-signed</b>, so macOS Gatekeeper blocks it on first launch. Open Terminal and remove the quarantine flag (match the version in the .app name to your copy):"))
-    s.append(Paragraph("xattr -dr com.apple.quarantine \"/Applications/Push2 Nuendo Bridge_v1.0.4.app\"", sCode))
+    s.append(Paragraph("xattr -dr com.apple.quarantine \"/Applications/Push2 Nuendo Bridge_v1.0.5.app\"", sCode))
     s.append(B("Step 5: Copy Ableton_Push2.js to:<br/>~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/<br/>Create the Ableton/Push2 folder if it doesn't exist."))
     s.append(B("Step 6: Double-click the app. A P2 icon appears in the menu bar."))
     # 3
@@ -231,8 +249,8 @@ def build_user_guide():
     s.append(Paragraph("Windows now ships as a <b>standalone .exe</b> \u2014 no Python, pip or command line required. See the separate Windows Installation Guide for the step-by-step walkthrough. Key points:", sB))
     s.append(B("Download <b>Push2NuendoBridge-vX.Y.Z-Windows.zip</b> and unzip it anywhere (e.g. Documents). It contains the <font face='Courier'>.exe</font>, <font face='Courier'>Ableton_Push2.js</font> and the PDF guides."))
     s.append(B("Install <b>loopMIDI</b> and create the four ports: <font face='Courier'>NuendoBridge In</font>, <font face='Courier'>NuendoBridge Out</font>, <font face='Courier'>BridgeNotes</font>, <font face='Courier'>BridgeNotes In</font>. Set it to start with Windows."))
-    s.append(B("Install the <b>WinUSB driver for the Push 2 with Zadig</b> (one time) so the bridge can talk to the device over USB. <b>Critical:</b> target the Push 2's <b>display/bulk interface</b> (USB ID <font face='Courier'>2982:1967</font>) — <b>NOT</b> the MIDI interface, or you will break MIDI on the Push. Full step-by-step in the Windows Installation Guide."))
-    s.append(Paragraph("Note: the bridge and Ableton Live share the same Push 2 USB endpoint, so they cannot both control the Push at the same time \u2014 close one to use the other. On recent Live versions (12.x tested) the WinUSB driver Zadig installs works fine for Live too, so no driver swap is needed in normal use. The Windows Installation Guide covers how to restore Ableton's original driver if you ever need to (for older Live setups). macOS is not affected.", sNote))
+    s.append(B("<b>Plug in the Push 2</b> — Windows installs the required USB driver (WinUSB) automatically the first time you connect it. No Zadig, no manual driver step."))
+    s.append(Paragraph("Note: the bridge and Ableton Live share the same Push 2 USB connection, so they cannot both control it at the same time \u2014 close one to use the other. macOS is not affected. (If Windows ever fails to auto-install the driver, the Windows Installation Guide's Troubleshooting section shows how to force it with Zadig.)", sNote))
     s.append(B("<b>Double-click the .exe</b> to run the bridge \u2014 a console window shows the status and a clickable Plugin Mapper link (http://localhost:8100)."))
     s.append(Paragraph("No Python install is needed: the interpreter, all dependencies and the libusb runtime are bundled inside the .exe.", sNote))
     s.append(B("Copy <b>Ableton_Push2.js</b> to the MIDI Remote scripts folder, creating the sub-folders if needed:"))
@@ -401,12 +419,13 @@ def build_user_guide():
     print("  done: User Guide")
 
 def build_windows_install_guide():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
-    s.append(Paragraph("Windows Installation Guide — Version 1.0.4", sSub))
+    s.append(Paragraph("Windows Installation Guide — Version 1.0.5", sSub))
     s.append(Paragraph("Standalone .exe — no Python, no pip, no command line", sCtr))
-    s.append(Paragraph("From version 1.0.4 the Windows bridge is a single self-contained executable. The Python interpreter, every dependency and the libusb USB runtime are bundled inside the .exe. You only need to set up the virtual MIDI ports (loopMIDI), the Push 2 USB driver (Zadig) and the Nuendo/Cubase MIDI Remote script.", sB))
+    s.append(Paragraph("From version 1.0.4 the Windows bridge is a single self-contained executable. The Python interpreter, every dependency and the libusb USB runtime are bundled inside the .exe. You only need to set up the virtual MIDI ports (loopMIDI) and the Nuendo/Cubase MIDI Remote script — the Push 2's USB driver installs itself automatically on Windows.", sB))
+    s.append(Paragraph("On Windows the bridge runs from the <b>system tray</b> (look for its icon near the clock) rather than a console window. Right-click the tray icon for status, Open Plugin Mapper, Show Log, and Quit. To run the classic console version instead, launch the .exe with the <font face='Courier'>--terminal</font> flag.", sNote))
 
     s.append(Paragraph("What you downloaded", sH1))
     s.append(B("<b>Push2NuendoBridge-vX.Y.Z-Windows.zip</b> — unzip it anywhere you like (e.g. <font face='Courier'>Documents\\Push2Bridge</font>). It contains:"))
@@ -421,23 +440,11 @@ def build_windows_install_guide():
     s.append(Paragraph("NuendoBridge In<br/>NuendoBridge Out<br/>BridgeNotes<br/>BridgeNotes In", sCode))
     s.append(B("Right-click the loopMIDI tray icon and enable <b>“Autostart loopMIDI”</b> so the ports exist every time Windows starts."))
 
-    s.append(Paragraph("Step 2 — Push 2 USB driver (Zadig)", sH1))
-    s.append(B("The bridge talks to the Push 2 over raw USB and needs the <b>WinUSB</b> driver. This is a one-time setup."))
-    s.append(B("Close Ableton Live if it is running (it grabs the Push 2 exclusively)."))
-    s.append(B("Download Zadig: https://zadig.akeo.ie"))
-    s.append(B("Connect the Push 2 by USB. In Zadig: <b>Options → List All Devices</b>. Several entries named <b>Ableton Push 2</b> will appear in the dropdown — one per USB interface (the Push 2 is a composite device with MIDI and display interfaces)."))
-    s.append(B("Select the <b>display/bulk interface</b> — <b>NOT</b> the MIDI interface. Identify it by the <b>USB ID <font face='Courier'>2982:1967</font></b> shown in Zadig (and typically labelled <i>Interface 0</i>). Picking the MIDI interface by mistake would replace its standard Windows MIDI driver and break MIDI input/output."))
-    s.append(B("With that interface selected, choose <b>WinUSB</b> as the target driver and click <b>Install Driver</b> (or <b>Replace Driver</b>). Wait for “The driver was installed successfully”."))
-    s.append(Paragraph("Note: the bridge and Ableton Live share the same Push 2 USB endpoint, so they cannot both control the Push at the same time — close one to use the other. Recent Live versions (12.x tested) work fine with this same WinUSB driver, so in normal use no driver swap is required. If you ever need to fully restore Ableton's original driver (older Live setups, or returning to a Live-only workflow), see <i>“Restoring the original driver”</i> below.", sNote))
-
-    s.append(Paragraph("Restoring the original driver (optional, for older Live setups)", sH2))
-    s.append(B("Quit the bridge and close Ableton Live."))
-    s.append(B("Open <b>Device Manager</b> (right-click Start → Device Manager)."))
-    s.append(B("Find <b>Ableton Push 2</b> — it appears under <i>Universal Serial Bus devices</i> (the WinUSB entry). Tip: View → <i>Devices by container</i> if you do not see it."))
-    s.append(B("Right-click it → <b>Uninstall device</b>, tick <b>“Delete the driver software for this device”</b>, confirm."))
-    s.append(B("Unplug the Push 2 USB cable, wait a few seconds, plug it back in (or Action → <i>Scan for hardware changes</i>). Windows reinstalls the default driver."))
-    s.append(B("Launch <b>Ableton Live</b> — it re-establishes its own Push 2 connection. If Live still does not see it, repair/reinstall Live so it reinstalls its Push 2 driver."))
-    s.append(Paragraph("To switch back to the bridge later, simply re-run the Zadig WinUSB step above. You can flip between WinUSB (bridge) and the Ableton driver (Live) as often as you like — it is a 30-second operation each way.", sNote))
+    s.append(Paragraph("Step 2 — Push 2 USB driver (automatic)", sH1))
+    s.append(B("<b>There is nothing to install.</b> The Push 2 advertises a Microsoft “WinUSB” compatible-ID descriptor, so Windows 8/10/11 installs the right driver automatically the first time you plug it in. The bridge talks to the Push 2 through that built-in WinUSB driver."))
+    s.append(B("Just connect the Push 2 by USB and wait a few seconds for Windows to finish setting it up. No Zadig, no manual driver step."))
+    s.append(Paragraph("The bridge and Ableton Live use this same WinUSB driver, but only one app can hold the Push 2's USB connection at a time — so the bridge and Live cannot control the Push simultaneously. Close one to use the other. No driver change is needed to go back and forth (tested with Live 12). macOS is not affected.", sNote))
+    s.append(Paragraph("Fallback (rare): if the bridge cannot find the Push 2 even though it is connected, see “Push 2 not detected” in Troubleshooting below.", sNote))
 
     s.append(Paragraph("Step 3 — Install the MIDI Remote script", sH1))
     s.append(B("Copy <b>Ableton_Push2.js</b> into the Steinberg MIDI Remote scripts folder, creating the sub-folders if they do not exist:"))
@@ -470,7 +477,7 @@ def build_windows_install_guide():
     s.append(B("The Plugin Mapper web server is bundled and starts automatically with the .exe — no extra install. Open <font face='Courier'>http://localhost:8100</font> (the console prints and opens the link) to create custom plugin parameter mappings. See the Plugin Mapper Guide for details."))
 
     s.append(Paragraph("Troubleshooting", sH1))
-    s.append(B("<b>“Could not connect to Push 2”</b> — Close Ableton Live; re-check the Zadig WinUSB driver (Step 2); reconnect the USB cable."))
+    s.append(B("<b>Push 2 not detected / “Could not connect to Push 2”</b> — Close Ableton Live (only one app can hold the Push at a time). Unplug and replug the USB cable so Windows finishes installing the driver; give it a few seconds. <b>Last resort</b> (very rare, e.g. an old Windows build or a corporate-locked PC that does not auto-install the driver): install WinUSB manually with <b>Zadig</b> (https://zadig.akeo.ie) — Options → List All Devices → select <b>Ableton Push 2</b> (display/bulk interface, USB ID <font face='Courier'>2982:1967</font>, <b>not</b> the MIDI interface) → WinUSB → Install Driver."))
     s.append(B("<b>“Could not open MIDI ports”</b> — loopMIDI is not running or the four port names are not exactly as in Step 1."))
     s.append(B("<b>Push 2 connects but Nuendo does nothing</b> — The MIDI Remote script is missing or the surface ports are wrong (Step 3 / Step 5)."))
     s.append(B("<b>Doubled pad notes</b> — Uncheck the two Push 2 ports from “In All MIDI Inputs” (Step 5)."))

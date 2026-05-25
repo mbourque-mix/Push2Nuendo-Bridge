@@ -48,7 +48,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyinstaller libusb-package
-          python -m pip install fastapi uvicorn pedalboard
+          python -m pip install fastapi uvicorn pedalboard pystray
           python -m pip install -r requirements.txt
 
       - name: Locate libusb-1.0.dll
@@ -71,7 +71,7 @@ jobs:
           pyinstaller `
             --name "$name" `
             --onefile `
-            --console `
+            --windowed `
             --noconfirm `
             --clean `
             --paths . `
@@ -85,6 +85,9 @@ jobs:
             --add-data "control_room.py;." `
             --add-data "repeat.py;." `
             --add-data "overview.py;." `
+            --add-data "main_windows.py;." `
+            --collect-all pystray `
+            --hidden-import main_windows `
             --hidden-import state `
             --hidden-import nuendo_link `
             --hidden-import push2_controller `

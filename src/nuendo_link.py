@@ -628,6 +628,13 @@ class NuendoLink:
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x11:
             # Insert slot name : [F0 00 11 slotIndex ...chars F7]
+            # Viewer feedback (mEdit.mOnTitleChange) tags the plugin name with the
+            # viewer's *current* slot, which lags behind when an insert is opened.
+            # When DirectAccess built the authoritative slot list, ignore this path
+            # entirely — otherwise a stale slot index writes the plugin name into
+            # the wrong slot and it appears duplicated (#6).
+            if getattr(self, '_da_available', False):
+                return
             if getattr(self, '_bypass_navigating', False):
                 return
             slot = message[3]
@@ -655,6 +662,8 @@ class NuendoLink:
             # Insert param name : [F0 00 16 paramIndex ...chars F7]
             if getattr(self, '_da_mapping_active', False):
                 return  # Suppress — DA params are driving the display
+            if getattr(self.state, 'cs_strip_da_active', False):
+                return  # Suppress — Channel Strip DA owns insert_param_names now
             idx = message[3]
             name = ''.join(chr(b) for b in message[4:-1])
             state = self.state
@@ -667,6 +676,8 @@ class NuendoLink:
             # Insert param display value : [F0 00 17 paramIndex ...chars F7]
             if getattr(self, '_da_mapping_active', False):
                 return  # Suppress — DA params are driving the display
+            if getattr(self.state, 'cs_strip_da_active', False):
+                return  # Suppress — Channel Strip DA owns insert_param_values now
             idx = message[3]
             value = ''.join(chr(b) for b in message[4:-1])
             state = self.state
@@ -1388,6 +1399,22 @@ class NuendoLink:
             if qc_index < len(selected.quick_controls):
                 selected.quick_controls[qc_index].value = norm_val
         
+        # ── Per-track automation Read/Write (type 0x0E) ──
+        # Payload: [rel_index, kind, value]  kind: 0=read, 1=write
+        elif msg_type == 0x0E and len(payload) >= 3:
+            if getattr(self, '_scanning', False):
+                return
+            rel_index = payload[0]
+            kind = payload[1]
+            on = payload[2] > 0
+            abs_index = self.state.bank_offset + rel_index
+            if abs_index < len(self.state.tracks):
+                if kind == 0:
+                    self.state.tracks[abs_index].automation_read = on
+                else:
+                    self.state.tracks[abs_index].automation_write = on
+                self._leds_dirty = True
+
         # ── JS Script version (type 0x10) ──
         elif msg_type == 0x10 and len(payload) >= 1:
             try:
@@ -1709,16 +1736,18 @@ class NuendoLink:
         ('tools',    None):                    113,  # fallback → DeEsser
         ('tools',    'DeEsser'):               113,
         ('tools',    'EnvelopeShaper'):        114,
-        # Sat variants (3)
-        ('sat',      None):                    130,  # fallback → Magneto II
-        ('sat',      'Magneto II'):            130,
-        ('sat',      'Tape Saturation'):       131,
-        ('sat',      'Tube Saturation'):       132,
-        # Limit variants (3)
-        ('limiter',  None):                    140,  # fallback → Brickwall
-        ('limiter',  'Brickwall Limiter'):     140,
-        ('limiter',  'Maximizer'):             141,
-        ('limiter',  'Standard Limiter'):      142,
+        # Sat variants (3). Notes MUST be ≤127 (7-bit MIDI) — the old 130-132
+        # got masked to 2-4 on the wire and never matched the JS activators,
+        # so Sat encoders never responded (#5).
+        ('sat',      None):                    104,  # fallback → Magneto II
+        ('sat',      'Magneto II'):            104,
+        ('sat',      'Tape Saturation'):       105,
+        ('sat',      'Tube Saturation'):       106,
+        # Limit variants (3). Same fix — old 140-142 masked to 12-14.
+        ('limiter',  None):                    107,  # fallback → Brickwall
+        ('limiter',  'Brickwall Limiter'):     107,
+        ('limiter',  'Maximizer'):             108,
+        ('limiter',  'Standard Limiter'):      109,
     }
     
     # Map cs_page name → mod_id, used by the bridge to resolve the slot's
@@ -2032,20 +2061,40 @@ class NuendoLink:
             return False
         if not getattr(self, '_da_available', False):
             return False
-        
+
         # CC 0 ch9: set slot
         self._midi_out.send_message([0xB8, 0, slot_index & 0x7F])
-        
+
         # CC 1-8 ch9: low bits, CC 9-16 ch9: high bits
+        # Unused encoders use the 0x3FFF sentinel so the JS clears their cell
+        # (and never resolves param 0 by accident).
+        #
+        # The JS index buttons only fire on a *value change*, so if a param index
+        # matches the previous sub-page's value at the same encoder, the index
+        # would go stale (yielding the wrong param under the right label, #4).
+        # Pulse each byte through 0 first to force the change-only callback to
+        # apply the new value every time.
+        DA_ENC_UNUSED = 0x3FFF
         for i in range(8):
             idx = da_param_indices[i] if i < len(da_param_indices) else -1
             if idx < 0:
-                idx = 0  # Will have tag 0 which won't match anything
+                idx = DA_ENC_UNUSED
             lo = idx & 0x7F
             hi = (idx >> 7) & 0x7F
+            self._midi_out.send_message([0xB8, 1 + i, 0])
             self._midi_out.send_message([0xB8, 1 + i, lo])
+            self._midi_out.send_message([0xB8, 9 + i, 0])
             self._midi_out.send_message([0xB8, 9 + i, hi])
-        
+
+        # CC 17 ch9: refresh trigger — the JS re-emits every encoder's current
+        # value/display so they appear on sub-page entry even when no param
+        # index changed (#4). The value must DIFFER from the previous call:
+        # the MIDI Remote API coalesces same-value CCs into a no-op, so a fixed
+        # 0→127 pulse stops firing after the first use (values stuck at 127).
+        # Alternate between two non-zero values to guarantee a real change.
+        self._da_refresh_toggle = 127 if getattr(self, '_da_refresh_toggle', 1) != 127 else 1
+        self._midi_out.send_message([0xB8, 17, self._da_refresh_toggle])
+
         return True
 
     def request_da_plugin_manager_explore(self, slot_index):
@@ -2383,12 +2432,9 @@ class NuendoLink:
             state = self.state
             for i in range(8):
                 if state.cc_numbers[i] == cc_num:
-                    # Always track the Nuendo value
+                    # Mirror the incoming Nuendo value on the encoder position
                     state.cc_nuendo_values[i] = cc_val
-                    # In absolute mode, also update the encoder position
-                    from state import CC_PICKUP
-                    if state.cc_mode != CC_PICKUP:
-                        state.cc_values[i] = cc_val
+                    state.cc_values[i] = cc_val
                     break
 
     def send_mode_change(self, mode):

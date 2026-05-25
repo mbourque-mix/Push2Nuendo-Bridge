@@ -1,6 +1,6 @@
 // =============================================================================
 // Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
-// Version 1.0.4
+// Version 1.0.5
 //
 // Un seul bank zone de 8 canaux.
 // Banking via mNextBank/mPrevBank (CC 8/9).
@@ -15,7 +15,7 @@
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
 
-var JS_VERSION = '1.0.4';
+var JS_VERSION = '1.0.5';
 
 var midiremote_api = require('midiremote_api_v1');
 
@@ -312,6 +312,27 @@ for (var i = 0; i < 8; i++) {
     page.makeValueBinding(monitorButtons[i].mSurfaceValue, ch.mValue.mMonitorEnable);
     page.makeValueBinding(recButtons[i].mSurfaceValue, ch.mValue.mRecordEnable);
     page.makeValueBinding(editorOpenButtons[i].mSurfaceValue, ch.mValue.mEditorOpen).setTypeToggle();
+
+    // Per-track automation Read/Write feedback → bridge (SysEx tag 0x0E).
+    // [F0 00 21 09 0E idx kind value F7]  kind: 0=read, 1=write.
+    // Selected-track CC 17/18 only covered the selected track, so non-selected
+    // bank tracks never reflected automation-mode changes (#2).
+    var autoReadVar = surface.makeCustomValueVariable('autoRead_' + i);
+    page.makeValueBinding(autoReadVar, ch.mValue.mAutomationRead);
+    autoReadVar.mOnProcessValueChange = (function(idx) {
+        return function(activeDevice, value, diff) {
+            midiOutput_Loop.sendMidi(activeDevice,
+                [0xF0, 0x00, 0x21, 0x09, 0x0E, idx & 0x7F, 0, value > 0.5 ? 1 : 0, 0xF7]);
+        };
+    })(i);
+    var autoWriteVar = surface.makeCustomValueVariable('autoWrite_' + i);
+    page.makeValueBinding(autoWriteVar, ch.mValue.mAutomationWrite);
+    autoWriteVar.mOnProcessValueChange = (function(idx) {
+        return function(activeDevice, value, diff) {
+            midiOutput_Loop.sendMidi(activeDevice,
+                [0xF0, 0x00, 0x21, 0x09, 0x0E, idx & 0x7F, 1, value > 0.5 ? 1 : 0, 0xF7]);
+        };
+    })(i);
 
     // Instrument Open : CC 15 channel 2 + index via Note (on utilise un bouton dédié par canal)
     // Note 80+i channel 1 = toggle instrument UI pour canal i
@@ -727,10 +748,22 @@ try {
         })(ci);
     }
 
-    // Main Level Reset (absolu)
-    var crMainResetKnob = surface.makeKnob(78, 40, 2, 2);
-    crMainResetKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 78).setTypeAbsolute();
-    page.makeValueBinding(crMainResetKnob.mSurfaceValue, crMain.mLevelValue);
+    // Main Level Reset -> exact 0.00 dB
+    // CC 78 (any value > 0) writes the precise normalized value that maps to
+    // 0.00 dB on crMain.mLevelValue. A 7-bit absolute value binding cannot hit
+    // this exactly (it lands at ~-0.01 dB). Host values have no setProcessValue,
+    // so we bind a dedicated surface value to crMain.mLevelValue and write the
+    // exact float through it (setProcessValue propagates via the binding).
+    var CR_MAIN_0DB = 0.748222231;  // measured via high-res feedback
+    var crMainResetValue = surface.makeCustomValueVariable('crMainReset');
+    page.makeValueBinding(crMainResetValue, crMain.mLevelValue);
+    var crMainResetBtn = surface.makeButton(78, 40, 2, 2);
+    crMainResetBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 78);
+    crMainResetBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, numValue) {
+        if (numValue > 0) {
+            crMainResetValue.setProcessValue(activeDevice, CR_MAIN_0DB);
+        }
+    };
 
     // Main Mute
     var crMainMuteBtn = makeCRBtn(73);
@@ -2355,6 +2388,46 @@ if (page.mHostAccess.makeDirectAccess) {
         return null;
     }
 
+    var DA_ENC_UNUSED = 0x3FFF;  // sentinel param index for an inactive encoder
+
+    // Resolve the DA tag for encoder `idx` and emit its current value + display
+    // string to Python (SysEx 0x2B). Used both when the high-bit index arrives
+    // and by the explicit refresh trigger below — the latter guarantees values
+    // are pushed on sub-page entry even when the param index didn't change (#4).
+    function daSendEncoderDisplay(activeDevice, idx) {
+        var paramIdx = daEncParamIdx[idx];
+        // Inactive encoder: clear its tag and emit nothing. The bridge already
+        // reset every cell to empty before configuring the sub-page, so leaving
+        // it untouched keeps the cell blank (and avoids resolving param 0).
+        if (paramIdx === DA_ENC_UNUSED) {
+            daEncParamTag[idx] = 0;
+            return;
+        }
+        var entry = daGetEncEntry(daEncSlot);
+        if (!entry || entry.pluginObjectID < 0 || !daMapping) return;
+        try {
+            var m = daMapping;
+            var tag = daInserts.getParameterTagByIndex(m, entry.pluginObjectID, paramIdx);
+            daEncParamTag[idx] = tag;
+            var procVal = daInserts.getParameterProcessValue(m, entry.pluginObjectID, tag);
+            var val127 = Math.round(procVal * 127) & 0x7F;
+            var displayStr = '';
+            if (daInserts.getParameterDisplayValue) {
+                displayStr = daInserts.getParameterDisplayValue(m, entry.pluginObjectID, tag) || '';
+                var units = daInserts.getParameterDisplayUnits ? daInserts.getParameterDisplayUnits(m, entry.pluginObjectID, tag) : '';
+                if (units && displayStr.indexOf(units) < 0) displayStr += ' ' + units;
+            }
+            var msg = [0xF0, 0x00, 0x2B, idx & 0x7F, val127];
+            for (var c = 0; c < displayStr.length && c < 16; c++) {
+                msg.push(displayStr.charCodeAt(c) & 0x7F);
+            }
+            msg.push(0xF7);
+            midiOutput_Loop.sendMidi(activeDevice, msg);
+        } catch(e) {
+            daEncParamTag[idx] = 0;
+        }
+    }
+
     // CC 0 ch9: set target slot
     var daEncSlotBtn = surface.makeButton(0, 100, 2, 2);
     daEncSlotBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 0);
@@ -2380,36 +2453,29 @@ if (page.mHostAccess.makeDirectAccess) {
             return function(activeDevice, value, diff) {
                 var hi = Math.round(value * 127);
                 daEncParamIdx[idx] = (daEncParamIdx[idx] & 0x7F) | (hi << 7);
-                // Once high bits received, resolve the DA tag and send display value
-                var entry = daGetEncEntry(daEncSlot);
-                if (entry && entry.pluginObjectID >= 0 && daMapping) {
-                    try {
-                        var m = daMapping;
-                        var paramIdx = daEncParamIdx[idx];
-                        var tag = daInserts.getParameterTagByIndex(m, entry.pluginObjectID, paramIdx);
-                        daEncParamTag[idx] = tag;
-                        // Read and send current display value
-                        var procVal = daInserts.getParameterProcessValue(m, entry.pluginObjectID, tag);
-                        var val127 = Math.round(procVal * 127) & 0x7F;
-                        var displayStr = '';
-                        if (daInserts.getParameterDisplayValue) {
-                            displayStr = daInserts.getParameterDisplayValue(m, entry.pluginObjectID, tag) || '';
-                            var units = daInserts.getParameterDisplayUnits ? daInserts.getParameterDisplayUnits(m, entry.pluginObjectID, tag) : '';
-                            if (units && displayStr.indexOf(units) < 0) displayStr += ' ' + units;
-                        }
-                        var msg = [0xF0, 0x00, 0x2B, idx & 0x7F, val127];
-                        for (var c = 0; c < displayStr.length && c < 16; c++) {
-                            msg.push(displayStr.charCodeAt(c) & 0x7F);
-                        }
-                        msg.push(0xF7);
-                        midiOutput_Loop.sendMidi(activeDevice, msg);
-                    } catch(e) {
-                        daEncParamTag[idx] = 0;
-                    }
-                }
+                // Note: display values are emitted by the explicit refresh
+                // trigger (CC 17 ch9) the bridge pulses after configuring all
+                // encoders — emitting here would fire mid-update with a partial
+                // index and is skipped when the index byte doesn't change.
             };
         })(ei);
     }
+
+    // CC 17 ch9: refresh ALL encoder display values (rising edge).
+    // The bridge pulses this after configuring encoders for a sub-page so the
+    // current values are pushed even when no param index changed (#4).
+    // Positioned well clear of the slot/lo/hi/rel button columns (x 0..29 at
+    // y=100) to avoid overlapping surface elements, which makes bindings flaky.
+    var daEncRefreshBtn = surface.makeButton(40, 120, 2, 2);
+    daEncRefreshBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 17);
+    daEncRefreshBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        // The bridge alternates the CC value (1 / 127) so this fires on every
+        // sub-page setup; any change re-emits all encoder displays.
+        if (value <= 0) return;
+        for (var i = 0; i < 8; i++) {
+            daSendEncoderDisplay(activeDevice, i);
+        }
+    };
 
     // CC 20-27 ch9: relative encoder input
     // Uses buttons (not knobs) to avoid surface value accumulation/boundary issues.
@@ -3689,24 +3755,26 @@ try {
         bindActivator(subOverview, 100, 'Overview');
         bindActivator(subGate,     101, 'Gate');
         bindActivator(subEQ,       103, 'EQ');
-        // Per-variant activator notes (block of 10 per slot for room):
-        //   Comp: 110, 111, 112
-        //   Tools: 120, 121
-        //   Sat: 130, 131, 132
-        //   Limit: 140, 141, 142
+        // Per-variant activator notes. ALL must stay within the 7-bit MIDI
+        // range (0-127) — notes >127 get masked to (n & 0x7F) on the wire and
+        // never match their bindToNote, leaving the sub-page un-activatable
+        // (this previously broke every Sat/Limiter variant: 130-142 → 2-14).
+        // They must also avoid the drill-down toggle notes 120-127.
+        //   Comp:  110, 111, 112
+        //   Tools: 113, 114   (moved out of 120-127 toggle-note range)
+        //   Sat:   104, 105, 106
+        //   Limit: 107, 108, 109
         bindActivator(subCompStd,  110, 'CompStandard');
         bindActivator(subCompTube, 111, 'CompTube');
         bindActivator(subCompVtg,  112, 'CompVintage');
-        // Tools activators moved out of 120-127 (collision with drilldown
-        // toggle notes — note 120 = drilldown toggle pos 0 = Auto Threshold).
         bindActivator(subToolsDe,  113, 'ToolsDeesser');
         bindActivator(subToolsEnv, 114, 'ToolsEnvShaper');
-        bindActivator(subSatMag,   130, 'SatMagneto');
-        bindActivator(subSatTape,  131, 'SatTape');
-        bindActivator(subSatTube,  132, 'SatTube');
-        bindActivator(subLimBrick, 140, 'LimitBrickwall');
-        bindActivator(subLimMax,   141, 'LimitMaximizer');
-        bindActivator(subLimStd,   142, 'LimitStandard');
+        bindActivator(subSatMag,   104, 'SatMagneto');
+        bindActivator(subSatTape,  105, 'SatTape');
+        bindActivator(subSatTube,  106, 'SatTube');
+        bindActivator(subLimBrick, 107, 'LimitBrickwall');
+        bindActivator(subLimMax,   108, 'LimitMaximizer');
+        bindActivator(subLimStd,   109, 'LimitStandard');
         
         // ── Bindings per sub-page ──
         // Overview: no encoder/toggle bindings here (PreGain and bypass toggles

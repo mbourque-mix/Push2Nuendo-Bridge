@@ -100,10 +100,10 @@ cp "$PROJECT_DIR/Ableton_Push2.js" "$PROJECT_DIR/dist/"
 
 # Copy docs if they exist
 for pdf in \
-    "Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf" \
-    "Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf" \
+    "Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf" \
+    "Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf" \
     "Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf" \
-    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf"; do
+    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf"; do
     [ -f "$PROJECT_DIR/docs/$pdf" ] && cp "$PROJECT_DIR/docs/$pdf" "$PROJECT_DIR/dist/"
 done
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "push2-nuendo-bridge"
-version = "1.0.4"
+version = "1.0.5"
 description = "Turn your Ableton Push 2 into a control surface for Steinberg Nuendo / Cubase"
 readme = "README.md"
 license = {text = "GPL-3.0"}

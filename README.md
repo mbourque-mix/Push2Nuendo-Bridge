@@ -2,7 +2,7 @@
 
 Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
-![Version](https://img.shields.io/badge/version-1.0.4-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.0.5-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 
@@ -107,16 +107,24 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 
 ### Note Input
 - Chromatic and drum pad modes
-- Scale selector with root note
+- Scale selector with root note (includes Piano and two Octatonic scales)
+- **Keyswitch layouts** (Layout button cycles 64 / 56+8 KS / 48+16 KS / Drum): orange, user-configurable keyswitch pads on the bottom row(s), with latch and a monophonic keyswitch section. Long-press Layout to configure (start note, per-pad overrides, Chromatic/Naturals)
 - Note Repeat with adjustable BPM
 - Adjustable velocity curves and fixed velocity
 
+### XY Pad (Session button)
+- 64 pads morph two parameters of the selected track (Volume / Pan / Quick Controls) or raw MIDI CC
+- Relative, pressure-weighted input (no jump on touch) with two-finger interpolation
+- Per-axis category/parameter selection, sensitivity and smoothing, plus track Mute/Solo/Monitor/Record
+
 ### Additional Features
 - Track color display from Nuendo
+- Mix footer shows the pad MIDI note range
 - Long press upper row (1s) → Open instrument UI
 - Double press upper row → Edit Channel Settings
 - Add Track / New Track Version / Duplicate Track
 - Full 960×160 pixel Push 2 display rendering with bold headers
+- **Windows system tray** app (run with `--terminal` for the console version)
 
 ---
 
@@ -138,7 +146,8 @@ pip install git+https://github.com/ffont/push2-python.git
 
 For Windows, you also need:
 - **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** for virtual MIDI ports
-- **[Zadig](https://zadig.akeo.ie/)** for the Push 2 WinUSB driver
+
+(The Push 2's USB driver installs automatically on Windows — no Zadig needed.)
 
 For the Plugin Mapper (optional):
 ```bash
@@ -156,7 +165,7 @@ pip install fastapi uvicorn pedalboard
 3. Copy **Push2 Nuendo Bridge.app** to `/Applications`
 4. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.4.app"
+   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.5.app"
    ```
 5. Copy **Ableton_Push2.js** to:
    ```
@@ -176,16 +185,16 @@ cd src && python3 main.py
 
 ### Windows
 
-Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** for the full step-by-step (loopMIDI, Zadig, Nuendo configuration).
+Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
 
 Quick start:
 
 1. Download **`Push2NuendoBridge-vX.Y.Z-Windows.zip`** from the [Releases](https://github.com/mbourque-mix/Push2Nuendo-Bridge/releases) page and unzip it anywhere.
 2. Install **[loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)** and create four ports: `NuendoBridge In`, `NuendoBridge Out`, `BridgeNotes`, `BridgeNotes In`.
-3. Install the **WinUSB driver for the Push 2 with [Zadig](https://zadig.akeo.ie/)** (one time). **Critical:** target the Push 2's **display/bulk interface** (USB ID `2982:1967`) — **not** the MIDI interface, or you will break MIDI on the Push. The Windows Installation Guide has the exact step-by-step.
+3. **Plug in the Push 2** — Windows installs the USB driver (WinUSB) automatically the first time. No Zadig, no manual driver step.
 4. **Double-click the `.exe`.** A console shows the status and a clickable Plugin Mapper link (`http://localhost:8100`).
 
-> **Windows note:** the bridge and Ableton Live share the same Push 2 USB endpoint, so only one can control the Push at a time — close one to use the other. Recent Live versions (12.x tested) work fine with the WinUSB driver Zadig installs, so no driver swap is needed in normal use. See the [Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf) for how to restore Ableton's original driver if you ever need to (older Live setups). macOS is not affected.
+> **Windows note:** the bridge and Ableton Live share the same Push 2 USB connection, so only one can control the Push at a time — close one to use the other. No driver change is needed to go back and forth (tested with Live 12). macOS is not affected.
 
 > No Python install needed — the interpreter, all dependencies and the libusb runtime are bundled in the `.exe`.
 
@@ -259,10 +268,10 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 
 ## Documentation
 
-- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf)** — Complete installation and usage manual
-- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf)** — Version history
+- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf)** — Complete installation and usage manual
+- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf)** — Version history
 - **[Plugin Mapper Guide](docs/Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf)** — Plugin Mapper setup and usage
-- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** — Step-by-step Windows `.exe` setup
+- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf)** — Step-by-step Windows `.exe` setup
 
 ---
 
