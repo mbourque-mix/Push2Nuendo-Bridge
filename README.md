@@ -2,7 +2,7 @@
 
 Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
-![Version](https://img.shields.io/badge/version-1.0.4-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.0.5-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 
@@ -107,16 +107,24 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 
 ### Note Input
 - Chromatic and drum pad modes
-- Scale selector with root note
+- Scale selector with root note (includes Piano and two Octatonic scales)
+- **Keyswitch layouts** (Layout button cycles 64 / 56+8 KS / 48+16 KS / Drum): orange, user-configurable keyswitch pads on the bottom row(s), with latch and a monophonic keyswitch section. Long-press Layout to configure (start note, per-pad overrides, Chromatic/Naturals)
 - Note Repeat with adjustable BPM
 - Adjustable velocity curves and fixed velocity
 
+### XY Pad (Session button)
+- 64 pads morph two parameters of the selected track (Volume / Pan / Quick Controls) or raw MIDI CC
+- Relative, pressure-weighted input (no jump on touch) with two-finger interpolation
+- Per-axis category/parameter selection, sensitivity and smoothing, plus track Mute/Solo/Monitor/Record
+
 ### Additional Features
 - Track color display from Nuendo
+- Mix footer shows the pad MIDI note range
 - Long press upper row (1s) → Open instrument UI
 - Double press upper row → Edit Channel Settings
 - Add Track / New Track Version / Duplicate Track
 - Full 960×160 pixel Push 2 display rendering with bold headers
+- **Windows system tray** app (run with `--terminal` for the console version)
 
 ---
 
@@ -157,7 +165,7 @@ pip install fastapi uvicorn pedalboard
 3. Copy **Push2 Nuendo Bridge.app** to `/Applications`
 4. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.4.app"
+   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.5.app"
    ```
 5. Copy **Ableton_Push2.js** to:
    ```
@@ -177,7 +185,7 @@ cd src && python3 main.py
 
 ### Windows
 
-Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
+Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
 
 Quick start:
 
@@ -260,10 +268,10 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 
 ## Documentation
 
-- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf)** — Complete installation and usage manual
-- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf)** — Version history
+- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf)** — Complete installation and usage manual
+- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf)** — Version history
 - **[Plugin Mapper Guide](docs/Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf)** — Plugin Mapper setup and usage
-- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf)** — Step-by-step Windows `.exe` setup
+- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf)** — Step-by-step Windows `.exe` setup
 
 ---
 

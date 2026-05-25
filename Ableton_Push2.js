@@ -1,6 +1,6 @@
 // =============================================================================
 // Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
-// Version 1.0.4
+// Version 1.0.5
 //
 // Un seul bank zone de 8 canaux.
 // Banking via mNextBank/mPrevBank (CC 8/9).
@@ -15,7 +15,7 @@
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
 
-var JS_VERSION = '1.0.4';
+var JS_VERSION = '1.0.5';
 
 var midiremote_api = require('midiremote_api_v1');
 

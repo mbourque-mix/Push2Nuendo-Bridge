@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate PDF documents for Push2Nuendo-Bridge v1.0.4
+"""Generate PDF documents for Push2Nuendo-Bridge v1.0.5
 
 Usage: python scripts/generate_docs.py
 Output: docs/*.pdf
@@ -53,10 +53,28 @@ def footer(c,d):
     c.drawCentredString(letter[0]/2,0.5*inch,f"Push 2 / Nuendo Bridge \u2014 Page {d.page}"); c.restoreState()
 
 def build_release_notes():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Release_Notes_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
     s.append(Paragraph("Release Notes", sSub))
+
+    # \u2500\u2500 Version 1.0.5 \u2500\u2500
+    s.append(Paragraph("Version 1.0.5 \u2014 May 2026", sH1))
+    s.append(Paragraph("New Features", sH2))
+    s.append(B("<b>Keyswitch pad layouts</b>: the Layout button now cycles through four pad layouts \u2014 64 notes, 56 notes + 8 keyswitches, 48 notes + 16 keyswitches, and Drum. Keyswitch pads sit on the bottom row(s), light orange, and trigger user-defined absolute notes (ideal for articulation keyswitches). Long-press Layout to configure: Enc 1 sets the starting note, Enc 2-8 override individual pads, and the lower row toggles Chromatic / Naturals layout, Latch (the keyswitch section is monophonic \u2014 only one active at a time), Reset, and Done. Note names follow Cubase convention (C-2 = MIDI 0). Configuration is in-memory (not persisted)."))
+    s.append(B("<b>Two octatonic scales</b>: <i>Octatonic WH</i> and <i>Octatonic HW</i> added to the Scale menu."))
+    s.append(B("<b>XY pad</b> (Session button): the 64 pads become an XY morphing surface controlling two parameters of the selected track (Volume, Pan, Quick Controls 1-8) or raw MIDI CC. Relative, pressure-weighted input means no jump when you touch down, and two-finger input interpolates smoothly. Lower 1/2 pick the X/Y category (Track / CC), Enc 1/2 pick the X/Y parameter, Enc 4/5 set sensitivity and smoothing, Lower 5-8 toggle Mute/Solo/Monitor/Record for the selected track, and the arrows navigate tracks."))
+    s.append(B("<b>Pad note range in the Mix footer</b>: the Mix page footer now shows the MIDI note range currently mapped to the pads (keyswitch pads excluded in keyswitch layouts)."))
+    s.append(B("<b>Per-track automation feedback</b>: each bank track's Read/Write automation mode is now reflected on screen, not just the selected track's."))
+    s.append(B("<b>Windows System Tray app</b>: on Windows the bridge now runs from the system tray (status, Open Plugin Mapper, Show Log, Quit) instead of a console window. Run with <i>--terminal</i> for the classic console version. The Plugin Mapper no longer opens a browser automatically."))
+    s.append(B("<b>Rescan moved to the Setup page</b> (lower-row button 8, available on every Setup page)."))
+    s.append(Paragraph("Bug Fixes", sH2))
+    s.append(B("<b>Control Room Main reset</b> (Shift+Touch on the rightmost encoder) now lands on an exact 0.00 dB instead of -0.01 dB."))
+    s.append(B("<b>Channel Strip module values</b> now appear immediately on entering a module (Gate, Comp, EQ, etc.) and stay visible, instead of only showing after you nudge a parameter."))
+    s.append(B("<b>Saturator and Limiter encoders</b> now respond to changes (the sub-page activation could fail silently for those two slots)."))
+    s.append(B("<b>Inserts page</b>: an insert is no longer occasionally shown duplicated in another slot (display only)."))
+    s.append(B("<b>CC Pick-up mode removed</b>: the MIDI CC page is Absolute only. Pick-up required parameter feedback that a normal setup does not provide, so it behaved identically to Absolute."))
+    s.append(PageBreak())
 
     # \u2500\u2500 Version 1.0.4 \u2500\u2500
     s.append(Paragraph("Version 1.0.4 \u2014 May 2026", sH1))
@@ -197,10 +215,10 @@ def build_mapper_guide():
     print("  done: Plugin Mapper Guide")
 
 def build_user_guide():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_User_Guide_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
-    s.append(Paragraph("User Guide &amp; Installation Manual \u2014 Version 1.0.4", sSub))
+    s.append(Paragraph("User Guide &amp; Installation Manual \u2014 Version 1.0.5", sSub))
     s.append(Paragraph("Compatible with Nuendo 14+ and Cubase 14+ \u2014 macOS and Windows", sCtr))
     s.append(Paragraph("This guide covers installation, configuration, and use of the Push 2 / Nuendo Bridge.", sB))
     # TOC
@@ -223,7 +241,7 @@ def build_user_guide():
     s.append(B("Step 2: Install libusb \u2014 <font face='Courier'>brew install libusb</font>"))
     s.append(B("Step 3: Copy Push2 Nuendo Bridge.app to /Applications"))
     s.append(B("Step 4: The app is <b>not code-signed</b>, so macOS Gatekeeper blocks it on first launch. Open Terminal and remove the quarantine flag (match the version in the .app name to your copy):"))
-    s.append(Paragraph("xattr -dr com.apple.quarantine \"/Applications/Push2 Nuendo Bridge_v1.0.4.app\"", sCode))
+    s.append(Paragraph("xattr -dr com.apple.quarantine \"/Applications/Push2 Nuendo Bridge_v1.0.5.app\"", sCode))
     s.append(B("Step 5: Copy Ableton_Push2.js to:<br/>~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/<br/>Create the Ableton/Push2 folder if it doesn't exist."))
     s.append(B("Step 6: Double-click the app. A P2 icon appears in the menu bar."))
     # 3
@@ -401,12 +419,13 @@ def build_user_guide():
     print("  done: User Guide")
 
 def build_windows_install_guide():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_4.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
-    s.append(Paragraph("Windows Installation Guide — Version 1.0.4", sSub))
+    s.append(Paragraph("Windows Installation Guide — Version 1.0.5", sSub))
     s.append(Paragraph("Standalone .exe — no Python, no pip, no command line", sCtr))
     s.append(Paragraph("From version 1.0.4 the Windows bridge is a single self-contained executable. The Python interpreter, every dependency and the libusb USB runtime are bundled inside the .exe. You only need to set up the virtual MIDI ports (loopMIDI) and the Nuendo/Cubase MIDI Remote script — the Push 2's USB driver installs itself automatically on Windows.", sB))
+    s.append(Paragraph("On Windows the bridge runs from the <b>system tray</b> (look for its icon near the clock) rather than a console window. Right-click the tray icon for status, Open Plugin Mapper, Show Log, and Quit. To run the classic console version instead, launch the .exe with the <font face='Courier'>--terminal</font> flag.", sNote))
 
     s.append(Paragraph("What you downloaded", sH1))
     s.append(B("<b>Push2NuendoBridge-vX.Y.Z-Windows.zip</b> — unzip it anywhere you like (e.g. <font face='Courier'>Documents\\Push2Bridge</font>). It contains:"))

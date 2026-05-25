@@ -39,7 +39,7 @@ CS_PAGE_SAT = "sat"
 CS_PAGE_LIMITER = "limiter"
 
 # Bridge version
-BRIDGE_VERSION = "1.0.5-dev"
+BRIDGE_VERSION = "1.0.5"
 
 # Aftertouch modes
 AT_POLY    = "poly"       # Polyphonic aftertouch (per-note)
