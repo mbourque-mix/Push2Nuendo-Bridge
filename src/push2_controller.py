@@ -3169,6 +3169,11 @@ class Push2Controller:
         old_mode = self.state.mode
         self.state.mode = new_mode
         self.state.insert_params_mode = False  # Always reset when changing mode
+        # Leaving Channel Strip: clear the CS-DA ownership flag so the insert
+        # viewer's 0x16/0x17 param feedback is no longer suppressed (the two
+        # share insert_param_names/values).
+        if old_mode == MODE_CHANNEL_STRIP and new_mode != MODE_CHANNEL_STRIP:
+            self.state.cs_strip_da_active = False
         self.nuendo_link._da_mapping_active = False
         self.state.active_mapping = None
         self.nuendo_link.send_mode_change(new_mode)

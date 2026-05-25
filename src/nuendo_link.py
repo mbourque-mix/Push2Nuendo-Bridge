@@ -662,6 +662,8 @@ class NuendoLink:
             # Insert param name : [F0 00 16 paramIndex ...chars F7]
             if getattr(self, '_da_mapping_active', False):
                 return  # Suppress — DA params are driving the display
+            if getattr(self.state, 'cs_strip_da_active', False):
+                return  # Suppress — Channel Strip DA owns insert_param_names now
             idx = message[3]
             name = ''.join(chr(b) for b in message[4:-1])
             state = self.state
@@ -674,6 +676,8 @@ class NuendoLink:
             # Insert param display value : [F0 00 17 paramIndex ...chars F7]
             if getattr(self, '_da_mapping_active', False):
                 return  # Suppress — DA params are driving the display
+            if getattr(self.state, 'cs_strip_da_active', False):
+                return  # Suppress — Channel Strip DA owns insert_param_values now
             idx = message[3]
             value = ''.join(chr(b) for b in message[4:-1])
             state = self.state
@@ -1716,16 +1720,18 @@ class NuendoLink:
         ('tools',    None):                    113,  # fallback → DeEsser
         ('tools',    'DeEsser'):               113,
         ('tools',    'EnvelopeShaper'):        114,
-        # Sat variants (3)
-        ('sat',      None):                    130,  # fallback → Magneto II
-        ('sat',      'Magneto II'):            130,
-        ('sat',      'Tape Saturation'):       131,
-        ('sat',      'Tube Saturation'):       132,
-        # Limit variants (3)
-        ('limiter',  None):                    140,  # fallback → Brickwall
-        ('limiter',  'Brickwall Limiter'):     140,
-        ('limiter',  'Maximizer'):             141,
-        ('limiter',  'Standard Limiter'):      142,
+        # Sat variants (3). Notes MUST be ≤127 (7-bit MIDI) — the old 130-132
+        # got masked to 2-4 on the wire and never matched the JS activators,
+        # so Sat encoders never responded (#5).
+        ('sat',      None):                    104,  # fallback → Magneto II
+        ('sat',      'Magneto II'):            104,
+        ('sat',      'Tape Saturation'):       105,
+        ('sat',      'Tube Saturation'):       106,
+        # Limit variants (3). Same fix — old 140-142 masked to 12-14.
+        ('limiter',  None):                    107,  # fallback → Brickwall
+        ('limiter',  'Brickwall Limiter'):     107,
+        ('limiter',  'Maximizer'):             108,
+        ('limiter',  'Standard Limiter'):      109,
     }
     
     # Map cs_page name → mod_id, used by the bridge to resolve the slot's
@@ -2039,7 +2045,7 @@ class NuendoLink:
             return False
         if not getattr(self, '_da_available', False):
             return False
-        
+
         # CC 0 ch9: set slot
         self._midi_out.send_message([0xB8, 0, slot_index & 0x7F])
 
@@ -2064,11 +2070,14 @@ class NuendoLink:
             self._midi_out.send_message([0xB8, 9 + i, 0])
             self._midi_out.send_message([0xB8, 9 + i, hi])
 
-        # CC 17 ch9: refresh trigger — pulse 0→127 to guarantee a rising edge so
-        # the JS re-emits every encoder's current value/display even when the
-        # param indices didn't change since the last sub-page (#4).
-        self._midi_out.send_message([0xB8, 17, 0])
-        self._midi_out.send_message([0xB8, 17, 127])
+        # CC 17 ch9: refresh trigger — the JS re-emits every encoder's current
+        # value/display so they appear on sub-page entry even when no param
+        # index changed (#4). The value must DIFFER from the previous call:
+        # the MIDI Remote API coalesces same-value CCs into a no-op, so a fixed
+        # 0→127 pulse stops firing after the first use (values stuck at 127).
+        # Alternate between two non-zero values to guarantee a real change.
+        self._da_refresh_toggle = 127 if getattr(self, '_da_refresh_toggle', 1) != 127 else 1
+        self._midi_out.send_message([0xB8, 17, self._da_refresh_toggle])
 
         return True
 

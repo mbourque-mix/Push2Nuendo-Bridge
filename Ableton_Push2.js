@@ -2443,10 +2443,14 @@ if (page.mHostAccess.makeDirectAccess) {
     // CC 17 ch9: refresh ALL encoder display values (rising edge).
     // The bridge pulses this after configuring encoders for a sub-page so the
     // current values are pushed even when no param index changed (#4).
-    var daEncRefreshBtn = surface.makeButton(17, 100, 2, 2);
+    // Positioned well clear of the slot/lo/hi/rel button columns (x 0..29 at
+    // y=100) to avoid overlapping surface elements, which makes bindings flaky.
+    var daEncRefreshBtn = surface.makeButton(40, 120, 2, 2);
     daEncRefreshBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 17);
     daEncRefreshBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
-        if (value <= 0) return;  // only act on the rising edge
+        // The bridge alternates the CC value (1 / 127) so this fires on every
+        // sub-page setup; any change re-emits all encoder displays.
+        if (value <= 0) return;
         for (var i = 0; i < 8; i++) {
             daSendEncoderDisplay(activeDevice, i);
         }
@@ -3730,24 +3734,26 @@ try {
         bindActivator(subOverview, 100, 'Overview');
         bindActivator(subGate,     101, 'Gate');
         bindActivator(subEQ,       103, 'EQ');
-        // Per-variant activator notes (block of 10 per slot for room):
-        //   Comp: 110, 111, 112
-        //   Tools: 120, 121
-        //   Sat: 130, 131, 132
-        //   Limit: 140, 141, 142
+        // Per-variant activator notes. ALL must stay within the 7-bit MIDI
+        // range (0-127) — notes >127 get masked to (n & 0x7F) on the wire and
+        // never match their bindToNote, leaving the sub-page un-activatable
+        // (this previously broke every Sat/Limiter variant: 130-142 → 2-14).
+        // They must also avoid the drill-down toggle notes 120-127.
+        //   Comp:  110, 111, 112
+        //   Tools: 113, 114   (moved out of 120-127 toggle-note range)
+        //   Sat:   104, 105, 106
+        //   Limit: 107, 108, 109
         bindActivator(subCompStd,  110, 'CompStandard');
         bindActivator(subCompTube, 111, 'CompTube');
         bindActivator(subCompVtg,  112, 'CompVintage');
-        // Tools activators moved out of 120-127 (collision with drilldown
-        // toggle notes — note 120 = drilldown toggle pos 0 = Auto Threshold).
         bindActivator(subToolsDe,  113, 'ToolsDeesser');
         bindActivator(subToolsEnv, 114, 'ToolsEnvShaper');
-        bindActivator(subSatMag,   130, 'SatMagneto');
-        bindActivator(subSatTape,  131, 'SatTape');
-        bindActivator(subSatTube,  132, 'SatTube');
-        bindActivator(subLimBrick, 140, 'LimitBrickwall');
-        bindActivator(subLimMax,   141, 'LimitMaximizer');
-        bindActivator(subLimStd,   142, 'LimitStandard');
+        bindActivator(subSatMag,   104, 'SatMagneto');
+        bindActivator(subSatTape,  105, 'SatTape');
+        bindActivator(subSatTube,  106, 'SatTube');
+        bindActivator(subLimBrick, 107, 'LimitBrickwall');
+        bindActivator(subLimMax,   108, 'LimitMaximizer');
+        bindActivator(subLimStd,   109, 'LimitStandard');
         
         // ── Bindings per sub-page ──
         // Overview: no encoder/toggle bindings here (PreGain and bypass toggles
