@@ -2367,6 +2367,46 @@ if (page.mHostAccess.makeDirectAccess) {
         return null;
     }
 
+    var DA_ENC_UNUSED = 0x3FFF;  // sentinel param index for an inactive encoder
+
+    // Resolve the DA tag for encoder `idx` and emit its current value + display
+    // string to Python (SysEx 0x2B). Used both when the high-bit index arrives
+    // and by the explicit refresh trigger below — the latter guarantees values
+    // are pushed on sub-page entry even when the param index didn't change (#4).
+    function daSendEncoderDisplay(activeDevice, idx) {
+        var paramIdx = daEncParamIdx[idx];
+        // Inactive encoder: clear its tag and emit nothing. The bridge already
+        // reset every cell to empty before configuring the sub-page, so leaving
+        // it untouched keeps the cell blank (and avoids resolving param 0).
+        if (paramIdx === DA_ENC_UNUSED) {
+            daEncParamTag[idx] = 0;
+            return;
+        }
+        var entry = daGetEncEntry(daEncSlot);
+        if (!entry || entry.pluginObjectID < 0 || !daMapping) return;
+        try {
+            var m = daMapping;
+            var tag = daInserts.getParameterTagByIndex(m, entry.pluginObjectID, paramIdx);
+            daEncParamTag[idx] = tag;
+            var procVal = daInserts.getParameterProcessValue(m, entry.pluginObjectID, tag);
+            var val127 = Math.round(procVal * 127) & 0x7F;
+            var displayStr = '';
+            if (daInserts.getParameterDisplayValue) {
+                displayStr = daInserts.getParameterDisplayValue(m, entry.pluginObjectID, tag) || '';
+                var units = daInserts.getParameterDisplayUnits ? daInserts.getParameterDisplayUnits(m, entry.pluginObjectID, tag) : '';
+                if (units && displayStr.indexOf(units) < 0) displayStr += ' ' + units;
+            }
+            var msg = [0xF0, 0x00, 0x2B, idx & 0x7F, val127];
+            for (var c = 0; c < displayStr.length && c < 16; c++) {
+                msg.push(displayStr.charCodeAt(c) & 0x7F);
+            }
+            msg.push(0xF7);
+            midiOutput_Loop.sendMidi(activeDevice, msg);
+        } catch(e) {
+            daEncParamTag[idx] = 0;
+        }
+    }
+
     // CC 0 ch9: set target slot
     var daEncSlotBtn = surface.makeButton(0, 100, 2, 2);
     daEncSlotBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 0);
@@ -2392,36 +2432,25 @@ if (page.mHostAccess.makeDirectAccess) {
             return function(activeDevice, value, diff) {
                 var hi = Math.round(value * 127);
                 daEncParamIdx[idx] = (daEncParamIdx[idx] & 0x7F) | (hi << 7);
-                // Once high bits received, resolve the DA tag and send display value
-                var entry = daGetEncEntry(daEncSlot);
-                if (entry && entry.pluginObjectID >= 0 && daMapping) {
-                    try {
-                        var m = daMapping;
-                        var paramIdx = daEncParamIdx[idx];
-                        var tag = daInserts.getParameterTagByIndex(m, entry.pluginObjectID, paramIdx);
-                        daEncParamTag[idx] = tag;
-                        // Read and send current display value
-                        var procVal = daInserts.getParameterProcessValue(m, entry.pluginObjectID, tag);
-                        var val127 = Math.round(procVal * 127) & 0x7F;
-                        var displayStr = '';
-                        if (daInserts.getParameterDisplayValue) {
-                            displayStr = daInserts.getParameterDisplayValue(m, entry.pluginObjectID, tag) || '';
-                            var units = daInserts.getParameterDisplayUnits ? daInserts.getParameterDisplayUnits(m, entry.pluginObjectID, tag) : '';
-                            if (units && displayStr.indexOf(units) < 0) displayStr += ' ' + units;
-                        }
-                        var msg = [0xF0, 0x00, 0x2B, idx & 0x7F, val127];
-                        for (var c = 0; c < displayStr.length && c < 16; c++) {
-                            msg.push(displayStr.charCodeAt(c) & 0x7F);
-                        }
-                        msg.push(0xF7);
-                        midiOutput_Loop.sendMidi(activeDevice, msg);
-                    } catch(e) {
-                        daEncParamTag[idx] = 0;
-                    }
-                }
+                // Note: display values are emitted by the explicit refresh
+                // trigger (CC 17 ch9) the bridge pulses after configuring all
+                // encoders — emitting here would fire mid-update with a partial
+                // index and is skipped when the index byte doesn't change.
             };
         })(ei);
     }
+
+    // CC 17 ch9: refresh ALL encoder display values (rising edge).
+    // The bridge pulses this after configuring encoders for a sub-page so the
+    // current values are pushed even when no param index changed (#4).
+    var daEncRefreshBtn = surface.makeButton(17, 100, 2, 2);
+    daEncRefreshBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(8, 17);
+    daEncRefreshBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (value <= 0) return;  // only act on the rising edge
+        for (var i = 0; i < 8; i++) {
+            daSendEncoderDisplay(activeDevice, i);
+        }
+    };
 
     // CC 20-27 ch9: relative encoder input
     // Uses buttons (not knobs) to avoid surface value accumulation/boundary issues.

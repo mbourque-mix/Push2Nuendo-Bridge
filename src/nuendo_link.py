@@ -628,6 +628,13 @@ class NuendoLink:
             return
         elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x11:
             # Insert slot name : [F0 00 11 slotIndex ...chars F7]
+            # Viewer feedback (mEdit.mOnTitleChange) tags the plugin name with the
+            # viewer's *current* slot, which lags behind when an insert is opened.
+            # When DirectAccess built the authoritative slot list, ignore this path
+            # entirely — otherwise a stale slot index writes the plugin name into
+            # the wrong slot and it appears duplicated (#6).
+            if getattr(self, '_da_available', False):
+                return
             if getattr(self, '_bypass_navigating', False):
                 return
             slot = message[3]
@@ -2035,17 +2042,34 @@ class NuendoLink:
         
         # CC 0 ch9: set slot
         self._midi_out.send_message([0xB8, 0, slot_index & 0x7F])
-        
+
         # CC 1-8 ch9: low bits, CC 9-16 ch9: high bits
+        # Unused encoders use the 0x3FFF sentinel so the JS clears their cell
+        # (and never resolves param 0 by accident).
+        #
+        # The JS index buttons only fire on a *value change*, so if a param index
+        # matches the previous sub-page's value at the same encoder, the index
+        # would go stale (yielding the wrong param under the right label, #4).
+        # Pulse each byte through 0 first to force the change-only callback to
+        # apply the new value every time.
+        DA_ENC_UNUSED = 0x3FFF
         for i in range(8):
             idx = da_param_indices[i] if i < len(da_param_indices) else -1
             if idx < 0:
-                idx = 0  # Will have tag 0 which won't match anything
+                idx = DA_ENC_UNUSED
             lo = idx & 0x7F
             hi = (idx >> 7) & 0x7F
+            self._midi_out.send_message([0xB8, 1 + i, 0])
             self._midi_out.send_message([0xB8, 1 + i, lo])
+            self._midi_out.send_message([0xB8, 9 + i, 0])
             self._midi_out.send_message([0xB8, 9 + i, hi])
-        
+
+        # CC 17 ch9: refresh trigger — pulse 0→127 to guarantee a rising edge so
+        # the JS re-emits every encoder's current value/display even when the
+        # param indices didn't change since the last sub-page (#4).
+        self._midi_out.send_message([0xB8, 17, 0])
+        self._midi_out.send_message([0xB8, 17, 127])
+
         return True
 
     def request_da_plugin_manager_explore(self, slot_index):
