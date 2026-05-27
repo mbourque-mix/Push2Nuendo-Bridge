@@ -32,10 +32,16 @@ var midiInput_Loop  = deviceDriver.mPorts.makeMidiInput('NuendoBridge Out');
 var midiOutput_Loop = deviceDriver.mPorts.makeMidiOutput('NuendoBridge In');
 
 // ── AUTO-DETECTION ──
+// The patterns MUST be direction-specific. Both loop ports contain
+// "NuendoBridge", so matching only that substring is ambiguous — Cubase could
+// auto-bind the input/output the wrong way round, creating a second, reversed
+// surface that fights the correct one (feedback loop). The bridge SENDS on
+// "NuendoBridge Out" (script listens there) and LISTENS on "NuendoBridge In"
+// (script sends there), so detect those exact directions.
 var detection = deviceDriver.makeDetectionUnit();
 detection.detectPortPair(midiInput_Loop, midiOutput_Loop)
-    .expectInputNameContains('NuendoBridge')
-    .expectOutputNameContains('NuendoBridge');
+    .expectInputNameContains('NuendoBridge Out')
+    .expectOutputNameContains('NuendoBridge In');
 
 var surface = deviceDriver.mSurface;
 
