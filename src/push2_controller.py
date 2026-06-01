@@ -927,8 +927,13 @@ class Push2Controller:
         if not self.state.shift_held:
             return
         if 'master' in encoder_name.lower():
-            # Shift + touch Master Encoder = reset Control Room to ~0 dB (-0.01)
-            self.nuendo_link.send_cc(78, 95)
+            # Shift + touch Master Encoder = reset Control Room Main to exact 0 dB.
+            # The JS button on CC 78 fires its handler only when the value CHANGES
+            # (and the API may coalesce identical CCs), so a fixed value would
+            # only work once. Alternate between two non-zero values (both pass the
+            # JS "value > 0" guard) so every Shift+Touch produces a fresh change.
+            self._cr_reset_toggle = 126 if getattr(self, '_cr_reset_toggle', 127) != 126 else 127
+            self.nuendo_link.send_cc(78, self._cr_reset_toggle)
     
     def _handle_button_press(self, button_name):
         """Called when the user presses a button."""
