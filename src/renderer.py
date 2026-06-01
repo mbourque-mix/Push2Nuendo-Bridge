@@ -26,7 +26,7 @@ from state import (
     STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER,
 )
 from control_room import (
-    CR_PAGES, CR_PAGE_NAMES, CR_PAGE_MAIN, ControlRoomState
+    CR_PAGES, CR_PAGE_NAMES, CR_PAGE_MAIN, ControlRoomState, PARAM_MAIN_LEVEL
 )
 
 # ─────────────────────────────────────────────
@@ -1328,10 +1328,12 @@ def _render_sends_screen(state):
 # Bottom bar: global context info
 # ─────────────────────────────────────────────
 
-def _draw_bottom_bar(draw, state):
+def _draw_bottom_bar(draw, state, cr_state=None):
     """
     Draw an info bar at the bottom of the screen (y = 142 to 160).
     Display: active mode, bank, Nuendo connection.
+    cr_state (optional): when given, the Mix page also shows the Control Room
+    Main level (volume) in the footer.
     """
     # Bar background
     draw.rectangle([0, 142, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(10, 10, 10))
@@ -1389,7 +1391,18 @@ def _draw_bottom_bar(draw, state):
     # Metronome
     if state.metronome_on:
         draw.text((580, 147), "♩", font=FONT_SM, fill=(0, 200, 80))
-    
+
+    # Control Room Main level (Mix page only) — prefer Nuendo's dB display,
+    # fall back to a value-derived estimate.
+    if state.mode == MODE_VOLUME and cr_state is not None:
+        cr_disp = cr_state.get_display(PARAM_MAIN_LEVEL)
+        if not cr_disp:
+            cr_val = cr_state.get_value(PARAM_MAIN_LEVEL)
+            if cr_val:
+                cr_disp = _cr_value_to_db(cr_val, 12.0)
+        if cr_disp:
+            draw.text((700, 147), f"CR {cr_disp} dB", font=FONT_SM, fill=(150, 180, 220))
+
     # Connection status (right side)
     if state.nuendo_connected:
         draw.text((SCREEN_WIDTH - 90, 147), "● NUENDO", font=FONT_SM,
@@ -3030,7 +3043,7 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
         draw.line([(cell_x, 0), (cell_x, 141)], fill=COLOR_SEPARATOR)
     
     # Bottom info bar
-    _draw_bottom_bar(draw, state)
+    _draw_bottom_bar(draw, state, cr_state)
     
     # Temporary overlay (ex: touchstrip mode change)
     overlay_text = getattr(state, '_touchstrip_overlay', None)
