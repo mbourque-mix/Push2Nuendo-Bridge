@@ -26,7 +26,8 @@ from state import (
     STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER,
 )
 from control_room import (
-    CR_PAGES, CR_PAGE_NAMES, CR_PAGE_MAIN, ControlRoomState, PARAM_MAIN_LEVEL
+    CR_PAGES, CR_PAGE_NAMES, CR_PAGE_MAIN, ControlRoomState,
+    PARAM_MAIN_LEVEL, PARAM_PHONES_LEVEL
 )
 
 # ─────────────────────────────────────────────
@@ -1392,16 +1393,26 @@ def _draw_bottom_bar(draw, state, cr_state=None):
     if state.metronome_on:
         draw.text((580, 147), "♩", font=FONT_SM, fill=(0, 200, 80))
 
-    # Control Room Main level (Mix page only) — prefer Nuendo's dB display,
-    # fall back to a value-derived estimate.
+    # Control Room Main + Phones levels (Mix page only) — prefer Nuendo's dB
+    # display string, fall back to a value-derived estimate. The level the
+    # Master encoder currently controls by default is shown brighter.
     if state.mode == MODE_VOLUME and cr_state is not None:
-        cr_disp = cr_state.get_display(PARAM_MAIN_LEVEL)
-        if not cr_disp:
-            cr_val = cr_state.get_value(PARAM_MAIN_LEVEL)
-            if cr_val:
-                cr_disp = _cr_value_to_db(cr_val, 12.0)
-        if cr_disp:
-            draw.text((700, 147), f"CR {cr_disp} dB", font=FONT_SM, fill=(150, 180, 220))
+        def _cr_db(param):
+            d = cr_state.get_display(param)
+            if not d:
+                v = cr_state.get_value(param)
+                d = _cr_value_to_db(v, 12.0) if v else ""
+            return d
+        phones_default = getattr(state, 'cr_phones_default', False)
+        main_db = _cr_db(PARAM_MAIN_LEVEL)
+        ph_db = _cr_db(PARAM_PHONES_LEVEL)
+        bright, dim = (160, 190, 230), (90, 110, 140)
+        if main_db:
+            draw.text((615, 147), f"CR {main_db} dB", font=FONT_SM,
+                      fill=(dim if phones_default else bright))
+        if ph_db:
+            draw.text((725, 147), f"PH {ph_db} dB", font=FONT_SM,
+                      fill=(bright if phones_default else dim))
 
     # Connection status (right side)
     if state.nuendo_connected:
@@ -1581,7 +1592,7 @@ def _render_midicc_screen(state):
 # ─────────────────────────────────────────────
 
 # Setup page definitions
-SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', None, None, None, None, 'About']
 
 # Per-page options: list of (label, value) for lower row buttons
 SETUP_PAGE_OPTIONS = {
@@ -1596,6 +1607,10 @@ SETUP_PAGE_OPTIONS = {
         ('Exp',     VC_EXP),
         ('S-Curve', VC_SCURVE),
         ('Fixed',   VC_FIXED),
+    ],
+    2: [  # Control Room knob default (Master Encoder)
+        ('Main',    False),
+        ('Phones',  True),
     ],
 }
 
@@ -1680,6 +1695,17 @@ def _render_setup_screen(state):
             # Separator
             draw.line([(x, 42), (x, 140)], fill=COLOR_SEPARATOR)
     
+    elif page_idx == 2:
+        # ── Page 2: Control Room knob default ──
+        draw.text((20, 50), "Master Encoder Default", fill=(200, 200, 200), font=FONT_MD)
+        phones_default = getattr(state, 'cr_phones_default', False)
+        if phones_default:
+            name, desc = "Phones", "Encoder = Phones  ·  Select = Main"
+        else:
+            name, desc = "Main", "Encoder = Main  ·  Select = Phones"
+        draw.text((20, 75), name, fill=COLOR_ACCENT, font=FONT_LG)
+        draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
+
     elif page_idx == 7:
         # ── Page 7: About ──
         # Bridge version
@@ -1707,6 +1733,8 @@ def _render_setup_screen(state):
                 is_selected = (state.aftertouch_mode == value)
             elif page_idx == 1:
                 is_selected = (state.velocity_curve == value)
+            elif page_idx == 2:
+                is_selected = (getattr(state, 'cr_phones_default', False) == value)
             else:
                 is_selected = False
             

@@ -621,22 +621,20 @@ class Push2Controller:
                     self.note_repeat.tempo = max(40.0, min(300.0, self.note_repeat.tempo))
                     self._sync_repeat_state()
             elif 'master' in encoder_name.lower():
-                # Master Encoder (top right) = CR Main volume, or CR Phones volume
-                # while User OR Select is held.
-                if self.state.user_held or getattr(self.state, 'select_held', False):
-                    # User/Select + Master Encoder = Phones Level
-                    if increment > 0:
-                        midi_val = min(63, abs(increment))
-                    else:
-                        midi_val = 64 + min(63, abs(increment))
-                    self.nuendo_link.send_cc(77, midi_val)
+                # Master Encoder (top right) controls CR Main or Phones volume.
+                # Default target is Main (or Phones if inverted in Setup); holding
+                # User/Select swaps to the other. want_phones = default XOR modifier.
+                if increment > 0:
+                    midi_val = min(63, abs(increment))
                 else:
-                    # Control Room Volume
-                    if increment > 0:
-                        midi_val = min(63, abs(increment))
-                    else:
-                        midi_val = 64 + min(63, abs(increment))
-                    self.nuendo_link.send_cc(79, midi_val)
+                    midi_val = 64 + min(63, abs(increment))
+                modifier = self.state.user_held or getattr(self.state, 'select_held', False)
+                phones_default = getattr(self.state, 'cr_phones_default', False)
+                want_phones = (phones_default != modifier)
+                if want_phones:
+                    self.nuendo_link.send_cc(77, midi_val)  # Phones level
+                else:
+                    self.nuendo_link.send_cc(79, midi_val)  # Main level
             return
         
         encoder_index = TRACK_ENCODERS.index(encoder_name)
@@ -1481,7 +1479,7 @@ class Push2Controller:
         
         # ── Mode Setup : intercepter les boutons ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', None, None, None, None, 'About']
             
             # Upper row → select setup page
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
@@ -1519,6 +1517,12 @@ class Push2Controller:
                         if i < len(VC_LIST):
                             state.velocity_curve = VC_LIST[i]
                             self._apply_velocity_curve()
+                    elif state.setup_page == 2:
+                        # Page 2: CR Knob default (button 1 = Main, 2 = Phones)
+                        if i == 0:
+                            state.cr_phones_default = False
+                        elif i == 1:
+                            state.cr_phones_default = True
                     self._update_all_leds()
                     return
             return
@@ -3452,6 +3456,10 @@ class Push2Controller:
             
             # Add Device (monochrome) : lit at all times
             self._set_mono_led(BTN_ADD_DEVICE, 127)
+
+            # Select (monochrome) : lit at all times — it modifies the Master
+            # Encoder (CR Main <-> Phones), so keep it visibly available.
+            self._set_mono_led(BTN_SELECT, 127)
         except Exception:
             pass
 
@@ -3518,7 +3526,7 @@ class Push2Controller:
 
         # ── Setup mode: upper row = page tabs ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', None, None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', None, None, None, None, 'About']
             for i in range(8):
                 cc = 102 + i
                 try:
@@ -3833,6 +3841,15 @@ class Push2Controller:
                         if i < len(VC_OPTIONS):
                             is_sel = (state.velocity_curve == VC_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.setup_page == 2:
+                        # CR Knob default: button 1 = Main, button 2 = Phones
+                        phones_default = getattr(state, 'cr_phones_default', False)
+                        if i == 0:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if not phones_default else BTN_DIM])
+                        elif i == 1:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if phones_default else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
                     else:

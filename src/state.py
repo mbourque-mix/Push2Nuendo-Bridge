@@ -453,6 +453,9 @@ class AppState:
         self.shift_held = False
         self.user_held = False
         self.select_held = False  # Select + Master Encoder = CR Phones level
+        # When True, the Master Encoder controls CR Phones by default and the
+        # Select modifier gives CR Main (Setup → CR Knob page inverts this).
+        self.cr_phones_default = False
         
         # ── Lower row button mode (Mute/Solo/Monitor/Rec) ──
         self.lower_mode = "mute"
