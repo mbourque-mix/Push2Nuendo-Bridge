@@ -138,6 +138,9 @@ BTN_DUPLICATE     = getattr(Push2Constants, 'BUTTON_DUPLICATE', 'Duplicate')
 # User (for Hold + Master Encoder = Phones)
 BTN_USER          = getattr(Push2Constants, 'BUTTON_USER', 'User')
 
+# Select (modifier: Hold + Master Encoder = CR Phones level)
+BTN_SELECT        = getattr(Push2Constants, 'BUTTON_SELECT', 'Select')
+
 # Setup button (CC 30, monochrome)
 BTN_SETUP         = getattr(Push2Constants, 'BUTTON_SETUP', 'Setup')
 
@@ -618,9 +621,10 @@ class Push2Controller:
                     self.note_repeat.tempo = max(40.0, min(300.0, self.note_repeat.tempo))
                     self._sync_repeat_state()
             elif 'master' in encoder_name.lower():
-                # Master Encoder (top right) = always CR Volume
-                if self.state.user_held:
-                    # User + Master Encoder = Phones Level
+                # Master Encoder (top right) = CR Main volume, or CR Phones volume
+                # while User OR Select is held.
+                if self.state.user_held or getattr(self.state, 'select_held', False):
+                    # User/Select + Master Encoder = Phones Level
                     if increment > 0:
                         midi_val = min(63, abs(increment))
                     else:
@@ -984,7 +988,12 @@ class Push2Controller:
                 self.cr_state.page = CR_PAGE_MAIN
                 self._update_cr_leds()
             return
-        
+
+        # ── Select (modifier: Select + Master Encoder = CR Phones level) ──
+        if button_name == BTN_SELECT:
+            state.select_held = True
+            return
+
         # ── Setup (toggle Setup page) ──
         if button_name == BTN_SETUP:
             if state.shift_held:
@@ -2181,6 +2190,8 @@ class Push2Controller:
             self.state.accent_held = False
         if button_name == BTN_USER:
             self.state.user_held = False
+        if button_name == BTN_SELECT:
+            self.state.select_held = False
 
         # XY pad: upper row is disabled
         if self.state.mode == MODE_XY and button_name in BUTTONS_UPPER_ROW:

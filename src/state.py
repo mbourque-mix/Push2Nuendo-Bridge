@@ -452,6 +452,7 @@ class AppState:
         # Is the Shift button held?
         self.shift_held = False
         self.user_held = False
+        self.select_held = False  # Select + Master Encoder = CR Phones level
         
         # ── Lower row button mode (Mute/Solo/Monitor/Rec) ──
         self.lower_mode = "mute"
