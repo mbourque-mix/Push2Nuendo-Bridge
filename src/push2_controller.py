@@ -1348,11 +1348,13 @@ class Push2Controller:
             return
         
         if button_name == BTN_MODE_SENDS:
-            if state.shift_held:
+            # Clip button cycles Sends <-> Pan (Pan used to be Shift+Clip), the
+            # same way the Mix button cycles Volume <-> Channel Strip.
+            if state.mode == MODE_SENDS:
+                # On Sends → Pan
                 self._set_mode(MODE_PAN)
-            elif state.mode == MODE_SENDS:
-                self._set_mode(MODE_VOLUME)
             else:
+                # From Pan or any other mode → Sends
                 self._set_mode(MODE_SENDS)
                 # Force refresh of names de sends by re-selecting the track
                 import threading
