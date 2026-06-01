@@ -1190,6 +1190,14 @@ class NuendoLink:
             print(f"  DA Strip edit slot {slot_idx}: {'✓' if success else 'FAILED'}")
             return
 
+        elif len(message) >= 4 and message[1] == 0x00 and message[2] == 0x38:
+            # No instrument slot on the selected track : [F0 00 38 F7]
+            # (instrument browse was requested on a non-instrument track)
+            cb = getattr(self, '_on_browser_no_instrument', None)
+            if cb:
+                cb()
+            return
+
         else:
             return
         
@@ -2113,11 +2121,22 @@ class NuendoLink:
         print(f"  → DA: Requested Plugin Manager exploration for slot {slot_index}")
         return True
 
-    def request_da_plugin_list(self, collection_index=1):
+    def set_da_browse_mode(self, instrument):
+        """Switch the JS plugin browser target: False = inserts (audio effects),
+        True = the selected track's instrument slot (VST instruments). CC 93 ch8.
+        """
+        if not (self._midi_out and self._running and getattr(self, '_da_available', False)):
+            return False
+        self._midi_out.send_message([0xB7, 93, 1 if instrument else 0])
+        return True
+
+    def request_da_plugin_list(self, collection_index=1, instrument=False):
         """Ask JS to send the full plugin list for a collection (CC 83 ch8).
-        
+
         collection_index: 0 = Default (all plugins), 1 = Push (curated), etc.
-        
+        instrument: True scans the selected Instrument track's VST instruments
+                    instead of insert audio effects.
+
         JS will respond with SysEx 0x2C (entries) and 0x2D (complete).
         Results stored in state.browser_plugins[].
         """
@@ -2125,20 +2144,25 @@ class NuendoLink:
             return False
         if not getattr(self, '_da_available', False):
             return False
-        if not getattr(self, '_da_inserts_ready', False):
+        if not instrument and not getattr(self, '_da_inserts_ready', False):
             return False
-        
+
+        self.set_da_browse_mode(instrument)
+
         # Reset browser state
         self.state.browser_plugins = []
         self.state.browser_list_ready = False
-        
+
         self._midi_out.send_message([0xB7, 83, collection_index & 0x7F])
-        print(f"  → DA: Requested plugin list for collection {collection_index}")
+        kind = "instrument" if instrument else "insert"
+        print(f"  → DA: Requested {kind} list for collection {collection_index}")
         return True
 
-    def request_da_collection_info(self):
+    def request_da_collection_info(self, instrument=False):
         """Ask JS to send info about all plugin collections (CC 88 ch8).
-        
+
+        instrument: True for the instrument slot's collections.
+
         JS will respond with SysEx 0x2F for each collection.
         Results stored in state.browser_collections[].
         """
@@ -2146,37 +2170,44 @@ class NuendoLink:
             return False
         if not getattr(self, '_da_available', False):
             return False
-        if not getattr(self, '_da_inserts_ready', False):
+        if not instrument and not getattr(self, '_da_inserts_ready', False):
             return False
-        
+
+        self.set_da_browse_mode(instrument)
+
         self.state.browser_collections = []
         self.state.browser_collections_ready = False
-        
+
         self._midi_out.send_message([0xB7, 88, 0])
         print("  → DA: Requested collection info")
         return True
 
-    def send_da_load_plugin(self, target_slot, entry_index, collection_index):
-        """Load a plugin into an insert slot via DA Plugin Manager.
-        
-        target_slot: 0-15 (insert slot)
+    def send_da_load_plugin(self, target_slot, entry_index, collection_index, instrument=False):
+        """Load a plugin via DA Plugin Manager.
+
+        target_slot: 0-15 (insert slot); ignored in instrument mode (the single
+                     instrument slot is the target).
         entry_index: index into the collection's mEntries array
         collection_index: which collection (0=Default, 1=Push, etc.)
-        
+        instrument: True loads a VST instrument onto the selected Instrument
+                    track instead of an insert effect.
+
         Sends 3 CCs on ch8:
           CC 82: target slot index
           CC 81: entry index low 7 bits
           CC 80: (entry index high bits) | (collection index << 4) → triggers load
-        
+
         JS will respond with SysEx 0x2E (result).
         """
         if not (self._midi_out and self._running):
             return False
         if not getattr(self, '_da_available', False):
             return False
-        if not getattr(self, '_da_inserts_ready', False):
+        if not instrument and not getattr(self, '_da_inserts_ready', False):
             return False
-        
+
+        self.set_da_browse_mode(instrument)
+
         entry_lo = entry_index & 0x7F
         entry_hi = (entry_index >> 7) & 0x0F
         coll_bits = (collection_index & 0x07) << 4

@@ -539,6 +539,7 @@ class AppState:
         self.browser_target_slot = 0        # Insert slot to load into
         self.browser_phase = "slot_select"  # "slot_select" or "plugin_list"
         self.browser_prev_mode = MODE_VOLUME  # Mode to return to on cancel
+        self.browser_instrument = False     # True = browsing/loading VST instruments
         
         # ── Channel Strip (v1.0.4) ──
         # Holds the selected track's PreFilter, ChannelEQ, and 5 strip slots.

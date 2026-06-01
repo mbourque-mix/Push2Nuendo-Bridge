@@ -1005,6 +1005,59 @@ if (page.mHostAccess.makeDirectAccess) {
     var daInsHostObj = page.mHostAccess.mTrackSelection.mMixerChannel.mInsertAndStripEffects;
     var daInserts = page.mHostAccess.makeDirectAccess(daInsHostObj);
     var daInsActive = false;
+
+    // ── DirectAccess #3 (PROBE): the whole selected MixerChannel ──
+    // Used to investigate whether an Instrument track exposes its instrument as
+    // a loadable slot (and whether its Plugin Manager lists VST instruments
+    // rather than audio effects). Triggered by Shift+Setup (DA diagnostic).
+    var daChan = page.mHostAccess.makeDirectAccess(page.mHostAccess.mTrackSelection.mMixerChannel);
+    var daChanActive = false;
+    function ensureDAChan() {
+        if (!daMapping) return false;
+        if (!daChanActive) { daChan.activate(daMapping); daChanActive = true; }
+        return true;
+    }
+
+    // Browse mode for the plugin list/load: false = inserts (audio effects),
+    // true = the selected track's instrument slot (VST instruments). Set by the
+    // bridge via CC 93 ch8 before requesting a list or a load.
+    var daBrowseInstr = false;
+
+    // Locate the channel-level instrument Slot on a Synth (instrument) track.
+    // It is the only top-level child whose type is exactly "Slot" (the others —
+    // Inserts, Modulators, Sends… — are containers). Returns -1 on non-instrument
+    // tracks.
+    function daFindInstrumentSlot(m) {
+        if (!ensureDAChan()) return -1;
+        var rootID = daChan.getBaseObjectID(m);
+        if (rootID < 0 || !daChan.getObjectTypeName) return -1;
+        var n = daChan.getNumberOfChildObjects(m, rootID);
+        for (var i = 0; i < n; i++) {
+            var c = daChan.getChildObjectID(m, rootID, i);
+            if (daChan.getObjectTypeName(m, c) === 'Slot') return c;
+        }
+        return -1;
+    }
+
+    // Resolve the Plugin Manager + a valid slot id for the current browse mode.
+    // Returns {pm, slot} or null when unavailable.
+    function getBrowseTarget(m) {
+        if (daBrowseInstr) {
+            var iSlot = daFindInstrumentSlot(m);
+            if (iSlot < 0 || !daChan.mPluginManager) return null;
+            return { pm: daChan.mPluginManager, slot: iSlot, instr: true };
+        }
+        if (!ensureDAInserts() || !daInsExplored || daInsSlotCache.length === 0) return null;
+        if (!daInserts.mPluginManager) return null;
+        return { pm: daInserts.mPluginManager, slot: daInsSlotCache[0].objectID, instr: false };
+    }
+
+    // CC 93 ch8 (0xB7): set browse mode (0 = inserts, 1 = instrument).
+    var daBrowseModeBtn = surface.makeButton(93, 24, 2, 2);
+    daBrowseModeBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 93);
+    daBrowseModeBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        daBrowseInstr = (Math.round(value * 127) > 0);
+    };
     var daInsSlotCache = [];   // [{objectID, bypassTag, title, bypassed, hasPlugin}]
     var daInsExplored = false;
 
@@ -1039,6 +1092,10 @@ if (page.mHostAccess.makeDirectAccess) {
         if (daInsActive) {
             daInserts.deactivate(activeMapping);
             daInsActive = false;
+        }
+        if (daChanActive) {
+            daChan.deactivate(activeMapping);
+            daChanActive = false;
         }
         daMapping = null;
         daAvailable = false;
@@ -1684,22 +1741,27 @@ if (page.mHostAccess.makeDirectAccess) {
     daPluginListBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 83);
     daPluginListBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
         var collIdx = Math.round(value * 127);
-        if (!daMapping || !ensureDAInserts()) return;
-        if (!daInsExplored || daInsSlotCache.length === 0) return;
-
+        if (!daMapping) return;
         var m = daMapping;
-        var slotID = daInsSlotCache[0].objectID;  // Any valid slot works
 
-        if (!daInserts.mPluginManager) {
-            console.log('DA PluginList: mPluginManager not available');
+        var t = getBrowseTarget(m);
+        if (!t) {
+            if (daBrowseInstr) {
+                // Instrument list requested but the selected track has no
+                // instrument slot — tell the bridge to fall back to inserts.
+                // (5-byte form: the bridge ignores SysEx shorter than 5 bytes.)
+                midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x38, 0x00, 0xF7]);
+            }
+            console.log('DA PluginList: no browse target (instr=' + daBrowseInstr + ')');
             return;
         }
+        var slotID = t.slot;
 
-        var collCount = daInserts.mPluginManager.getNumberOfPluginCollections(m, slotID);
+        var collCount = t.pm.getNumberOfPluginCollections(m, slotID);
         if (collIdx >= collCount) collIdx = collCount - 1;
         if (collIdx < 0) collIdx = 0;
 
-        var coll = daInserts.mPluginManager.getPluginCollectionByIndex(m, slotID, collIdx);
+        var coll = t.pm.getPluginCollectionByIndex(m, slotID, collIdx);
         if (!coll || !coll.mEntries) {
             console.log('DA PluginList: collection ' + collIdx + ' is empty');
             return;
@@ -1727,17 +1789,16 @@ if (page.mHostAccess.makeDirectAccess) {
     var daCollInfoBtn = surface.makeButton(88, 22, 2, 2);
     daCollInfoBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 88);
     daCollInfoBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
-        if (!daMapping || !ensureDAInserts()) return;
-        if (!daInsExplored || daInsSlotCache.length === 0) return;
-        if (!daInserts.mPluginManager) return;
-
+        if (!daMapping) return;
         var m = daMapping;
-        var slotID = daInsSlotCache[0].objectID;
-        var collCount = daInserts.mPluginManager.getNumberOfPluginCollections(m, slotID);
+        var t = getBrowseTarget(m);
+        if (!t) return;
+        var slotID = t.slot;
+        var collCount = t.pm.getNumberOfPluginCollections(m, slotID);
 
         for (var ci = 0; ci < collCount; ci++) {
             try {
-                var coll = daInserts.mPluginManager.getPluginCollectionByIndex(m, slotID, ci);
+                var coll = t.pm.getPluginCollectionByIndex(m, slotID, ci);
                 var collName = (coll && coll.mName) ? coll.mName : ('Collection ' + ci);
                 var entryCount = (coll && coll.mEntries) ? coll.mEntries.length : 0;
                 var cntLo = entryCount & 0x7F;
@@ -1788,22 +1849,27 @@ if (page.mHostAccess.makeDirectAccess) {
         var collIdx = (raw >> 4) & 0x07;
         var entryIndex = daLoadEntryLo | (entryHi << 7);
 
-        if (daLoadSlot < 0 || !daMapping || !ensureDAInserts()) {
+        if (daLoadSlot < 0 || !daMapping) {
             midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
             return;
         }
-        if (!daInsExplored || daInsSlotCache.length === 0) {
+        var m0 = daMapping;
+        var t = getBrowseTarget(m0);
+        if (!t) {
             midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
             return;
         }
 
         try {
             var m = daMapping;
-            var slotID = daInsSlotCache[0].objectID;  // Any valid slot for API call
-            var targetSlotID = -1;
+            var slotID = t.slot;  // collection-source slot
+            var targetSlotID;
 
-            // Find the target slot's objectID
-            if (daLoadSlot < daInsSlotCache.length) {
+            // Resolve the target slot. Instrument mode loads into the single
+            // instrument slot; insert mode into the requested insert slot.
+            if (t.instr) {
+                targetSlotID = t.slot;
+            } else if (daLoadSlot < daInsSlotCache.length) {
                 targetSlotID = daInsSlotCache[daLoadSlot].objectID;
             } else {
                 console.log('DA Load: slot ' + daLoadSlot + ' not in cache');
@@ -1812,9 +1878,9 @@ if (page.mHostAccess.makeDirectAccess) {
             }
 
             // Get the collection and entry
-            var collCount = daInserts.mPluginManager.getNumberOfPluginCollections(m, slotID);
+            var collCount = t.pm.getNumberOfPluginCollections(m, slotID);
             if (collIdx >= collCount) collIdx = collCount - 1;
-            var coll = daInserts.mPluginManager.getPluginCollectionByIndex(m, slotID, collIdx);
+            var coll = t.pm.getPluginCollectionByIndex(m, slotID, collIdx);
             if (!coll || !coll.mEntries || entryIndex >= coll.mEntries.length) {
                 console.log('DA Load: invalid entry ' + entryIndex + ' in coll ' + collIdx);
                 midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x00, 0xF7]);
@@ -1823,10 +1889,11 @@ if (page.mHostAccess.makeDirectAccess) {
 
             var pluginUID = coll.mEntries[entryIndex].mPluginUID;
             var pluginName = coll.mEntries[entryIndex].mPluginName || '?';
-            console.log('DA Load: "' + pluginName + '" (UID=' + pluginUID.substring(0, 16) + '...) into slot ' + daLoadSlot);
+            console.log('DA Load: "' + pluginName + '" (UID=' + pluginUID.substring(0, 16) + '...) ' +
+                        (t.instr ? 'as INSTRUMENT' : ('into slot ' + daLoadSlot)));
 
             daBypassCooldown = 20;  // Suppress callbacks during load
-            daInserts.mPluginManager.trySetSlotPlugin(m, targetSlotID, pluginUID, true);
+            t.pm.trySetSlotPlugin(m, targetSlotID, pluginUID, true);
 
             // Success — send result
             midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2E, daLoadSlot & 0x7F, 0x01, 0xF7]);

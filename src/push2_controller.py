@@ -464,6 +464,8 @@ class Push2Controller:
 
         # Always-on callback so strip DA param completions can apply encoder setup
         self.nuendo_link._on_da_params_ready = self._on_da_params_ready
+        # Add Device on a non-instrument track falls back to the insert browser
+        self.nuendo_link._on_browser_no_instrument = self._browser_fallback_to_inserts
 
     # ─────────────────────────────────────────
     # Start / stop
@@ -1414,18 +1416,34 @@ class Push2Controller:
         # ── Add Device → Plugin Browser ──
         if button_name == BTN_ADD_DEVICE:
             if state.mode == MODE_BROWSER:
-                # Already in browser → cancel
-                self._set_mode(MODE_INSERTS)
-                self._scan_inserts()
-            else:
-                # Enter browser mode (slot selection phase)
+                # Already in browser → cancel, back to where we came from
+                if state.browser_instrument:
+                    self._set_mode(state.browser_prev_mode)
+                else:
+                    self._set_mode(MODE_INSERTS)
+                    self._scan_inserts()
+            elif state.shift_held:
+                # Shift+Add Device → INSERT browser (audio effects, pick a slot)
                 state.browser_prev_mode = state.mode
+                state.browser_instrument = False
                 state.browser_phase = "slot_select"
                 state.insert_bank_offset = 0
                 self._set_mode(MODE_BROWSER)
-                # Ensure inserts are scanned if coming from a non-insert mode
                 if not self.nuendo_link._da_inserts_ready:
                     self._scan_inserts()
+            else:
+                # Add Device → INSTRUMENT browser for the selected Instrument
+                # track. There is a single instrument slot, so skip slot select
+                # and jump straight to the plugin list (collection 0 = Default).
+                state.browser_prev_mode = state.mode
+                state.browser_instrument = True
+                state.browser_phase = "plugin_list"
+                state.browser_scroll = 0
+                state.browser_selected = 0
+                state.browser_collection_index = 0
+                state.browser_list_ready = False
+                self._set_mode(MODE_BROWSER)
+                self.nuendo_link.request_da_plugin_list(0, instrument=True)
             return
         
         # ── Overview mode ──
@@ -1841,14 +1859,19 @@ class Push2Controller:
                             state.browser_phase = "collection_select"
                             state.browser_coll_scroll = state.browser_collection_index
                             state.browser_collections_ready = False
-                            self.nuendo_link.request_da_collection_info()
+                            self.nuendo_link.request_da_collection_info(
+                                instrument=state.browser_instrument)
                             self._update_upper_row_leds()
                             self._update_lower_row_leds()
                         elif i == 7:
-                            # Last button = back to slot select
-                            state.browser_phase = "slot_select"
-                            self._update_upper_row_leds()
-                            self._update_lower_row_leds()
+                            # Last button = back. Instrument mode has no slot
+                            # selection, so exit the browser entirely.
+                            if state.browser_instrument:
+                                self._set_mode(state.browser_prev_mode)
+                            else:
+                                state.browser_phase = "slot_select"
+                                self._update_upper_row_leds()
+                                self._update_lower_row_leds()
                         return
             
             elif state.browser_phase == "collection_select":
@@ -1880,7 +1903,8 @@ class Push2Controller:
                         state.browser_scroll = 0
                         state.browser_selected = 0
                         state.browser_list_ready = False
-                        self.nuendo_link.request_da_plugin_list(coll['index'])
+                        self.nuendo_link.request_da_plugin_list(
+                            coll['index'], instrument=state.browser_instrument)
                         print(f"  Browser: Selected collection \"{coll['name']}\" ({coll['count']} plugins)")
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
@@ -4341,28 +4365,49 @@ class Push2Controller:
                 self.nuendo_link.send_cc(1, 0)
                 time.sleep(0.05)
 
+    def _browser_fallback_to_inserts(self):
+        """Called when Add Device opened the instrument browser but the selected
+        track has no instrument slot — switch to the insert browser instead."""
+        state = self.state
+        if state.mode != MODE_BROWSER or not getattr(state, 'browser_instrument', False):
+            return
+        print("  Browser: no instrument slot — falling back to inserts")
+        state.browser_instrument = False
+        state.browser_phase = "slot_select"
+        state.insert_bank_offset = 0
+        if not self.nuendo_link._da_inserts_ready:
+            self._scan_inserts()
+        self._update_upper_row_leds()
+        self._update_lower_row_leds()
+
     def _browser_load_plugin(self, target_slot, entry_index, collection_index):
-        """Load a plugin from the browser into an insert slot."""
+        """Load a plugin from the browser — into an insert slot, or as the
+        selected Instrument track's instrument when in instrument mode."""
         state = self.state
         plugin = state.browser_plugins[entry_index] if entry_index < len(state.browser_plugins) else None
         if not plugin:
             return
-        
-        print(f"  Browser: Loading \"{plugin['name']}\" into slot {target_slot + 1}...")
-        
+
+        instrument = getattr(state, 'browser_instrument', False)
+        where = "as instrument" if instrument else f"into slot {target_slot + 1}"
+        print(f"  Browser: Loading \"{plugin['name']}\" {where}...")
+
         # Send load command to JS via CC sequence on ch8
         success = self.nuendo_link.send_da_load_plugin(
-            target_slot, entry_index, collection_index)
-        
+            target_slot, entry_index, collection_index, instrument=instrument)
+
         if success:
-            # Exit browser mode and return to inserts after a short delay
             import threading
             def _after_load():
                 time.sleep(1.0)  # Wait for Nuendo to load the plugin
-                self._set_mode(MODE_INSERTS)
-                state.selected_insert_slot = target_slot
-                state.insert_bank_offset = 0 if target_slot < 8 else 8
-                self._scan_inserts()
+                if instrument:
+                    # Instrument loaded — return to where we came from.
+                    self._set_mode(state.browser_prev_mode)
+                else:
+                    self._set_mode(MODE_INSERTS)
+                    state.selected_insert_slot = target_slot
+                    state.insert_bank_offset = 0 if target_slot < 8 else 8
+                    self._scan_inserts()
                 print(f"  Browser: \"{plugin['name']}\" loaded ✓")
             threading.Thread(target=_after_load, daemon=True).start()
         else:

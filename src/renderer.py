@@ -1080,10 +1080,14 @@ def _render_browser_plugin_list(state):
     slot_num = state.browser_target_slot + 1
     coll_name = state.browser_collection_name or "Plugins"
     total = len(state.browser_plugins)
-    
+    instrument = getattr(state, 'browser_instrument', False)
+
     # Title bar
     draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(20, 50, 80))
-    title = f"SLOT {slot_num}  ·  {coll_name}  ({total})"
+    if instrument:
+        title = f"INSTRUMENT  ·  {coll_name}  ({total})"
+    else:
+        title = f"SLOT {slot_num}  ·  {coll_name}  ({total})"
     draw.text((8, 3), title, font=FONT_MD, fill=(255, 255, 255))
     
     # Show position indicator
