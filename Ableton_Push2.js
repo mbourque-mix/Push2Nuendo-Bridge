@@ -1,6 +1,6 @@
 // =============================================================================
 // Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
-// Version 1.0.5
+// Version 1.0.6-dev
 //
 // Un seul bank zone de 8 canaux.
 // Banking via mNextBank/mPrevBank (CC 8/9).
@@ -15,7 +15,7 @@
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
 
-var JS_VERSION = '1.0.5';
+var JS_VERSION = '1.0.6-dev';
 
 var midiremote_api = require('midiremote_api_v1');
 
@@ -112,11 +112,14 @@ selRecBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlC
 var selMonBtn = surface.makeButton(12, 30, 3, 2);
 selMonBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 14);
 
-// ── AI KNOB (Mouse Pointer) CC 64, relative mode ──
+// ── AI KNOB (Mouse Pointer) CC 2, relative mode ──
+// Was on CC 64 in 1.0.5 and earlier, which collided with sendEnableButtons[4]
+// (CC 60+4=64) — turning the AI Knob toggled Send 1 on/off for track 5. Moved
+// to CC 2 (free, unused by any other binding).
 var aiKnob = surface.makeKnob(0, 26, 3, 3);
 aiKnob.mSurfaceValue.mMidiBinding
     .setInputPort(midiInput_Loop)
-    .bindToControlChange(0, 64)
+    .bindToControlChange(0, 2)
     .setTypeRelativeSignedBit();
 var scanBtn = surface.makeButton(0, 18, 3, 2);
 scanBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 5);

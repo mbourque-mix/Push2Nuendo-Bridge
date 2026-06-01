@@ -603,12 +603,14 @@ class Push2Controller:
         # Find the index 0-7 from the encoder name
         if encoder_name not in TRACK_ENCODERS:
             if 'swing' in encoder_name.lower():
-                # Swing Encoder (top left) = AI Knob
+                # Swing Encoder (top left) = AI Knob → CC 2 (was CC 64 ≤ 1.0.5,
+                # which collided with the Send-Enable button for track 5 and
+                # toggled Send 1 on/off whenever the encoder was turned).
                 if increment > 0:
                     midi_val = min(63, abs(increment))
                 else:
                     midi_val = 64 + min(63, abs(increment))
-                self.nuendo_link.send_cc(64, midi_val)
+                self.nuendo_link.send_cc(2, midi_val)
             elif 'tempo' in encoder_name.lower():
                 # Tempo Encoder (CC 14) = Note Repeat BPM when active
                 if self.note_repeat.enabled:
