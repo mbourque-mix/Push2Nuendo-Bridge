@@ -143,6 +143,14 @@ def list_plugins(search: Optional[str] = None, type: Optional[str] = None):
     return {"plugins": plugins, "total": len(plugins)}
 
 
+@app.delete("/api/plugins/{name}")
+def delete_plugin(name: str):
+    """Remove a plugin from the cache (e.g. a stale error or duplicate entry)."""
+    if scanner.delete_plugin(name):
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail=f"Plugin '{name}' not found")
+
+
 @app.get("/api/plugins/{name}")
 def get_plugin(name: str):
     """Get full plugin details including all parameters."""

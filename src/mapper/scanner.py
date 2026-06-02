@@ -378,6 +378,21 @@ def rescan_plugin(name, timeout=120, should_skip=None):
     return cache.get(name)
 
 
+def delete_plugin(name):
+    """Remove a plugin entry from the cache (e.g. a stale error/duplicate).
+    Returns True if it existed and was removed."""
+    cache = get_cached_plugins()
+    if name not in cache:
+        return False
+    del cache[name]
+    try:
+        CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    except IOError as e:
+        logger.error(f"Failed to save cache: {e}")
+        return False
+    return True
+
+
 def get_cached_plugins():
     """Return the cached plugin database without scanning."""
     if CACHE_FILE.exists():

@@ -468,6 +468,16 @@ async function rescanOne(name, ev) {
   _watchScan();
 }
 
+async function removePlugin(name, ev) {
+  if (ev) ev.stopPropagation();
+  await fetch(`${API}/plugins/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  const d = await fetchJson(`${API}/plugins`);
+  allPlugins = d.plugins;
+  populateFilterOptions();
+  renderPluginList();
+  showToast(`Removed "${name}" from the list`);
+}
+
 async function cancelScan() {
   document.getElementById('cancelScanBtn').disabled = true;
   document.getElementById('cancelScanBtn').textContent = 'Cancelling…';
@@ -610,6 +620,8 @@ function renderPluginList() {
           ${escapeHtml(p.name)}
           <button class="rescan-one" title="Rescan just this plugin"
                   onclick="rescanOne('${escapeAttr(p.name)}', event)">↻ rescan</button>
+          <button class="rescan-one" title="Remove this entry from the list"
+                  onclick="removePlugin('${escapeAttr(p.name)}', event)">✕ remove</button>
         </div>
         <div class="meta">
           <span class="err">⚠ ignored — ${escapeHtml(p.error)}</span>
