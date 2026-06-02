@@ -89,6 +89,17 @@ body {
   font-family: inherit;
 }
 .filter-btn.active { background: rgba(0,180,200,0.1); border-color: var(--accent); color: var(--accent); }
+.filter-sel {
+  flex: 1; min-width: 0;
+  background: var(--bg-deep, #111);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 2px;
+  font-size: 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: inherit;
+}
 .plugin-list { flex: 1; overflow: auto; padding: 0 8px 8px; }
 .plugin-item {
   padding: 8px 10px;
@@ -296,6 +307,20 @@ body {
         <button class="filter-btn" data-filter="mapped" onclick="setFilter('mapped')">Mapped</button>
         <button class="filter-btn" data-filter="unmapped" onclick="setFilter('unmapped')">Unmapped</button>
       </div>
+      <div class="filter-row" style="margin-top:6px;">
+        <select id="mfrFilter" class="filter-sel" onchange="filterPlugins()"><option value="">All makers</option></select>
+        <select id="kindFilter" class="filter-sel" onchange="filterPlugins()">
+          <option value="">All kinds</option>
+          <option value="effect">Effects</option>
+          <option value="instrument">Instruments</option>
+        </select>
+        <select id="stateFilter" class="filter-sel" onchange="filterPlugins()">
+          <option value="">All states</option>
+          <option value="ok">OK</option>
+          <option value="ignored">Ignored</option>
+        </select>
+        <select id="typeFilter" class="filter-sel" onchange="filterPlugins()"><option value="">All types</option></select>
+      </div>
     </div>
     <div class="plugin-list" id="pluginList"></div>
     <div class="sidebar-footer" id="pluginCount"></div>
@@ -351,6 +376,7 @@ async function postJson(url, body) {
 async function init() {
   const d = await fetchJson(`${API}/plugins`);
   allPlugins = d.plugins;
+  populateFilterOptions();
   renderPluginList();
 }
 
@@ -402,6 +428,7 @@ async function startScan() {
       document.getElementById('scanBtn').textContent = 'Rescan Plugins';
       const d = await fetchJson(`${API}/plugins`);
       allPlugins = d.plugins;
+      populateFilterOptions();
       renderPluginList();
       showToast(s.cancelled ? `Scan cancelled — ${d.total} plugins so far`
                             : `Scan complete: ${d.total} plugins`);
@@ -439,6 +466,7 @@ async function importMappings(ev) {
     const r = await postJson(`${API}/mappings/import`, bundle);
     const d = await fetchJson(`${API}/plugins`);
     allPlugins = d.plugins;
+    populateFilterOptions();
     renderPluginList();
     showToast(`Imported ${r.imported} mapping(s)` + (r.skipped ? `, ${r.skipped} skipped` : ''));
   } catch (e) {
@@ -500,14 +528,40 @@ function filterPlugins() { renderPluginList(); }
 
 function getFilteredPlugins() {
   const search = document.getElementById('searchInput').value.toLowerCase();
+  const mfr = document.getElementById('mfrFilter').value;
+  const kind = document.getElementById('kindFilter').value;
+  const state = document.getElementById('stateFilter').value;
+  const ptype = document.getElementById('typeFilter').value;
   return allPlugins.filter(p => {
     if (search && !p.name.toLowerCase().includes(search)) return false;
-    // Error plugins are shown (with their reason) under "All" and search,
-    // but excluded from the mapped/unmapped views since they can't be mapped.
     if (currentFilter === 'mapped' && (!p.has_mapping || p.error)) return false;
     if (currentFilter === 'unmapped' && (p.has_mapping || p.error)) return false;
+    if (mfr && (p.manufacturer || '') !== mfr) return false;
+    if (kind === 'effect' && p.is_instrument) return false;
+    if (kind === 'instrument' && !p.is_instrument) return false;
+    if (state === 'ok' && p.error) return false;
+    if (state === 'ignored' && !p.error) return false;
+    if (ptype && (p.type || '') !== ptype) return false;
     return true;
   });
+}
+
+function populateFilterOptions() {
+  // Manufacturers
+  const mfrs = [...new Set(allPlugins.map(p => p.manufacturer).filter(Boolean))]
+    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  const mfrSel = document.getElementById('mfrFilter');
+  const curMfr = mfrSel.value;
+  mfrSel.innerHTML = '<option value="">All makers</option>' +
+    mfrs.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+  mfrSel.value = curMfr;
+  // Types
+  const types = [...new Set(allPlugins.map(p => p.type).filter(Boolean))].sort();
+  const typeSel = document.getElementById('typeFilter');
+  const curType = typeSel.value;
+  typeSel.innerHTML = '<option value="">All types</option>' +
+    types.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+  typeSel.value = curType;
 }
 
 // ── Render plugin list ──
@@ -744,6 +798,7 @@ async function saveMapping() {
     showToast(`Mapping saved for ${selectedPlugin}`);
     const d = await fetchJson(`${API}/plugins`);
     allPlugins = d.plugins;
+    populateFilterOptions();
     renderPluginList();
   } catch(e) {
     showToast('Error: ' + e.message, 'error');
@@ -760,6 +815,7 @@ async function deleteMapping() {
     showToast('Mapping deleted');
     const d = await fetchJson(`${API}/plugins`);
     allPlugins = d.plugins;
+    populateFilterOptions();
     renderPluginList();
   } catch(e) {
     showToast('Error: ' + e.message, 'error');

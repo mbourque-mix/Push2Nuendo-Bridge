@@ -128,15 +128,18 @@ def list_plugins(search: Optional[str] = None, type: Optional[str] = None):
         # Check if mapping exists
         has_mapping = scanner.get_mapping(name) is not None
         
+        # Source/type label: captured-from-Nuendo entries are tagged
+        ptype = "DirectAccess" if info.get("source") == "directaccess" else info.get("type", "VST3")
         plugins.append({
             "name": name,
-            "type": info.get("type", "VST3"),
+            "type": ptype,
+            "manufacturer": info.get("manufacturer", "") or "",
             "is_instrument": info.get("is_instrument", False),
             "parameter_count": info.get("parameter_count", 0),
             "has_mapping": has_mapping,
             "error": info.get("error"),
         })
-    
+
     return {"plugins": plugins, "total": len(plugins)}
 
 

@@ -177,6 +177,8 @@ def scan_one(nm):
         p["is_discrete"] = bool(getattr(param, "is_discrete", False))
         params.append(p)
     r = {{"name": nm or STEM, "path": PATH, "type": "VST3",
+          "manufacturer": getattr(plugin, "manufacturer_name", "") or "",
+          "category": getattr(plugin, "category", "") or "",
           "is_instrument": bool(getattr(plugin, "is_instrument", False)),
           "is_effect": bool(getattr(plugin, "is_effect", True)),
           "parameter_count": len(params), "parameters": params}}
