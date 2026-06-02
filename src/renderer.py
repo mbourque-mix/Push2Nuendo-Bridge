@@ -2959,10 +2959,66 @@ def render_disconnect_screen():
 # Main function : render_frame()
 # ─────────────────────────────────────────────
 
+_VEGAS_SYMBOLS = ["7", "BAR", "$", "★", "♦", "♣", "♠", "A", "K", "Q", "J", "10"]
+_VEGAS_PALETTE = [(255, 40, 40), (255, 180, 0), (255, 240, 0), (0, 230, 90),
+                  (0, 200, 255), (90, 120, 255), (210, 0, 255), (255, 255, 255)]
+
+def _render_vegas_screen(state):
+    """🎰 Undocumented easter egg: three spinning slot-machine reels."""
+    phase = getattr(state, 'vegas_phase', 0)
+    pal = _VEGAS_PALETTE
+    npal = len(pal)
+    nsym = len(_VEGAS_SYMBOLS)
+
+    # Flashing background + border
+    bg = (10, 0, 0) if (phase // 4) % 2 == 0 else (0, 0, 10)
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=bg)
+    draw = ImageDraw.Draw(img)
+    border = pal[phase % npal]
+    draw.rectangle([0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1], outline=border, width=3)
+
+    # Flashing title
+    title = "★  V E G A S  ★"
+    tcol = pal[(phase // 2) % npal]
+    tw = FONT_LG.getlength(title) if hasattr(FONT_LG, 'getlength') else len(title) * 10
+    draw.text(((SCREEN_WIDTH - tw) // 2, 6), title, font=FONT_LG, fill=tcol)
+
+    # Three reels, each "spinning" at a different speed
+    reel_w = 150
+    gap = 40
+    total_w = 3 * reel_w + 2 * gap
+    x0 = (SCREEN_WIDTH - total_w) // 2
+    reel_top = 44
+    reel_bot = SCREEN_HEIGHT - 14
+    speeds = [1, 2, 3]
+    for r in range(3):
+        rx = x0 + r * (reel_w + gap)
+        # Reel window
+        draw.rectangle([rx, reel_top, rx + reel_w, reel_bot], fill=(20, 20, 20), outline=(120, 120, 120), width=2)
+        # Three symbols stacked, scrolling
+        offset = (phase * speeds[r]) // 4
+        for k in range(-1, 2):
+            sym = _VEGAS_SYMBOLS[(offset + k + r) % nsym]
+            cy = (reel_top + reel_bot) // 2 + k * 34
+            scol = (230, 230, 230) if k == 0 else (90, 90, 90)
+            if k == 0:
+                scol = pal[(phase + r) % npal]  # center symbol flashes
+            sw = FONT_LG.getlength(sym) if hasattr(FONT_LG, 'getlength') else len(sym) * 10
+            draw.text((rx + (reel_w - sw) // 2, cy - 10), sym, font=FONT_LG, fill=scol)
+        # Payline across the center
+        cy = (reel_top + reel_bot) // 2
+        draw.line([(rx, cy + 4), (rx + reel_w, cy + 4)], fill=(255, 0, 0), width=1)
+
+    return _to_push2_frame(img)
+
+
 def render_frame(state: AppState, pad_grid=None, cr_state=None):
     """
     Generate a complete frame to send to the Push 2 screen.
     """
+    if getattr(state, 'vegas_mode', False):
+        return _render_vegas_screen(state)
+
     if not state.nuendo_connected:
         return render_splash_screen()
     

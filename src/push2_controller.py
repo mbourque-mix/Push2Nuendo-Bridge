@@ -141,6 +141,9 @@ BTN_USER          = getattr(Push2Constants, 'BUTTON_USER', 'User')
 # Select (modifier: Hold + Master Encoder = CR Phones level)
 BTN_SELECT        = getattr(Push2Constants, 'BUTTON_SELECT', 'Select')
 
+# Master button (Shift+Master = 🎰 Vegas mode easter egg)
+BTN_MASTER        = getattr(Push2Constants, 'BUTTON_MASTER', 'Master')
+
 # Setup button (CC 30, monochrome)
 BTN_SETUP         = getattr(Push2Constants, 'BUTTON_SETUP', 'Setup')
 
@@ -992,6 +995,11 @@ class Push2Controller:
         # ── Select (modifier: Select + Master Encoder = CR Phones level) ──
         if button_name == BTN_SELECT:
             state.select_held = True
+            return
+
+        # ── Master button: Shift+Master = 🎰 Vegas mode (easter egg) ──
+        if button_name == BTN_MASTER and state.shift_held:
+            self._toggle_vegas()
             return
 
         # ── Setup (toggle Setup page) ──
@@ -3752,6 +3760,51 @@ class Push2Controller:
         except Exception:
             pass
 
+    # ─────────────────────────────────────────
+    # 🎰 Vegas mode (undocumented easter egg)
+    # ─────────────────────────────────────────
+    _VEGAS_COLORS = [5, 9, 13, 21, 37, 45, 57, 116, 122, 125]
+
+    def _toggle_vegas(self):
+        """Toggle the Vegas light show. Shift+Master."""
+        self.state.vegas_mode = not self.state.vegas_mode
+        if self.state.vegas_mode:
+            self._vegas_phase = 0
+            print("  🎰 VEGAS MODE — what happens on the Push stays on the Push")
+        else:
+            print("  🎰 Vegas mode off")
+            # Restore normal pads + button LEDs
+            try:
+                self._update_all_leds()
+                self._update_pad_colors()
+            except Exception:
+                pass
+
+    def _vegas_tick(self, frame_count):
+        """Animate every pad + button LED in a cycling rainbow (~10 Hz)."""
+        self.state.vegas_phase = frame_count
+        if frame_count % 3 != 0 or not self.push:
+            return  # throttle MIDI traffic
+        C = self._VEGAS_COLORS
+        n = len(C)
+        ph = frame_count // 3
+        try:
+            # Pads: a diagonal rainbow that scrolls
+            for row in range(8):
+                for col in range(8):
+                    note = 36 + (7 - row) * 8 + col
+                    self._send_midi_to_push([0x90, note, C[(row + col + ph) % n]])
+            # RGB row buttons (lower CC 20-27, upper CC 102-109)
+            for i in range(8):
+                self._send_midi_to_push([0xB0, 20 + i, C[(i + ph) % n]])
+                self._send_midi_to_push([0xB0, 102 + i, C[(i + ph + 4) % n]])
+            # A handful of utility buttons blink on/off for extra sparkle
+            blink = 127 if (ph % 2 == 0) else 0
+            for cc in (50, 51, 52, 53, 59, 85, 86, 87, 88, 89, 90, 118, 30, 28):
+                self._send_midi_to_push([0xB0, cc, blink])
+        except Exception:
+            pass
+
     def _update_accent_led(self):
         """Update Accent button LED."""
         if not self.push:
@@ -4159,8 +4212,9 @@ class Push2Controller:
                     midi_check_ticks = 0
                     if not self.push.midi_is_configured():
                         self.push.configure_midi()
-                    self._update_all_leds()
-                    
+                    if not self.state.vegas_mode:
+                        self._update_all_leds()
+
                     # If display was failing, try to reinitialize USB
                     if not _display_ok:
                         _display_retry += 1
@@ -4174,6 +4228,10 @@ class Push2Controller:
                             except Exception:
                                 pass
                 
+                # 🎰 Vegas mode light show (overrides normal pad/button LEDs)
+                if self.state.vegas_mode:
+                    self._vegas_tick(_frame_count)
+
                 # Blink for Overview mode (~2Hz)
                 if self.state.mode == MODE_OVERVIEW:
                     if not hasattr(self, '_overview_blink_counter'):
@@ -4209,7 +4267,8 @@ class Push2Controller:
                 # renderer (e.g. state.cs_footer_pill_states) is already fresh.
                 if getattr(self.nuendo_link, '_leds_dirty', False):
                     self.nuendo_link._leds_dirty = False
-                    self._update_all_leds()
+                    if not self.state.vegas_mode:
+                        self._update_all_leds()
             except Exception as e:
                 _frame_count += 1
                 if _display_ok:
