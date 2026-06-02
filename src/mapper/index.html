@@ -126,6 +126,12 @@ body {
 }
 .rescan-one:hover { border-color: var(--accent); color: var(--accent); }
 .sidebar-footer { padding: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
+.sidebar-note {
+  padding: 8px 10px; border-top: 1px solid var(--border);
+  font-size: 10px; line-height: 1.5; color: var(--text-dim);
+  background: rgba(255,140,0,0.06);
+}
+.sidebar-note b { color: var(--orange); }
 
 /* Center: params */
 .params-panel {
@@ -329,6 +335,7 @@ body {
       </div>
     </div>
     <div class="plugin-list" id="pluginList"></div>
+    <div class="sidebar-note" id="daHint" style="display:none"></div>
     <div class="sidebar-footer" id="pluginCount"></div>
   </div>
 
@@ -629,6 +636,17 @@ function renderPluginList() {
     `${filtered.length} shown · ${okCount} OK` +
     (errCount ? ` · ${errCount} ignored` : '') +
     ` / ${allPlugins.length}`;
+
+  // Hint for plugins that can't be scanned standalone (protected/host-locked).
+  const hint = document.getElementById('daHint');
+  if (errCount) {
+    hint.style.display = '';
+    hint.innerHTML = '<b>Can\'t scan a plugin?</b> Load it on a track in Nuendo, ' +
+      'then on the Push (Inserts mode) press <b>Shift + Browse</b> to capture its ' +
+      'parameters via DirectAccess — works for protected plugins (Waves, Nuendo stock, iLok…).';
+  } else {
+    hint.style.display = 'none';
+  }
 }
 
 function escapeHtml(str) {
