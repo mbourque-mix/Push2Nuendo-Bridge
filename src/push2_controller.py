@@ -3773,7 +3773,13 @@ class Push2Controller:
             print("  🎰 VEGAS MODE — what happens on the Push stays on the Push")
         else:
             print("  🎰 Vegas mode off")
-            # Restore normal pads + button LEDs
+            # Turn every button off first (Vegas lit buttons the normal LED
+            # update doesn't manage), then restore the normal surface.
+            try:
+                for cc in self.push.buttons.button_map.keys():
+                    self._send_midi_to_push([0xB0, cc, 0])
+            except Exception:
+                pass
             try:
                 self._update_all_leds()
                 self._update_pad_colors()
@@ -3800,14 +3806,15 @@ class Push2Controller:
                     else:
                         color = C[(row + col + ph) % n]
                     self._send_midi_to_push([0x90, note, color])
-            # RGB row buttons (lower CC 20-27, upper CC 102-109): random colors.
-            for i in range(8):
-                self._send_midi_to_push([0xB0, 20 + i, random.choice(C)])
-                self._send_midi_to_push([0xB0, 102 + i, random.choice(C)])
-            # Utility buttons: each independently off (~35%) or a random colour,
-            # so they no longer blink all together.
-            for cc in (50, 51, 52, 53, 59, 85, 86, 87, 88, 89, 90, 118, 30, 28):
-                v = 0 if random.random() < 0.35 else random.choice(C)
+            # EVERY button the Push exposes (from push2_python's button_map),
+            # not just a hardcoded few — each independently off (~20%) or a
+            # random colour, so the whole surface lights up out of sync.
+            try:
+                button_ccs = list(self.push.buttons.button_map.keys())
+            except Exception:
+                button_ccs = list(range(20, 28)) + list(range(102, 110))
+            for cc in button_ccs:
+                v = 0 if random.random() < 0.20 else random.choice(C)
                 self._send_midi_to_push([0xB0, cc, v])
         except Exception:
             pass
