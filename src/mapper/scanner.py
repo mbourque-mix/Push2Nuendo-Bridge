@@ -33,7 +33,13 @@ DEFAULT_VST3_DIRS = {
     "darwin": [
         "/Library/Audio/Plug-Ins/VST3",
         os.path.expanduser("~/Library/Audio/Plug-Ins/VST3"),
-        # Steinberg factory plugins bundled with Cubase/Nuendo
+        # Steinberg factory plugins bundled with Cubase/Nuendo. On macOS these
+        # live under Application Support (Components / VST3 subfolders), not only
+        # the shared VST3 folder. Roots are scanned recursively; missing ones
+        # are skipped. Users can add their own via the Plugin Mapper "Folders"
+        # panel if their install differs.
+        "/Library/Application Support/Steinberg/Components",
+        "/Library/Application Support/Steinberg/VST3",
         "/Library/Application Support/Steinberg",
     ],
     "win32": [

@@ -236,7 +236,40 @@ body {
     <span class="header-sub">Push 2 / Nuendo Bridge</span>
   </div>
   <div>
+    <button class="btn" id="foldersBtn" onclick="openFolders()">Folders…</button>
     <button class="btn btn-accent" id="scanBtn" onclick="startScan()">Rescan Plugins</button>
+  </div>
+</div>
+
+<!-- Scan-folders modal -->
+<div id="foldersModal" style="display:none; position:fixed; inset:0; z-index:1000;
+     background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+  <div style="background:var(--bg-card,#1c1c24); border:1px solid var(--border,#333);
+       border-radius:10px; padding:24px; width:min(620px,92vw); max-height:84vh; overflow:auto;">
+    <h2 style="margin:0 0 6px;">Plugin Scan Folders</h2>
+    <p style="color:var(--text-muted,#888); font-size:13px; margin:0 0 16px;">
+      VST3 folders scanned for plugins. Add the folder where your Nuendo/Cubase
+      plug-ins live if they aren't found. Note: Nuendo's built-in effects that
+      live inside the app are not separate VST3 files and can't be scanned.</p>
+
+    <h3 style="font-size:13px; text-transform:uppercase; color:var(--text-muted,#888); margin:0 0 6px;">Default folders</h3>
+    <div id="defaultDirs" style="font-family:monospace; font-size:12px; color:var(--text-muted,#999);
+         background:rgba(0,0,0,0.25); border-radius:6px; padding:8px 10px; margin-bottom:18px;"></div>
+
+    <h3 style="font-size:13px; text-transform:uppercase; color:var(--text-muted,#888); margin:0 0 6px;">Your folders</h3>
+    <div id="extraDirs" style="margin-bottom:10px;"></div>
+    <div style="display:flex; gap:8px; margin-bottom:18px;">
+      <input type="text" id="newDirInput" placeholder="/path/to/VST3 folder"
+             style="flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--border,#333);
+                    background:var(--bg-deep,#111); color:var(--text,#eee); font-family:monospace; font-size:12px;"
+             onkeydown="if(event.key==='Enter')addFolder()">
+      <button class="btn" onclick="addFolder()">Add</button>
+    </div>
+
+    <div style="display:flex; justify-content:flex-end; gap:8px;">
+      <button class="btn" onclick="closeFolders()">Cancel</button>
+      <button class="btn btn-accent" onclick="saveFolders()">Save &amp; Rescan</button>
+    </div>
   </div>
 </div>
 
@@ -335,6 +368,49 @@ async function startScan() {
       showToast(`Scan complete: ${d.total} plugins`);
     }
   }, 2000);
+}
+
+// ── Scan folders (settings) ──
+let extraDirs = [];
+
+async function openFolders() {
+  const s = await fetchJson(`${API}/settings`);
+  extraDirs = (s.extra_vst3_dirs || []).slice();
+  const def = document.getElementById('defaultDirs');
+  def.innerHTML = (s.default_vst3_dirs || []).map(d =>
+    `<div>${escapeHtml(d)}</div>`).join('') || '<div>(none)</div>';
+  renderExtraDirs();
+  document.getElementById('foldersModal').style.display = 'flex';
+}
+
+function renderExtraDirs() {
+  const box = document.getElementById('extraDirs');
+  if (!extraDirs.length) {
+    box.innerHTML = '<div style="color:var(--text-muted,#888); font-size:12px;">No custom folders yet.</div>';
+    return;
+  }
+  box.innerHTML = extraDirs.map((d, i) =>
+    `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+       <span style="flex:1; font-family:monospace; font-size:12px; word-break:break-all;">${escapeHtml(d)}</span>
+       <button class="btn" onclick="removeFolder(${i})">✕</button>
+     </div>`).join('');
+}
+
+function addFolder() {
+  const inp = document.getElementById('newDirInput');
+  const v = inp.value.trim();
+  if (v && !extraDirs.includes(v)) { extraDirs.push(v); renderExtraDirs(); }
+  inp.value = '';
+}
+
+function removeFolder(i) { extraDirs.splice(i, 1); renderExtraDirs(); }
+function closeFolders() { document.getElementById('foldersModal').style.display = 'none'; }
+
+async function saveFolders() {
+  await postJson(`${API}/settings`, { extra_vst3_dirs: extraDirs, auto_scan_on_start: true });
+  closeFolders();
+  showToast('Folders saved — rescanning…');
+  startScan();
 }
 
 // ── Filter ──
