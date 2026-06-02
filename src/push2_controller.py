@@ -1408,6 +1408,12 @@ class Push2Controller:
             return
         
         if button_name == BTN_MODE_INSERTS:
+            if state.shift_held and state.mode == MODE_INSERTS:
+                # Shift+Browse in Inserts mode = capture the selected insert's
+                # parameters (via DirectAccess) into the Plugin Mapper. Works
+                # even for host-locked plugins pedalboard can't scan.
+                self._capture_insert_to_mapper()
+                return
             if state.mode == MODE_BROWSER:
                 # Browse pressed in browser mode → cancel, return to inserts
                 self._set_mode(MODE_INSERTS)
@@ -4437,6 +4443,80 @@ class Push2Controller:
                 time.sleep(0.01)
                 self.nuendo_link.send_cc(1, 0)
                 time.sleep(0.05)
+
+    def _flash_message(self, text, secs=2.5):
+        """Print a status line and show a brief on-screen overlay."""
+        print(f"  {text}")
+        try:
+            self.state._touchstrip_overlay = text
+            self.state._touchstrip_overlay_until = time.time() + secs
+        except Exception:
+            pass
+
+    def _capture_insert_to_mapper(self):
+        """Capture the selected insert plugin's parameters (via DirectAccess)
+        into the Plugin Mapper cache, so even host-locked plugins (which
+        pedalboard can't scan) become mappable. Shift+Browse in Inserts mode."""
+        state = self.state
+        slot = state.selected_insert_slot
+        name = state.current_insert_names[slot] if 0 <= slot < len(state.current_insert_names) else ''
+        if not name:
+            self._flash_message("Capture: no plugin in this slot")
+            return
+        if not getattr(self.nuendo_link, '_da_available', False):
+            self._flash_message("Capture: DirectAccess unavailable")
+            return
+
+        import threading
+        def _do():
+            self._flash_message(f"Capturing {name}…", secs=5)
+            if not self.nuendo_link.request_da_plugin_params(slot):
+                self._flash_message("Capture: request failed")
+                return
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not getattr(self.nuendo_link, '_da_params_enumerated', False):
+                time.sleep(0.05)
+            da = getattr(self.nuendo_link, '_da_plugin_params', {}) or {}
+            if not da:
+                self._flash_message("Capture: no parameters (timeout)")
+                return
+            params = []
+            for idx in sorted(da.keys()):
+                info = da[idx]
+                pname = info.get("name", f"Param {idx}")
+                params.append({
+                    "index": idx, "name": pname, "label": pname,
+                    "default_value": 0.0, "min_value": 0.0, "max_value": 1.0,
+                    "units": "", "is_boolean": False, "is_discrete": False,
+                })
+            entry = {
+                "name": name, "path": "(DirectAccess)", "type": "VST3",
+                "is_instrument": False, "is_effect": True,
+                "parameter_count": len(params), "parameters": params,
+                "scanned_at": time.time(), "source": "directaccess",
+            }
+            self._write_plugin_to_cache(name, entry)
+            self._flash_message(f"Captured {len(params)} params: {name}")
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _write_plugin_to_cache(self, name, entry):
+        """Merge a captured plugin entry into the Plugin Mapper cache file."""
+        import json
+        from pathlib import Path
+        cache_file = Path.home() / ".push2bridge" / "plugin_cache.json"
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache = {}
+            if cache_file.exists():
+                try:
+                    cache = json.loads(cache_file.read_text())
+                except Exception:
+                    cache = {}
+            cache[name] = entry
+            cache_file.write_text(json.dumps(cache, indent=2))
+            print(f"  ✓ Captured '{name}' → mapper cache ({entry['parameter_count']} params)")
+        except Exception as e:
+            print(f"  ✗ Capture write failed: {e}")
 
     def _browser_fallback_to_inserts(self):
         """Called when Add Device opened the instrument browser but the selected
