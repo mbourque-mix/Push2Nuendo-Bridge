@@ -33,14 +33,15 @@ DEFAULT_VST3_DIRS = {
     "darwin": [
         "/Library/Audio/Plug-Ins/VST3",
         os.path.expanduser("~/Library/Audio/Plug-Ins/VST3"),
-        # Steinberg factory plugins bundled with Cubase/Nuendo. On macOS these
-        # live under Application Support (Components / VST3 subfolders), not only
-        # the shared VST3 folder. Roots are scanned recursively; missing ones
-        # are skipped. Users can add their own via the Plugin Mapper "Folders"
-        # panel if their install differs.
+        # Stock Cubase/Nuendo plug-ins ship INSIDE the app bundle on macOS:
+        #   /Applications/Nuendo 15.app/Contents/VST3
+        # The "*" makes the path version-independent (Nuendo 14/15/…, Cubase …,
+        # even an un-numbered "Nuendo.app"). Glob patterns are expanded below.
+        "/Applications/Nuendo*.app/Contents/VST3",
+        "/Applications/Cubase*.app/Contents/VST3",
+        # Other Steinberg factory locations (presets/components).
         "/Library/Application Support/Steinberg/Components",
         "/Library/Application Support/Steinberg/VST3",
-        "/Library/Application Support/Steinberg",
     ],
     "win32": [
         "C:/Program Files/Common Files/VST3",
@@ -72,10 +73,25 @@ def discover_vst3_plugins(extra_dirs=None):
     
     Returns a list of absolute paths to .vst3 bundles/files.
     """
-    dirs = list(get_default_vst3_dirs())  # copy — never mutate the module list
+    raw_dirs = list(get_default_vst3_dirs())  # copy — never mutate the module list
     if extra_dirs:
-        dirs.extend(extra_dirs)
-    
+        raw_dirs.extend(extra_dirs)
+
+    # Expand glob patterns (e.g. version-independent app-bundle paths like
+    # "/Applications/Nuendo*.app/Contents/VST3"). glob only returns existing
+    # matches, so non-pattern entries pass through unchanged.
+    import glob as _glob
+    dirs = []
+    for d in raw_dirs:
+        if any(ch in d for ch in "*?["):
+            matches = sorted(_glob.glob(d))
+            if matches:
+                dirs.extend(matches)
+            else:
+                logger.info(f"No match for pattern: {d}")
+        else:
+            dirs.append(d)
+
     plugins = []
     for d in dirs:
         d = Path(d)
