@@ -681,6 +681,17 @@ function onParamDragStart(e, paramIndex) {
   e.dataTransfer.setData('paramIndex', paramIndex.toString());
 }
 
+function onSlotDragStart(e, pageIdx, slotIdx) {
+  // Dragging a filled slot to move/swap it with another slot.
+  e.dataTransfer.setData('slotSource', `${pageIdx},${slotIdx}`);
+  e.stopPropagation();
+}
+
+function _ensureLabels(page) {
+  if (!page.labels) page.labels = Array(8).fill('');
+  while (page.labels.length < 8) page.labels.push('');
+}
+
 function onSlotDragOver(e) {
   e.preventDefault();
   e.currentTarget.classList.add('drag-over');
@@ -693,6 +704,23 @@ function onSlotDragLeave(e) {
 function onSlotDrop(e, pageIdx, slotIdx) {
   e.preventDefault();
   e.currentTarget.classList.remove('drag-over');
+
+  // Slot → slot move/swap (reordering)
+  const slotSource = e.dataTransfer.getData('slotSource');
+  if (slotSource) {
+    const [spi, ssi] = slotSource.split(',').map(Number);
+    if (spi === pageIdx && ssi === slotIdx) return;
+    _ensureLabels(pages[spi]); _ensureLabels(pages[pageIdx]);
+    const sp = pages[spi].params[ssi], sl = pages[spi].labels[ssi];
+    const tp = pages[pageIdx].params[slotIdx], tl = pages[pageIdx].labels[slotIdx];
+    pages[pageIdx].params[slotIdx] = sp; pages[pageIdx].labels[slotIdx] = sl;
+    pages[spi].params[ssi] = tp;       pages[spi].labels[ssi] = tl;
+    renderMapping();
+    renderParams();
+    return;
+  }
+
+  // Parameter (from the palette) → slot
   const paramIndex = parseInt(e.dataTransfer.getData('paramIndex'));
   if (isNaN(paramIndex)) return;
   pages[pageIdx].params[slotIdx] = paramIndex;
@@ -756,7 +784,9 @@ function renderMapping() {
                 ${param ? `<button class="slot-remove" onclick="removeSlot(${pi},${si})">×</button>` : ''}
               </div>
               ${param ? `
-                <div class="slot-name">${escapeHtml(param.name || param.label)}</div>
+                <div class="slot-name" draggable="true" style="cursor:grab"
+                     title="Drag to another slot to move/swap"
+                     ondragstart="onSlotDragStart(event, ${pi}, ${si})">⠿ ${escapeHtml(param.name || param.label)}</div>
                 <input class="slot-label-input" placeholder="Short label..." value="${label}"
                        onchange="onLabelChange(${pi},${si},this.value)">
               ` : `
