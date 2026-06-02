@@ -246,7 +246,9 @@ def rescan_one_plugin(name: str, background_tasks: BackgroundTasks):
         scan_status.update({"scanning": True, "progress": 0, "total": 1,
                             "current": name, "cancelled": False})
         try:
-            scanner.rescan_plugin(name, should_skip=lambda: _scan_skip["flag"])
+            # Generous timeout for a single targeted retry (the user waits for
+            # just this one — useful for slow-loading plugins like FabFilter).
+            scanner.rescan_plugin(name, timeout=300, should_skip=lambda: _scan_skip["flag"])
         except Exception as e:
             logger.error(f"Rescan failed: {e}")
         finally:
