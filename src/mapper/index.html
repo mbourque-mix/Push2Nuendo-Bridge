@@ -335,6 +335,13 @@ body {
   <!-- Params -->
   <div class="params-panel">
     <div class="panel-header">AVAILABLE PARAMETERS</div>
+    <div style="padding:8px 8px 0;">
+      <input type="text" id="paramSearch" placeholder="Search parameters…"
+             oninput="renderParams()"
+             style="width:100%; background:var(--bg); border:1px solid var(--border);
+                    border-radius:6px; padding:6px 10px; font-size:12px; color:var(--text);
+                    outline:none; font-family:inherit;">
+    </div>
     <div class="params-list" id="paramsList">
       <div class="empty-state"><div class="empty-icon">⬡</div><div>Select a plugin</div></div>
     </div>
@@ -638,6 +645,8 @@ function escapeAttr(str) {
 // ── Select plugin ──
 async function selectPlugin(name) {
   selectedPlugin = name;
+  const ps = document.getElementById('paramSearch');
+  if (ps) ps.value = '';  // reset the parameter search per plugin
   renderPluginList();
   document.getElementById('mappingPluginName').textContent = name;
   document.getElementById('mappingActions').style.display = 'flex';
@@ -684,8 +693,12 @@ function renderParams() {
   }
   
   const usedSet = new Set(pages.flatMap(p => p.params.filter(v => v != null)));
-  const params = pluginDetail.plugin.parameters || [];
-  
+  const allParams = pluginDetail.plugin.parameters || [];
+  const q = (document.getElementById('paramSearch')?.value || '').toLowerCase();
+  const params = q
+    ? allParams.filter(p => `${p.name || ''} ${p.label || ''}`.toLowerCase().includes(q))
+    : allParams;
+
   list.innerHTML = params.map(p => {
     const displayName = p.name || p.label || '?';
     const hasLabel = p.label && p.label !== p.name;
@@ -700,7 +713,8 @@ function renderParams() {
   `}).join('');
   
   const footer = document.getElementById('paramsFooter');
-  footer.textContent = `${params.length} parameters` + (usedSet.size > 0 ? ` · ${usedSet.size} mapped` : '');
+  const shown = q ? `${params.length}/${allParams.length}` : `${allParams.length}`;
+  footer.textContent = `${shown} parameters` + (usedSet.size > 0 ? ` · ${usedSet.size} mapped` : '');
 }
 
 // ── Drag & Drop ──
