@@ -3781,27 +3781,34 @@ class Push2Controller:
                 pass
 
     def _vegas_tick(self, frame_count):
-        """Animate every pad + button LED in a cycling rainbow (~10 Hz)."""
+        """Animate every pad + button LED — a scrolling rainbow with random
+        sparkle so nothing blinks in lock-step (~10 Hz)."""
         self.state.vegas_phase = frame_count
         if frame_count % 3 != 0 or not self.push:
             return  # throttle MIDI traffic
+        import random
         C = self._VEGAS_COLORS
         n = len(C)
         ph = frame_count // 3
         try:
-            # Pads: a diagonal rainbow that scrolls
+            # Pads: a scrolling diagonal rainbow, with ~18% random flashes.
             for row in range(8):
                 for col in range(8):
                     note = 36 + (7 - row) * 8 + col
-                    self._send_midi_to_push([0x90, note, C[(row + col + ph) % n]])
-            # RGB row buttons (lower CC 20-27, upper CC 102-109)
+                    if random.random() < 0.18:
+                        color = random.choice(C)
+                    else:
+                        color = C[(row + col + ph) % n]
+                    self._send_midi_to_push([0x90, note, color])
+            # RGB row buttons (lower CC 20-27, upper CC 102-109): random colors.
             for i in range(8):
-                self._send_midi_to_push([0xB0, 20 + i, C[(i + ph) % n]])
-                self._send_midi_to_push([0xB0, 102 + i, C[(i + ph + 4) % n]])
-            # A handful of utility buttons blink on/off for extra sparkle
-            blink = 127 if (ph % 2 == 0) else 0
+                self._send_midi_to_push([0xB0, 20 + i, random.choice(C)])
+                self._send_midi_to_push([0xB0, 102 + i, random.choice(C)])
+            # Utility buttons: each independently off (~35%) or a random colour,
+            # so they no longer blink all together.
             for cc in (50, 51, 52, 53, 59, 85, 86, 87, 88, 89, 90, 118, 30, 28):
-                self._send_midi_to_push([0xB0, cc, blink])
+                v = 0 if random.random() < 0.35 else random.choice(C)
+                self._send_midi_to_push([0xB0, cc, v])
         except Exception:
             pass
 
