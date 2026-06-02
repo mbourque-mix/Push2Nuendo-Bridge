@@ -112,6 +112,9 @@ def list_plugins(search: Optional[str] = None, type: Optional[str] = None):
     
     plugins = []
     for name, info in sorted(cache.items(), key=lambda x: x[0].lower()):
+        # Skip internal multi-plugin shell markers (not real plugins)
+        if info.get("is_shell"):
+            continue
         # Filter by search term
         if search and search.lower() not in name.lower():
             continue

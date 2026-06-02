@@ -120,32 +120,34 @@ def discover_vst3_plugins(extra_dirs=None):
     return sorted(unique, key=lambda p: Path(p).stem.lower())
 
 
-def scan_plugin_parameters(plugin_path, timeout=30):
-    """Load a plugin with pedalboard and extract its parameters.
-    
-    Uses a subprocess with timeout to prevent hanging on badly-behaved plugins.
-    Returns a dict with plugin info and parameters, or None if loading fails.
+def scan_plugin_parameters(plugin_path, timeout=60):
+    """Load a plugin file with pedalboard and extract its parameters.
+
+    Handles multi-plugin VST3 "shells" (e.g. Waves WaveShell): each contained
+    plugin is enumerated and loaded by name. Returns a LIST of plugin dicts
+    (one per contained plugin; a normal single-plugin file yields a 1-item list
+    named after the file). Uses a subprocess with timeout to isolate crashes.
     """
     import subprocess
-    
+
     path = Path(plugin_path)
-    plugin_name = path.stem
-    
-    # Use a subprocess to isolate plugin loading (prevents crashes and hangs)
+    stem = path.stem
+
+    # Subprocess script: enumerate sub-plugins, scan each, output a JSON LIST.
     script = f'''
 import json, sys, os, math
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+PATH = {str(path)!r}
+STEM = {stem!r}
 def safe_float(v, default=0.0):
     try:
         f = float(v)
-        if math.isinf(f) or math.isnan(f):
-            return default
-        return f
+        return default if (math.isinf(f) or math.isnan(f)) else f
     except:
         return default
-try:
+def scan_one(nm):
     from pedalboard import load_plugin
-    plugin = load_plugin("{path}")
+    plugin = load_plugin(PATH, plugin_name=nm) if nm else load_plugin(PATH)
     params = []
     for i, (name, param) in enumerate(plugin.parameters.items()):
         p = {{"index": i, "name": name}}
@@ -157,70 +159,64 @@ try:
         p["is_boolean"] = bool(getattr(param, "is_boolean", False))
         p["is_discrete"] = bool(getattr(param, "is_discrete", False))
         params.append(p)
-    result = {{
-        "name": "{plugin_name}",
-        "path": "{path}",
-        "type": "VST3",
-        "is_instrument": bool(getattr(plugin, "is_instrument", False)),
-        "is_effect": bool(getattr(plugin, "is_effect", True)),
-        "parameter_count": len(params),
-        "parameters": params,
-    }}
+    r = {{"name": nm or STEM, "path": PATH, "type": "VST3",
+          "is_instrument": bool(getattr(plugin, "is_instrument", False)),
+          "is_effect": bool(getattr(plugin, "is_effect", True)),
+          "parameter_count": len(params), "parameters": params}}
     del plugin
-    print(json.dumps(result))
-except Exception as e:
-    print(json.dumps({{"error": str(e)}}))
-'''
-    
+    return r
+names = []
+try:
+    from pedalboard import VST3Plugin
+    names = VST3Plugin.get_plugin_names_for_file(PATH)
+except Exception:
+    names = []
+results = []
+if names and len(names) > 1:
+    for nm in names:
+        try:
+            results.append(scan_one(nm))
+        except Exception as e:
+            results.append({{"name": nm, "path": PATH, "type": "VST3",
+                             "error": str(e), "parameter_count": 0, "parameters": []}})
+else:
     try:
-        result = subprocess.run(
+        results.append(scan_one(None))
+    except Exception as e:
+        results.append({{"name": STEM, "path": PATH, "type": "VST3",
+                         "error": str(e), "parameter_count": 0, "parameters": []}})
+print("@@JSON@@" + json.dumps(results))
+'''
+
+    def _err_list(msg):
+        return [{
+            "name": stem, "path": str(path), "type": "VST3", "error": msg,
+            "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
+        }]
+
+    try:
+        proc = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True, text=True, timeout=timeout,
             env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}
         )
-        
-        stdout = result.stdout.strip()
-        if not stdout:
-            return {
-                "name": plugin_name, "path": str(path), "type": "VST3",
-                "error": "No output from scanner subprocess",
-                "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
-            }
-        
-        # Parse the last line of JSON (skip any plugin debug output)
+        stdout = proc.stdout.strip()
+        # Find our tagged JSON line (skip plugin debug spam)
         for line in reversed(stdout.split("\n")):
             line = line.strip()
-            if line.startswith("{"):
-                data = json.loads(line)
-                if "error" in data and "name" not in data:
-                    return {
-                        "name": plugin_name, "path": str(path), "type": "VST3",
-                        "error": data["error"],
-                        "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
-                    }
-                data["scanned_at"] = time.time()
+            if line.startswith("@@JSON@@"):
+                data = json.loads(line[len("@@JSON@@"):])
+                now = time.time()
+                for d in data:
+                    d["scanned_at"] = now
                 return data
-        
-        return {
-            "name": plugin_name, "path": str(path), "type": "VST3",
-            "error": "Could not parse scanner output",
-            "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
-        }
-        
+        return _err_list("Could not parse scanner output")
     except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout scanning {plugin_name} ({timeout}s)")
-        return {
-            "name": plugin_name, "path": str(path), "type": "VST3",
-            "error": f"Timeout ({timeout}s)",
-            "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
-        }
+        logger.warning(f"Timeout scanning {stem} ({timeout}s)")
+        return _err_list(f"Timeout ({timeout}s)")
     except Exception as e:
-        logger.warning(f"Failed to scan {plugin_name}: {e}")
-        return {
-            "name": plugin_name, "path": str(path), "type": "VST3",
-            "error": str(e),
-            "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
-        }
+        logger.warning(f"Failed to scan {stem}: {e}")
+        return _err_list(str(e))
 
 
 def full_scan(extra_dirs=None, force=False, retry_errors=False,
@@ -286,15 +282,24 @@ def full_scan(extra_dirs=None, force=False, retry_errors=False,
                     continue
         
         logger.info(f"Scanning [{idx+1}/{total_to_scan}]: {name}...")
-        result = scan_plugin_parameters(path)
-        if result:
-            cache[name] = result
+        results = scan_plugin_parameters(path)  # list (1 item, or N for shells)
+        for result in results:
+            rname = result.get("name", name)
+            cache[rname] = result
             if result.get("error"):
                 failed += 1
-                logger.warning(f"  ✗ {name}: {result['error']}")
+                logger.warning(f"  ✗ {rname}: {result['error']}")
             else:
                 scanned += 1
-                logger.info(f"  ✓ {name}: {result['parameter_count']} params")
+                logger.info(f"  ✓ {rname}: {result['parameter_count']} params")
+        # For a multi-plugin shell the sub-plugins are keyed by their own names,
+        # so leave a marker under the file stem to allow skipping next time.
+        if len(results) > 1 and name not in cache:
+            cache[name] = {
+                "name": name, "is_shell": True, "path": str(path),
+                "members": [r.get("name") for r in results],
+                "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
+            }
     
     # Save cache
     try:
