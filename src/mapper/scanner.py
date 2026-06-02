@@ -374,6 +374,40 @@ def delete_mapping(plugin_name):
     return False
 
 
+def export_all_mappings():
+    """Return all saved mappings as a single bundle dict:
+    { "version": 1, "mappings": { plugin_name: mapping_data, ... } }."""
+    out = {}
+    if MAPPINGS_DIR.exists():
+        for f in MAPPINGS_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                out[data.get("plugin", f.stem)] = data
+            except (json.JSONDecodeError, IOError):
+                pass
+    return {"version": 1, "mappings": out}
+
+
+def import_mappings(bundle, overwrite=True):
+    """Import mappings from a bundle (as produced by export_all_mappings, or a
+    bare {plugin: mapping} dict). Returns (imported, skipped) counts."""
+    mappings = bundle.get("mappings", bundle) if isinstance(bundle, dict) else {}
+    imported = skipped = 0
+    for name, data in mappings.items():
+        if not isinstance(data, dict):
+            skipped += 1
+            continue
+        if not overwrite and get_mapping(name) is not None:
+            skipped += 1
+            continue
+        try:
+            save_mapping(name, dict(data))
+            imported += 1
+        except Exception:
+            skipped += 1
+    return imported, skipped
+
+
 def list_mappings():
     """List all saved mappings."""
     if not MAPPINGS_DIR.exists():

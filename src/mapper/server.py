@@ -225,6 +225,24 @@ def list_all_mappings():
     return {"mappings": scanner.list_mappings()}
 
 
+@app.get("/api/mappings/export")
+def export_mappings():
+    """Download all mappings as a single JSON backup file."""
+    from fastapi.responses import JSONResponse
+    bundle = scanner.export_all_mappings()
+    return JSONResponse(
+        content=bundle,
+        headers={"Content-Disposition": 'attachment; filename="push2_mappings.json"'},
+    )
+
+
+@app.post("/api/mappings/import")
+def import_mappings(bundle: dict):
+    """Restore mappings from an exported bundle (or a bare {plugin: mapping})."""
+    imported, skipped = scanner.import_mappings(bundle, overwrite=True)
+    return {"imported": imported, "skipped": skipped}
+
+
 @app.get("/api/mappings/{name}")
 def get_mapping(name: str):
     """Get the mapping for a specific plugin."""

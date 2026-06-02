@@ -245,6 +245,9 @@ body {
       </div>
     </div>
     <button class="btn" id="cancelScanBtn" style="display:none;" onclick="cancelScan()">Cancel</button>
+    <button class="btn" id="exportBtn" onclick="exportMappings()">Export</button>
+    <button class="btn" id="importBtn" onclick="document.getElementById('importFile').click()">Import</button>
+    <input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importMappings(event)">
     <button class="btn" id="foldersBtn" onclick="openFolders()">Folders…</button>
     <button class="btn btn-accent" id="scanBtn" onclick="startScan()">Rescan Plugins</button>
   </div>
@@ -408,6 +411,33 @@ async function cancelScan() {
     const b = document.getElementById('cancelScanBtn');
     b.disabled = false; b.textContent = 'Cancel';
   }, 1500);
+}
+
+// ── Export / Import mappings ──
+function exportMappings() {
+  const a = document.createElement('a');
+  a.href = `${API}/mappings/export`;
+  a.download = 'push2_mappings.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function importMappings(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = '';  // allow re-importing the same file later
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const bundle = JSON.parse(text);
+    const r = await postJson(`${API}/mappings/import`, bundle);
+    const d = await fetchJson(`${API}/plugins`);
+    allPlugins = d.plugins;
+    renderPluginList();
+    showToast(`Imported ${r.imported} mapping(s)` + (r.skipped ? `, ${r.skipped} skipped` : ''));
+  } catch (e) {
+    showToast('Import failed: invalid file', 'error');
+  }
 }
 
 // ── Scan folders (settings) ──
