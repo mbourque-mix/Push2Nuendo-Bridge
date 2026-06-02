@@ -57,6 +57,13 @@ DEFAULT_VST3_DIRS = {
     ],
 }
 
+# Filenames to skip during discovery: multi-plugin "shells" that pedalboard
+# cannot enumerate standalone (they require the host/activation and crash the
+# scanner). Their individual plugins are mappable via the bridge's DirectAccess
+# capture (Shift+Browse in Inserts mode) instead. Matched case-insensitively as
+# a substring of the file name.
+SKIP_FILENAME_PATTERNS = ("WaveShell",)
+
 # Cache directory
 CACHE_DIR = Path.home() / ".push2bridge"
 CACHE_FILE = CACHE_DIR / "plugin_cache.json"
@@ -100,6 +107,11 @@ def discover_vst3_plugins(extra_dirs=None):
             continue
         # VST3 plugins are .vst3 bundles (directories on macOS, files on Windows)
         for item in d.rglob("*.vst3"):
+            low = item.name.lower()
+            if any(pat.lower() in low for pat in SKIP_FILENAME_PATTERNS):
+                logger.info(f"Skipping un-scannable shell: {item.name} "
+                            f"(use DirectAccess capture to map its plugins)")
+                continue
             plugins.append(str(item))
             logger.debug(f"Found: {item.name}")
     
