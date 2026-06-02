@@ -2963,51 +2963,97 @@ _VEGAS_SYMBOLS = ["7", "BAR", "$", "★", "♦", "♣", "♠", "A", "K", "Q", "J
 _VEGAS_PALETTE = [(255, 40, 40), (255, 180, 0), (255, 240, 0), (0, 230, 90),
                   (0, 200, 255), (90, 120, 255), (210, 0, 255), (255, 255, 255)]
 
+def _vegas_text_w(font, s):
+    return font.getlength(s) if hasattr(font, 'getlength') else len(s) * 10
+
 def _render_vegas_screen(state):
-    """🎰 Undocumented easter egg: three spinning slot-machine reels."""
+    """🎰 Undocumented easter egg: a slot machine with a marquee-light border,
+    three smooth-scrolling reels and a periodic JACKPOT that lands 7-7-7."""
     phase = getattr(state, 'vegas_phase', 0)
     pal = _VEGAS_PALETTE
     npal = len(pal)
     nsym = len(_VEGAS_SYMBOLS)
+    W, Hs = SCREEN_WIDTH, SCREEN_HEIGHT
 
-    # Flashing background + border
-    bg = (10, 0, 0) if (phase // 4) % 2 == 0 else (0, 0, 10)
-    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=bg)
+    # ~5 s loop: spin, then ~1.3 s JACKPOT where the reels lock to 7-7-7.
+    cycle = phase % 150
+    jackpot = cycle >= 112
+    jflash = (phase // 2) % 2 == 0  # fast flash during jackpot
+
+    bg = (12, 0, 0) if (phase // 3) % 2 == 0 else (0, 0, 12)
+    img = Image.new('RGB', (W, Hs), color=bg)
     draw = ImageDraw.Draw(img)
-    border = pal[phase % npal]
-    draw.rectangle([0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1], outline=border, width=3)
 
-    # Flashing title
-    title = "★  V E G A S  ★"
-    tcol = pal[(phase // 2) % npal]
-    tw = FONT_LG.getlength(title) if hasattr(FONT_LG, 'getlength') else len(title) * 10
-    draw.text(((SCREEN_WIDTH - tw) // 2, 6), title, font=FONT_LG, fill=tcol)
+    # ── Marquee light bulbs around the border (chasing) ──
+    def bulb(x, y, idx):
+        c = pal[(idx + phase // 2) % npal]
+        draw.ellipse([x - 3, y - 3, x + 3, y + 3], fill=c)
+    bi = 0
+    x = 8
+    while x < W - 6:
+        bulb(x, 5, bi)
+        bulb(x, Hs - 6, bi + 4)
+        x += 22; bi += 1
+    y = 22
+    while y < Hs - 18:
+        bulb(6, y, bi)
+        bulb(W - 7, y, bi + 4)
+        y += 22; bi += 1
 
-    # Three reels, each "spinning" at a different speed
-    reel_w = 150
-    gap = 40
+    # ── Reels ──
+    reel_w, gap = 118, 28
     total_w = 3 * reel_w + 2 * gap
-    x0 = (SCREEN_WIDTH - total_w) // 2
-    reel_top = 44
-    reel_bot = SCREEN_HEIGHT - 14
-    speeds = [1, 2, 3]
+    x0 = (W - total_w) // 2
+    reel_top = 30
+    reel_h = Hs - reel_top - 8
+    cy = reel_h // 2
+    Hsym = 44
+    seven = _VEGAS_SYMBOLS.index("7") if "7" in _VEGAS_SYMBOLS else 0
+    speeds = [0.23, 0.31, 0.41]  # symbols per frame — each reel different
     for r in range(3):
         rx = x0 + r * (reel_w + gap)
-        # Reel window
-        draw.rectangle([rx, reel_top, rx + reel_w, reel_bot], fill=(20, 20, 20), outline=(120, 120, 120), width=2)
-        # Three symbols stacked, scrolling
-        offset = (phase * speeds[r]) // 4
-        for k in range(-1, 2):
-            sym = _VEGAS_SYMBOLS[(offset + k + r) % nsym]
-            cy = (reel_top + reel_bot) // 2 + k * 34
-            scol = (230, 230, 230) if k == 0 else (90, 90, 90)
-            if k == 0:
-                scol = pal[(phase + r) % npal]  # center symbol flashes
-            sw = FONT_LG.getlength(sym) if hasattr(FONT_LG, 'getlength') else len(sym) * 10
-            draw.text((rx + (reel_w - sw) // 2, cy - 10), sym, font=FONT_LG, fill=scol)
-        # Payline across the center
-        cy = (reel_top + reel_bot) // 2
-        draw.line([(rx, cy + 4), (rx + reel_w, cy + 4)], fill=(255, 0, 0), width=1)
+        pos = float(seven) if jackpot else (phase * speeds[r])
+        base = int(pos)
+        frac = pos - base
+        center_d = 0 if frac < 0.5 else 1
+
+        reel_img = Image.new('RGB', (reel_w, reel_h), (16, 16, 22))
+        rdraw = ImageDraw.Draw(reel_img)
+        # subtle vertical gradient edges (top/bottom shadow) for depth
+        rdraw.rectangle([0, 0, reel_w, 10], fill=(8, 8, 12))
+        rdraw.rectangle([0, reel_h - 10, reel_w, reel_h], fill=(8, 8, 12))
+        for d in (-1, 0, 1, 2):
+            sym = _VEGAS_SYMBOLS[(base + d) % nsym]
+            sy = cy + (d - frac) * Hsym
+            is_center = (d == center_d)
+            if is_center:
+                scol = pal[phase % npal] if (jackpot and jflash) else pal[(phase + r) % npal]
+            else:
+                scol = (105, 105, 120)
+            sw = _vegas_text_w(FONT_LG, sym)
+            rdraw.text((int((reel_w - sw) // 2), int(sy - 11)), sym, font=FONT_LG, fill=scol)
+        img.paste(reel_img, (rx, reel_top))
+        frame_col = pal[phase % npal] if jackpot else (190, 190, 200)
+        draw.rectangle([rx - 1, reel_top - 1, rx + reel_w, reel_top + reel_h],
+                       outline=frame_col, width=2)
+
+    # ── Payline across the centers ──
+    pl_y = reel_top + cy
+    pl_col = (255, 0, 0) if (phase // 2) % 2 == 0 else (255, 180, 0)
+    draw.line([(x0 - 6, pl_y), (x0 + total_w + 6, pl_y)], fill=pl_col, width=2)
+
+    # ── Title / JACKPOT banner ──
+    if jackpot:
+        title = "JACKPOT!" if jflash else "$ $ $ $ $"
+        tcol = pal[phase % npal]
+    else:
+        title = "★  V E G A S  ★"
+        tcol = pal[(phase // 2) % npal]
+    tw = _vegas_text_w(FONT_LG, title)
+    tx = (W - tw) // 2
+    # dark plate behind the title for legibility over the reels
+    draw.rectangle([tx - 8, 2, tx + tw + 8, 26], fill=(0, 0, 0))
+    draw.text((tx, 4), title, font=FONT_LG, fill=tcol)
 
     return _to_push2_frame(img)
 
