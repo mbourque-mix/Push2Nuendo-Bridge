@@ -348,6 +348,36 @@ def full_scan(extra_dirs=None, force=False, retry_errors=False,
     return cache
 
 
+def rescan_plugin(name, timeout=120, should_skip=None):
+    """Re-scan a single plugin (by cache name) and update the cache.
+
+    Useful to retry one plugin that previously errored/timed out, without
+    re-running the whole scan. Returns the updated cache entry, or None.
+    """
+    cache = get_cached_plugins()
+    entry = cache.get(name)
+    if not entry:
+        return None
+    path = entry.get("path")
+    if not path or path == "(DirectAccess)" or not os.path.exists(path):
+        return entry  # captured-from-Nuendo or missing file — nothing to rescan
+    results = scan_plugin_parameters(path, timeout=timeout, should_skip=should_skip)
+    for r in results:
+        cache[r.get("name", name)] = r
+    if len(results) > 1 and name not in [r.get("name") for r in results]:
+        # the requested name was a shell stem marker — refresh it too
+        cache[name] = {
+            "name": name, "is_shell": True, "path": str(path),
+            "members": [r.get("name") for r in results],
+            "parameter_count": 0, "parameters": [], "scanned_at": time.time(),
+        }
+    try:
+        CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    except IOError as e:
+        logger.error(f"Failed to save cache: {e}")
+    return cache.get(name)
+
+
 def get_cached_plugins():
     """Return the cached plugin database without scanning."""
     if CACHE_FILE.exists():

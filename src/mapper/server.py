@@ -232,6 +232,32 @@ def skip_current_plugin():
     return {"status": "skipping"}
 
 
+@app.post("/api/scan/plugin/{name}")
+def rescan_one_plugin(name: str, background_tasks: BackgroundTasks):
+    """Re-scan a single plugin (e.g. retry one that errored/timed out)."""
+    if scan_status["scanning"]:
+        raise HTTPException(status_code=409, detail="Scan already in progress")
+    cache = scanner.get_cached_plugins()
+    if name not in cache:
+        raise HTTPException(status_code=404, detail=f"Plugin '{name}' not found")
+
+    def do_rescan():
+        _scan_skip["flag"] = False
+        scan_status.update({"scanning": True, "progress": 0, "total": 1,
+                            "current": name, "cancelled": False})
+        try:
+            scanner.rescan_plugin(name, should_skip=lambda: _scan_skip["flag"])
+        except Exception as e:
+            logger.error(f"Rescan failed: {e}")
+        finally:
+            scan_status["progress"] = 1
+            scan_status["scanning"] = False
+            scan_status["current"] = ""
+
+    background_tasks.add_task(do_rescan)
+    return {"status": "scan_started"}
+
+
 @app.get("/api/scan/status")
 def get_scan_status():
     """Get the current scan status."""

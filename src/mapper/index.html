@@ -119,6 +119,12 @@ body {
 .plugin-item.errored { opacity: 0.6; cursor: default; border-left-color: var(--red); }
 .plugin-item.errored:hover { background: none; }
 .plugin-item .err { color: var(--red); }
+.rescan-one {
+  float: right; background: transparent; border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text-dim); font-size: 9px; padding: 1px 6px;
+  cursor: pointer; font-family: inherit;
+}
+.rescan-one:hover { border-color: var(--accent); color: var(--accent); }
 .sidebar-footer { padding: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
 
 /* Center: params */
@@ -415,10 +421,7 @@ function _updateScanProgress(s) {
   }
 }
 
-async function startScan() {
-  document.getElementById('scanBtn').textContent = 'Scanning…';
-  _setScanUI(true);
-  await postJson(`${API}/scan`, { force: false });
+function _watchScan() {
   const poll = setInterval(async () => {
     const s = await fetchJson(`${API}/scan/status`);
     _updateScanProgress(s);
@@ -434,6 +437,21 @@ async function startScan() {
                             : `Scan complete: ${d.total} plugins`);
     }
   }, 700);
+}
+
+async function startScan() {
+  document.getElementById('scanBtn').textContent = 'Scanning…';
+  _setScanUI(true);
+  await postJson(`${API}/scan`, { force: false });
+  _watchScan();
+}
+
+async function rescanOne(name, ev) {
+  if (ev) ev.stopPropagation();
+  document.getElementById('scanBtn').textContent = 'Scanning…';
+  _setScanUI(true);
+  await postJson(`${API}/scan/plugin/${encodeURIComponent(name)}`, {});
+  _watchScan();
 }
 
 async function cancelScan() {
@@ -574,12 +592,16 @@ function renderPluginList() {
     if (p.error) {
       div.className = 'plugin-item errored';
       div.innerHTML = `
-        <div class="name">${escapeHtml(p.name)}</div>
+        <div class="name">
+          ${escapeHtml(p.name)}
+          <button class="rescan-one" title="Rescan just this plugin"
+                  onclick="rescanOne('${escapeAttr(p.name)}', event)">↻ rescan</button>
+        </div>
         <div class="meta">
           <span class="err">⚠ ignored — ${escapeHtml(p.error)}</span>
         </div>
       `;
-      // No click handler: an errored plugin has no parameters to map.
+      // No click-to-map handler: an errored plugin has no parameters to map.
     } else {
       div.className = 'plugin-item' + (selectedPlugin === p.name ? ' selected' : '');
       div.innerHTML = `
@@ -606,6 +628,11 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+// Escape for use inside a single-quoted JS string within a double-quoted HTML attribute.
+function escapeAttr(str) {
+  return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 // ── Select plugin ──
