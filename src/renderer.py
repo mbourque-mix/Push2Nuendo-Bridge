@@ -2959,9 +2959,97 @@ def render_disconnect_screen():
 # Main function : render_frame()
 # ─────────────────────────────────────────────
 
-_VEGAS_SYMBOLS = ["7", "BAR", "$", "★", "♦", "♣", "♠", "A", "K", "Q", "J", "10"]
+_VEGAS_SYMS = ["7", "cherry", "grapes", "bar", "bell", "dollar", "star"]
 _VEGAS_PALETTE = [(255, 40, 40), (255, 180, 0), (255, 240, 0), (0, 230, 90),
                   (0, 200, 255), (90, 120, 255), (210, 0, 255), (255, 255, 255)]
+
+
+def _dim(c, f):
+    return (int(c[0] * f), int(c[1] * f), int(c[2] * f))
+
+
+def _draw_sym_seven(d, cx, cy, f):
+    red = _dim((230, 40, 30), f)
+    hi = _dim((255, 150, 100), f)
+    d.polygon([(cx - 14, cy - 16), (cx + 15, cy - 16), (cx + 15, cy - 9), (cx - 14, cy - 9)], fill=red)
+    d.polygon([(cx + 15, cy - 16), (cx + 5, cy - 16), (cx - 7, cy + 17), (cx + 3, cy + 17)], fill=red)
+    d.line([(cx - 12, cy - 13), (cx + 12, cy - 13)], fill=hi, width=2)
+    d.line([(cx + 8, cy - 12), (cx - 3, cy + 15)], fill=hi, width=2)
+
+
+def _draw_sym_cherry(d, cx, cy, f):
+    red = _dim((220, 30, 45), f)
+    grn = _dim((60, 180, 60), f)
+    stem = _dim((150, 95, 45), f)
+    shine = _dim((255, 190, 190), f)
+    d.line([(cx, cy - 13), (cx - 8, cy + 6)], fill=stem, width=2)
+    d.line([(cx, cy - 13), (cx + 9, cy + 4)], fill=stem, width=2)
+    d.ellipse([cx - 15, cy + 4, cx - 3, cy + 16], fill=red)
+    d.ellipse([cx + 3, cy + 2, cx + 15, cy + 14], fill=red)
+    d.ellipse([cx - 2, cy - 18, cx + 12, cy - 10], fill=grn)  # leaf
+    d.ellipse([cx - 12, cy + 6, cx - 9, cy + 9], fill=shine)
+    d.ellipse([cx + 5, cy + 4, cx + 8, cy + 7], fill=shine)
+
+
+def _draw_sym_grapes(d, cx, cy, f):
+    pu = _dim((155, 65, 205), f)
+    grn = _dim((60, 175, 60), f)
+    pts = [(cx, cy - 3), (cx - 7, cy + 2), (cx + 7, cy + 2), (cx - 11, cy + 8),
+           (cx, cy + 8), (cx + 11, cy + 8), (cx - 6, cy + 14), (cx + 6, cy + 14), (cx, cy + 18)]
+    for (px, py) in pts:
+        d.ellipse([px - 5, py - 5, px + 5, py + 5], fill=pu)
+    d.ellipse([cx - 3, cy - 15, cx + 11, cy - 7], fill=grn)  # leaf
+
+
+def _draw_sym_bar(d, cx, cy, f):
+    gold = _dim((245, 215, 95), f)
+    dk = _dim((90, 50, 15), f)
+    d.rectangle([cx - 17, cy - 8, cx + 17, cy + 8], fill=gold, outline=dk, width=2)
+    tw = _vegas_text_w(FONT_SM, "BAR")
+    d.text((cx - tw // 2, cy - 7), "BAR", font=FONT_SM, fill=dk)
+
+
+def _draw_sym_bell(d, cx, cy, f):
+    gold = _dim((255, 200, 50), f)
+    dk = _dim((175, 120, 20), f)
+    d.polygon([(cx - 13, cy + 9), (cx - 9, cy - 6), (cx, cy - 13),
+               (cx + 9, cy - 6), (cx + 13, cy + 9)], fill=gold)
+    d.rectangle([cx - 15, cy + 9, cx + 15, cy + 13], fill=gold, outline=dk)
+    d.ellipse([cx - 3, cy - 17, cx + 3, cy - 11], fill=dk)   # knob
+    d.ellipse([cx - 3, cy + 12, cx + 3, cy + 18], fill=dk)   # clapper
+    d.line([(cx - 7, cy - 4), (cx - 9, cy + 7)], fill=_dim((255, 240, 180), f), width=2)
+
+
+def _draw_sym_dollar(d, cx, cy, f):
+    gold = _dim((255, 210, 60), f)
+    dk = _dim((160, 110, 10), f)
+    d.ellipse([cx - 16, cy - 16, cx + 16, cy + 16], fill=gold, outline=dk, width=2)
+    tw = _vegas_text_w(FONT_LG, "$")
+    d.text((cx - tw // 2, cy - 12), "$", font=FONT_LG, fill=dk)
+
+
+def _draw_sym_star(d, cx, cy, f):
+    import math
+    col = _dim((255, 230, 60), f)
+    pts = []
+    for i in range(10):
+        ang = -math.pi / 2 + i * math.pi / 5
+        rr = 15 if i % 2 == 0 else 6
+        pts.append((cx + rr * math.cos(ang), cy + rr * math.sin(ang)))
+    d.polygon(pts, fill=col)
+
+
+_VEGAS_DRAW = {
+    "7": _draw_sym_seven, "cherry": _draw_sym_cherry, "grapes": _draw_sym_grapes,
+    "bar": _draw_sym_bar, "bell": _draw_sym_bell, "dollar": _draw_sym_dollar,
+    "star": _draw_sym_star,
+}
+
+
+def _draw_vegas_symbol(d, sid, cx, cy, f):
+    fn = _VEGAS_DRAW.get(sid)
+    if fn:
+        fn(d, cx, cy, f)
 
 def _vegas_text_w(font, s):
     return font.getlength(s) if hasattr(font, 'getlength') else len(s) * 10
@@ -2972,7 +3060,7 @@ def _render_vegas_screen(state):
     phase = getattr(state, 'vegas_phase', 0)
     pal = _VEGAS_PALETTE
     npal = len(pal)
-    nsym = len(_VEGAS_SYMBOLS)
+    nsym = len(_VEGAS_SYMS)
     W, Hs = SCREEN_WIDTH, SCREEN_HEIGHT
 
     # ~5 s loop: spin, then ~1.3 s JACKPOT where the reels lock to 7-7-7.
@@ -3008,8 +3096,9 @@ def _render_vegas_screen(state):
     reel_h = Hs - reel_top - 8
     cy = reel_h // 2
     Hsym = 44
-    seven = _VEGAS_SYMBOLS.index("7") if "7" in _VEGAS_SYMBOLS else 0
+    seven = _VEGAS_SYMS.index("7") if "7" in _VEGAS_SYMS else 0
     speeds = [0.23, 0.31, 0.41]  # symbols per frame — each reel different
+    scx = reel_w // 2
     for r in range(3):
         rx = x0 + r * (reel_w + gap)
         pos = float(seven) if jackpot else (phase * speeds[r])
@@ -3017,21 +3106,17 @@ def _render_vegas_screen(state):
         frac = pos - base
         center_d = 0 if frac < 0.5 else 1
 
-        reel_img = Image.new('RGB', (reel_w, reel_h), (16, 16, 22))
+        reel_img = Image.new('RGB', (reel_w, reel_h), (235, 225, 200))  # cream reel face
         rdraw = ImageDraw.Draw(reel_img)
-        # subtle vertical gradient edges (top/bottom shadow) for depth
-        rdraw.rectangle([0, 0, reel_w, 10], fill=(8, 8, 12))
-        rdraw.rectangle([0, reel_h - 10, reel_w, reel_h], fill=(8, 8, 12))
+        # top/bottom shading for a cylindrical look
+        rdraw.rectangle([0, 0, reel_w, 14], fill=(150, 140, 120))
+        rdraw.rectangle([0, reel_h - 14, reel_w, reel_h], fill=(150, 140, 120))
         for d in (-1, 0, 1, 2):
-            sym = _VEGAS_SYMBOLS[(base + d) % nsym]
+            sid = _VEGAS_SYMS[(base + d) % nsym]
             sy = cy + (d - frac) * Hsym
             is_center = (d == center_d)
-            if is_center:
-                scol = pal[phase % npal] if (jackpot and jflash) else pal[(phase + r) % npal]
-            else:
-                scol = (105, 105, 120)
-            sw = _vegas_text_w(FONT_LG, sym)
-            rdraw.text((int((reel_w - sw) // 2), int(sy - 11)), sym, font=FONT_LG, fill=scol)
+            f = 1.0 if is_center else 0.5
+            _draw_vegas_symbol(rdraw, sid, scx, int(sy), f)
         img.paste(reel_img, (rx, reel_top))
         frame_col = pal[phase % npal] if jackpot else (190, 190, 200)
         draw.rectangle([rx - 1, reel_top - 1, rx + reel_w, reel_top + reel_h],
