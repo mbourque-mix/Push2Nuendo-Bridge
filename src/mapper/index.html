@@ -244,6 +244,7 @@ body {
              background:var(--accent,#4ea1ff); transition:width 0.2s;"></div>
       </div>
     </div>
+    <button class="btn" id="skipScanBtn" style="display:none;" onclick="skipPlugin()">Skip plugin</button>
     <button class="btn" id="cancelScanBtn" style="display:none;" onclick="cancelScan()">Cancel</button>
     <button class="btn" id="exportBtn" onclick="exportMappings()">Export</button>
     <button class="btn" id="importBtn" onclick="document.getElementById('importFile').click()">Import</button>
@@ -367,7 +368,12 @@ function _setScanUI(scanning) {
   document.getElementById('scanBtn').disabled = scanning;
   document.getElementById('foldersBtn').disabled = scanning;
   document.getElementById('cancelScanBtn').style.display = scanning ? '' : 'none';
+  document.getElementById('skipScanBtn').style.display = scanning ? '' : 'none';
   document.getElementById('scanProgress').style.display = scanning ? '' : 'none';
+}
+
+async function skipPlugin() {
+  await postJson(`${API}/scan/skip`, {});
 }
 
 function _updateScanProgress(s) {

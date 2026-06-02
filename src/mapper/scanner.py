@@ -132,13 +132,18 @@ def discover_vst3_plugins(extra_dirs=None):
     return sorted(unique, key=lambda p: Path(p).stem.lower())
 
 
-def scan_plugin_parameters(plugin_path, timeout=60):
+def scan_plugin_parameters(plugin_path, timeout=120, should_skip=None):
     """Load a plugin file with pedalboard and extract its parameters.
 
     Handles multi-plugin VST3 "shells" (e.g. Waves WaveShell): each contained
     plugin is enumerated and loaded by name. Returns a LIST of plugin dicts
     (one per contained plugin; a normal single-plugin file yields a 1-item list
-    named after the file). Uses a subprocess with timeout to isolate crashes.
+    named after the file). Runs in a subprocess so a crash/hang is isolated.
+
+    timeout: max seconds before the subprocess is killed (default 120 — some
+             plugins, e.g. FabFilter, have hundreds of params and load slowly).
+    should_skip: optional callable polled while scanning; if it returns True the
+                 current plugin's subprocess is killed and skipped.
     """
     import subprocess
 
@@ -207,13 +212,25 @@ print("@@JSON@@" + json.dumps(results))
         }]
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-c", script],
-            capture_output=True, text=True, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}
         )
-        stdout = proc.stdout.strip()
-        # Find our tagged JSON line (skip plugin debug spam)
+        start = time.time()
+        while proc.poll() is None:
+            if should_skip and should_skip():
+                proc.kill()
+                proc.wait()
+                logger.info(f"Skipped {stem} (user)")
+                return _err_list("Skipped by user")
+            if time.time() - start > timeout:
+                proc.kill()
+                proc.wait()
+                logger.warning(f"Timeout scanning {stem} ({timeout}s)")
+                return _err_list(f"Timeout ({timeout}s)")
+            time.sleep(0.1)
+        stdout = (proc.stdout.read() if proc.stdout else "") or ""
         for line in reversed(stdout.split("\n")):
             line = line.strip()
             if line.startswith("@@JSON@@"):
@@ -223,16 +240,13 @@ print("@@JSON@@" + json.dumps(results))
                     d["scanned_at"] = now
                 return data
         return _err_list("Could not parse scanner output")
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout scanning {stem} ({timeout}s)")
-        return _err_list(f"Timeout ({timeout}s)")
     except Exception as e:
         logger.warning(f"Failed to scan {stem}: {e}")
         return _err_list(str(e))
 
 
 def full_scan(extra_dirs=None, force=False, retry_errors=False,
-              progress_cb=None, should_cancel=None):
+              progress_cb=None, should_cancel=None, should_skip=None):
     """Scan all plugins and cache the results.
 
     If force=False, only scans plugins not already in cache.
@@ -294,7 +308,7 @@ def full_scan(extra_dirs=None, force=False, retry_errors=False,
                     continue
         
         logger.info(f"Scanning [{idx+1}/{total_to_scan}]: {name}...")
-        results = scan_plugin_parameters(path)  # list (1 item, or N for shells)
+        results = scan_plugin_parameters(path, should_skip=should_skip)  # list
         for result in results:
             rname = result.get("name", name)
             cache[rname] = result

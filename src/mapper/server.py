@@ -54,6 +54,7 @@ def save_settings(settings):
 
 scan_status = {"scanning": False, "progress": 0, "total": 0, "current": "", "cancelled": False}
 _scan_cancel = {"flag": False}
+_scan_skip = {"flag": False}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -178,6 +179,7 @@ def trigger_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     
     def do_scan():
         _scan_cancel["flag"] = False
+        _scan_skip["flag"] = False
         scan_status.update({"scanning": True, "progress": 0, "total": 0,
                             "current": "Discovering plugins...", "cancelled": False})
 
@@ -186,11 +188,18 @@ def trigger_scan(request: ScanRequest, background_tasks: BackgroundTasks):
             scan_status["total"] = total
             scan_status["current"] = name
 
+        def should_skip():
+            if _scan_skip["flag"]:
+                _scan_skip["flag"] = False  # consume — skip only the current one
+                return True
+            return False
+
         try:
             scanner.full_scan(
                 extra_dirs=extra_dirs, force=request.force,
                 retry_errors=request.retry_errors,
-                progress_cb=prog, should_cancel=lambda: _scan_cancel["flag"])
+                progress_cb=prog, should_cancel=lambda: _scan_cancel["flag"],
+                should_skip=should_skip)
         except Exception as e:
             logger.error(f"Scan failed: {e}")
         finally:
@@ -209,6 +218,15 @@ def cancel_scan():
         return {"status": "idle"}
     _scan_cancel["flag"] = True
     return {"status": "cancelling"}
+
+
+@app.post("/api/scan/skip")
+def skip_current_plugin():
+    """Skip the plugin currently being scanned and continue with the next."""
+    if not scan_status["scanning"]:
+        return {"status": "idle"}
+    _scan_skip["flag"] = True
+    return {"status": "skipping"}
 
 
 @app.get("/api/scan/status")
