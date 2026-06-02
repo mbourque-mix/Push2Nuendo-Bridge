@@ -1408,11 +1408,15 @@ class Push2Controller:
             return
         
         if button_name == BTN_MODE_INSERTS:
-            if state.shift_held and state.mode == MODE_INSERTS:
-                # Shift+Browse in Inserts mode = capture the selected insert's
-                # parameters (via DirectAccess) into the Plugin Mapper. Works
-                # even for host-locked plugins pedalboard can't scan.
-                self._capture_insert_to_mapper()
+            if state.shift_held:
+                # Shift+Browse = capture parameters (via DirectAccess) into the
+                # Plugin Mapper — even for host-locked plugins pedalboard can't
+                # scan. In Inserts mode → the selected insert; otherwise → the
+                # selected track's instrument (VSTi).
+                if state.mode == MODE_INSERTS:
+                    self._capture_insert_to_mapper()
+                else:
+                    self._capture_instrument_to_mapper()
                 return
             if state.mode == MODE_BROWSER:
                 # Browse pressed in browser mode → cancel, return to inserts
@@ -4492,6 +4496,47 @@ class Push2Controller:
             entry = {
                 "name": name, "path": "(DirectAccess)", "type": "VST3",
                 "is_instrument": False, "is_effect": True,
+                "parameter_count": len(params), "parameters": params,
+                "scanned_at": time.time(), "source": "directaccess",
+            }
+            self._write_plugin_to_cache(name, entry)
+            self._flash_message(f"Captured {len(params)} params: {name}")
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _capture_instrument_to_mapper(self):
+        """Capture the selected track's instrument (VSTi) parameters via
+        DirectAccess into the Plugin Mapper. Shift+Browse outside Inserts mode."""
+        if not getattr(self.nuendo_link, '_da_available', False):
+            self._flash_message("Capture: DirectAccess unavailable")
+            return
+        import threading
+        def _do():
+            self._flash_message("Capturing instrument…", secs=5)
+            if not self.nuendo_link.request_da_instrument_params():
+                self._flash_message("Capture: request failed")
+                return
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not getattr(self.nuendo_link, '_da_params_enumerated', False):
+                time.sleep(0.05)
+            da = getattr(self.nuendo_link, '_da_plugin_params', {}) or {}
+            name = getattr(self.nuendo_link, '_da_instrument_name', '') or ''
+            if not name:
+                self._flash_message("Capture: no instrument on this track")
+                return
+            if not da:
+                self._flash_message(f"Capture: no params for {name}")
+                return
+            params = []
+            for idx in sorted(da.keys()):
+                pname = da[idx].get("name", f"Param {idx}")
+                params.append({
+                    "index": idx, "name": pname, "label": pname,
+                    "default_value": 0.0, "min_value": 0.0, "max_value": 1.0,
+                    "units": "", "is_boolean": False, "is_discrete": False,
+                })
+            entry = {
+                "name": name, "path": "(DirectAccess)", "type": "VST3",
+                "is_instrument": True, "is_effect": False,
                 "parameter_count": len(params), "parameters": params,
                 "scanned_at": time.time(), "source": "directaccess",
             }

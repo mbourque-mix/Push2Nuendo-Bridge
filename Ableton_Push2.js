@@ -1576,6 +1576,69 @@ if (page.mHostAccess.makeDirectAccess) {
         }
     }
 
+    // Enumerate the parameters of the selected track's INSTRUMENT (VSTi) so the
+    // bridge can capture them into the Plugin Mapper (Shift+Browse off Inserts).
+    // Sends the instrument name (0x3C), the params (0x29) and completion (0x2A),
+    // reusing the same protocol as insert param enumeration.
+    function daEnumInstrumentParams(activeDevice) {
+        if (!ensureDAChan()) {
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, 0, 0, 0, 0xF7]);
+            return;
+        }
+        var m = daMapping;
+        var iSlot = daFindInstrumentSlot(m);
+        if (iSlot < 0) {
+            // no instrument on this track
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, 0, 0, 0, 0xF7]);
+            return;
+        }
+        var pluginID = -1;
+        if (daChan.getNumberOfChildObjects(m, iSlot) > 0) {
+            pluginID = daChan.getChildObjectID(m, iSlot, 0);
+        }
+        if (pluginID < 0) {
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, 0, 0, 0, 0xF7]);
+            return;
+        }
+        try {
+            // Instrument name → bridge (SysEx 0x3C)
+            var name = daChan.getObjectTitle(m, pluginID) || 'Instrument';
+            var nmsg = [0xF0, 0x00, 0x3C];
+            for (var c = 0; c < name.length && c < 24; c++) nmsg.push(name.charCodeAt(c) & 0x7F);
+            nmsg.push(0xF7);
+            midiOutput_Loop.sendMidi(activeDevice, nmsg);
+
+            var paramCount = daChan.getNumberOfParameters(m, pluginID);
+            var maxParams = Math.min(paramCount, 1024);
+            console.log('DA Enum instrument "' + name + '": ' + paramCount + ' params');
+            for (var i = 0; i < maxParams; i++) {
+                var tag = daChan.getParameterTagByIndex(m, pluginID, i);
+                var title = daChan.getParameterTitle(m, pluginID, tag, 64);
+                var procVal = daChan.getParameterProcessValue(m, pluginID, tag);
+                var idxLo = i & 0x7F, idxHi = (i >> 7) & 0x7F;
+                var val127 = Math.round(procVal * 127) & 0x7F;
+                var msg = [0xF0, 0x00, 0x29, 0, idxLo, idxHi, val127,
+                           tag & 0x7F, (tag >> 7) & 0x7F, (tag >> 14) & 0x7F, (tag >> 21) & 0x7F];
+                for (var c2 = 0; c2 < title.length && c2 < 20; c2++) msg.push(title.charCodeAt(c2) & 0x7F);
+                msg.push(0xF7);
+                midiOutput_Loop.sendMidi(activeDevice, msg);
+            }
+            midiOutput_Loop.sendMidi(activeDevice,
+                [0xF0, 0x00, 0x2A, 0, maxParams & 0x7F, (maxParams >> 7) & 0x7F, 0xF7]);
+        } catch(e) {
+            console.log('DA Enum instrument error: ' + e);
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, 0, 0, 0, 0xF7]);
+        }
+    }
+
+    // CC 94 ch8: enumerate the selected track's instrument parameters
+    var daInstrEnumBtn = surface.makeButton(94, 24, 2, 2);
+    daInstrEnumBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 94);
+    daInstrEnumBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        if (value <= 0 || !daMapping) return;
+        daEnumInstrumentParams(activeDevice);
+    };
+
     // ══════════════════════════════════════════════
     // DA PLUGIN MANAGER — explore collections
     // CC 84 channel 8 = explore plugin collections for a slot

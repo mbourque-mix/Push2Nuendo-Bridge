@@ -1198,6 +1198,11 @@ class NuendoLink:
                 cb()
             return
 
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x3C:
+            # Instrument name (for DA capture) : [F0 00 3C ...chars F7]
+            self._da_instrument_name = ''.join(chr(b) for b in message[3:-1])
+            return
+
         else:
             return
         
@@ -2059,9 +2064,25 @@ class NuendoLink:
         print(f"  → DA: Requested param enumeration for slot {slot_index}")
         return True
 
+    def request_da_instrument_params(self):
+        """Ask JS to enumerate the selected track's instrument (VSTi) parameters
+        (CC 94 ch8). JS responds with the name (0x3C), entries (0x29) and
+        completion (0x2A), populating _da_plugin_params / _da_params_enumerated.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        self._da_plugin_params = {}
+        self._da_params_enumerated = False
+        self._da_instrument_name = ""
+        self._midi_out.send_message([0xB7, 94, 1])
+        print("  → DA: Requested instrument param enumeration")
+        return True
+
     def send_da_encoder_setup(self, slot_index, da_param_indices):
         """Configure which DA params the 8 encoders control (channel 9).
-        
+
         slot_index: 0-15
         da_param_indices: list of 8 DA param indices (use -1 for unused encoders)
         """
