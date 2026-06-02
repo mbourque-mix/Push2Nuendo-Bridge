@@ -52,7 +52,8 @@ def save_settings(settings):
 
 # ── App ──
 
-scan_status = {"scanning": False, "progress": 0, "total": 0, "current": ""}
+scan_status = {"scanning": False, "progress": 0, "total": 0, "current": "", "cancelled": False}
+_scan_cancel = {"flag": False}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -173,19 +174,38 @@ def trigger_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     extra_dirs = request.extra_dirs or settings.get("extra_vst3_dirs", [])
     
     def do_scan():
-        scan_status["scanning"] = True
-        scan_status["current"] = "Discovering plugins..."
+        _scan_cancel["flag"] = False
+        scan_status.update({"scanning": True, "progress": 0, "total": 0,
+                            "current": "Discovering plugins...", "cancelled": False})
+
+        def prog(done, total, name):
+            scan_status["progress"] = done
+            scan_status["total"] = total
+            scan_status["current"] = name
+
         try:
-            result = scanner.full_scan(extra_dirs=extra_dirs, force=request.force, retry_errors=request.retry_errors)
-            scan_status["total"] = len(result)
+            scanner.full_scan(
+                extra_dirs=extra_dirs, force=request.force,
+                retry_errors=request.retry_errors,
+                progress_cb=prog, should_cancel=lambda: _scan_cancel["flag"])
         except Exception as e:
             logger.error(f"Scan failed: {e}")
         finally:
+            scan_status["cancelled"] = _scan_cancel["flag"]
             scan_status["scanning"] = False
             scan_status["current"] = ""
-    
+
     background_tasks.add_task(do_scan)
     return {"status": "scan_started"}
+
+
+@app.post("/api/scan/cancel")
+def cancel_scan():
+    """Request the in-progress scan to stop (partial results are kept)."""
+    if not scan_status["scanning"]:
+        return {"status": "idle"}
+    _scan_cancel["flag"] = True
+    return {"status": "cancelling"}
 
 
 @app.get("/api/scan/status")

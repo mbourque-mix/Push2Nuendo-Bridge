@@ -235,7 +235,16 @@ body {
     <span class="header-title">⬡ Plugin Mapper</span>
     <span class="header-sub">Push 2 / Nuendo Bridge</span>
   </div>
-  <div>
+  <div style="display:flex; align-items:center; gap:10px;">
+    <div id="scanProgress" style="display:none; min-width:220px;">
+      <div style="font-size:12px; color:var(--text-muted,#999); margin-bottom:3px;"
+           id="scanProgressText">Scanning…</div>
+      <div style="height:6px; background:rgba(255,255,255,0.12); border-radius:3px; overflow:hidden;">
+        <div id="scanProgressBar" style="height:100%; width:0%;
+             background:var(--accent,#4ea1ff); transition:width 0.2s;"></div>
+      </div>
+    </div>
+    <button class="btn" id="cancelScanBtn" style="display:none;" onclick="cancelScan()">Cancel</button>
     <button class="btn" id="foldersBtn" onclick="openFolders()">Folders…</button>
     <button class="btn btn-accent" id="scanBtn" onclick="startScan()">Rescan Plugins</button>
   </div>
@@ -351,23 +360,54 @@ function showToast(msg, type='success') {
 }
 
 // ── Scan ──
+function _setScanUI(scanning) {
+  document.getElementById('scanBtn').disabled = scanning;
+  document.getElementById('foldersBtn').disabled = scanning;
+  document.getElementById('cancelScanBtn').style.display = scanning ? '' : 'none';
+  document.getElementById('scanProgress').style.display = scanning ? '' : 'none';
+}
+
+function _updateScanProgress(s) {
+  const txt = document.getElementById('scanProgressText');
+  const bar = document.getElementById('scanProgressBar');
+  if (s.total > 0) {
+    const pct = Math.min(100, Math.round((s.progress / s.total) * 100));
+    bar.style.width = pct + '%';
+    txt.textContent = `Scanning ${s.progress}/${s.total}` + (s.current ? ` — ${s.current}` : '') + ` (${pct}%)`;
+  } else {
+    bar.style.width = '0%';
+    txt.textContent = s.current || 'Discovering plugins…';
+  }
+}
+
 async function startScan() {
-  const btn = document.getElementById('scanBtn');
-  btn.textContent = 'Scanning...';
-  btn.disabled = true;
+  document.getElementById('scanBtn').textContent = 'Scanning…';
+  _setScanUI(true);
   await postJson(`${API}/scan`, { force: false });
   const poll = setInterval(async () => {
     const s = await fetchJson(`${API}/scan/status`);
+    _updateScanProgress(s);
     if (!s.scanning) {
       clearInterval(poll);
-      btn.textContent = 'Rescan Plugins';
-      btn.disabled = false;
+      _setScanUI(false);
+      document.getElementById('scanBtn').textContent = 'Rescan Plugins';
       const d = await fetchJson(`${API}/plugins`);
       allPlugins = d.plugins;
       renderPluginList();
-      showToast(`Scan complete: ${d.total} plugins`);
+      showToast(s.cancelled ? `Scan cancelled — ${d.total} plugins so far`
+                            : `Scan complete: ${d.total} plugins`);
     }
-  }, 2000);
+  }, 700);
+}
+
+async function cancelScan() {
+  document.getElementById('cancelScanBtn').disabled = true;
+  document.getElementById('cancelScanBtn').textContent = 'Cancelling…';
+  await postJson(`${API}/scan/cancel`, {});
+  setTimeout(() => {
+    const b = document.getElementById('cancelScanBtn');
+    b.disabled = false; b.textContent = 'Cancel';
+  }, 1500);
 }
 
 // ── Scan folders (settings) ──

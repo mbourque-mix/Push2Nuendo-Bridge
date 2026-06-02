@@ -207,11 +207,15 @@ except Exception as e:
         }
 
 
-def full_scan(extra_dirs=None, force=False, retry_errors=False):
+def full_scan(extra_dirs=None, force=False, retry_errors=False,
+              progress_cb=None, should_cancel=None):
     """Scan all plugins and cache the results.
-    
+
     If force=False, only scans plugins not already in cache.
     If retry_errors=True, re-scans plugins that previously had errors.
+    progress_cb(done, total, name): optional callback after each plugin.
+    should_cancel(): optional callable; if it returns True the scan stops
+                     early (partial results are still cached).
     Returns the complete plugin database.
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -234,9 +238,22 @@ def full_scan(extra_dirs=None, force=False, retry_errors=False):
     failed = 0
     skipped = 0
     total_to_scan = len(plugin_paths)
+    cancelled = False
     for idx, path in enumerate(plugin_paths):
         name = Path(path).stem
-        
+
+        # Cooperative cancellation between plugins
+        if should_cancel and should_cancel():
+            logger.info("Scan cancelled by user")
+            cancelled = True
+            break
+
+        if progress_cb:
+            try:
+                progress_cb(idx, total_to_scan, name)
+            except Exception:
+                pass
+
         # Skip if already cached and not forced
         if name in cache and not force:
             # Retry errors if requested
@@ -269,9 +286,16 @@ def full_scan(extra_dirs=None, force=False, retry_errors=False):
     except IOError as e:
         logger.error(f"Failed to save cache: {e}")
     
+    if progress_cb:
+        try:
+            progress_cb(total_to_scan, total_to_scan, "")
+        except Exception:
+            pass
+
     total = len(cache)
-    logger.info(f"Scan complete: {scanned} new, {failed} failed, {total} total")
-    
+    status = "cancelled" if cancelled else "complete"
+    logger.info(f"Scan {status}: {scanned} new, {failed} failed, {total} total")
+
     return cache
 
 
