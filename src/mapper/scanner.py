@@ -296,13 +296,21 @@ def full_scan(extra_dirs=None, force=False, retry_errors=False,
 
         # Skip if already cached and not forced
         if name in cache and not force:
-            # Retry errors if requested
-            if retry_errors and cache[name].get("error"):
+            entry = cache[name]
+            # Backfill: re-scan OK entries (scanned before metadata fields
+            # existed) that are missing the manufacturer, so the Makers filter
+            # fills in without a full force rescan. Error entries are NOT
+            # re-scanned here (they'd just re-fail slowly).
+            needs_backfill = (not entry.get("error") and not entry.get("is_shell")
+                              and not entry.get("manufacturer"))
+            if retry_errors and entry.get("error"):
                 pass  # Fall through to rescan
+            elif needs_backfill:
+                pass  # Fall through to rescan (metadata backfill)
             else:
                 try:
                     mtime = os.path.getmtime(path)
-                    if mtime <= cache[name].get("scanned_at", 0):
+                    if mtime <= entry.get("scanned_at", 0):
                         skipped += 1
                         continue
                 except OSError:
