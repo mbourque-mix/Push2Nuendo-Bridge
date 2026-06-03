@@ -4477,7 +4477,7 @@ class Push2Controller:
             if not self.nuendo_link.request_da_plugin_params(slot):
                 self._flash_message("Capture: request failed")
                 return
-            deadline = time.time() + 5.0
+            deadline = time.time() + 12.0
             while time.time() < deadline and not getattr(self.nuendo_link, '_da_params_enumerated', False):
                 time.sleep(0.05)
             da = getattr(self.nuendo_link, '_da_plugin_params', {}) or {}
@@ -4515,7 +4515,7 @@ class Push2Controller:
             if not self.nuendo_link.request_da_instrument_params():
                 self._flash_message("Capture: request failed")
                 return
-            deadline = time.time() + 5.0
+            deadline = time.time() + 12.0
             while time.time() < deadline and not getattr(self.nuendo_link, '_da_params_enumerated', False):
                 time.sleep(0.05)
             da = getattr(self.nuendo_link, '_da_plugin_params', {}) or {}

@@ -1521,8 +1521,8 @@ if (page.mHostAccess.makeDirectAccess) {
             var pluginID = entry.pluginObjectID;
             var paramCount = daInserts.getNumberOfParameters(m, pluginID);
 
-            // Cap to avoid flooding — most plugins have <1000 real params
-            var maxParams = Math.min(paramCount, 1024);
+            // Sanity ceiling only (some plugins expose 2000+ real params).
+            var maxParams = Math.min(paramCount, 16384);
             var entryLabel = entry.title || entry.slotTitle || ('slot' + slotIdx);
             console.log('DA Enum slot ' + slotIdx + ' (' + entryLabel + '): ' + paramCount + ' params (sending ' + maxParams + ')');
 
@@ -1613,7 +1613,7 @@ if (page.mHostAccess.makeDirectAccess) {
             midiOutput_Loop.sendMidi(activeDevice, nmsg);
 
             var paramCount = daChan.getNumberOfParameters(m, pluginID);
-            var maxParams = Math.min(paramCount, 1024);
+            var maxParams = Math.min(paramCount, 16384);  // sanity ceiling only
             console.log('DA Enum instrument "' + name + '": ' + paramCount + ' params');
             for (var i = 0; i < maxParams; i++) {
                 var tag = daChan.getParameterTagByIndex(m, pluginID, i);
