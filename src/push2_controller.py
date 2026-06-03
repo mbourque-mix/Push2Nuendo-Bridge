@@ -1979,6 +1979,12 @@ class Push2Controller:
                         elif i == 2:
                             slot = state.selected_insert_slot
                             self._insert_action(slot, 'deactivate')
+                        elif i == 3:
+                            # Edit Map: open the Plugin Mapper on this plugin
+                            slot = state.selected_insert_slot
+                            name = (state.current_insert_names[slot]
+                                    if 0 <= slot < len(state.current_insert_names) else '')
+                            self._open_mapper_for_plugin(name)
                         elif 4 <= i <= 7:
                             self._toggle_selected_track_function(i - 4)
                     else:
@@ -4098,6 +4104,8 @@ class Push2Controller:
                             self._send_midi_to_push([0xB0, cc, BTN_BLUE if is_active else BTN_ORANGE])  # BYPASS
                         elif i == 2:
                             self._send_midi_to_push([0xB0, cc, BTN_RED])     # DEACTIVATE
+                        elif i == 3:
+                            self._send_midi_to_push([0xB0, cc, LED_PURPLE])  # EDIT MAP
                         elif i == 4 and track:
                             self._send_midi_to_push([0xB0, cc, BTN_YELLOW if track.is_muted else BTN_DIM])
                         elif i == 5 and track:
@@ -4543,6 +4551,19 @@ class Push2Controller:
             self._write_plugin_to_cache(name, entry)
             self._flash_message(f"Captured {len(params)} params: {name}")
         threading.Thread(target=_do, daemon=True).start()
+
+    def _open_mapper_for_plugin(self, name):
+        """Open the Plugin Mapper in the browser, deep-linked to a plugin."""
+        if not name:
+            self._flash_message("Edit Map: no plugin in this slot")
+            return
+        import webbrowser, urllib.parse
+        url = "http://localhost:8100/?plugin=" + urllib.parse.quote(name)
+        try:
+            webbrowser.open(url)
+            self._flash_message(f"Opening mapper: {name}")
+        except Exception:
+            self._flash_message("Edit Map: couldn't open browser")
 
     def _write_plugin_to_cache(self, name, entry):
         """Merge a captured plugin entry into the Plugin Mapper cache file."""

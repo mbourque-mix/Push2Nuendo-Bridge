@@ -398,6 +398,25 @@ async function init() {
   allPlugins = d.plugins;
   populateFilterOptions();
   renderPluginList();
+  // Deep-link: ?plugin=NAME (from the Push "Edit Map" button) auto-selects it.
+  const want = new URLSearchParams(location.search).get('plugin');
+  if (want) {
+    const m = _findPluginMatch(want);
+    if (m) selectPlugin(m.name);
+    else showToast(`"${want}" not in the list yet — capture it first (Shift+Browse)`, 'error');
+  }
+}
+
+// Best-match lookup mirroring the bridge: exact → case-insensitive → substring.
+function _findPluginMatch(want) {
+  const wl = want.toLowerCase().trim();
+  let m = allPlugins.find(p => p.name === want);
+  if (m) return m;
+  m = allPlugins.find(p => p.name.toLowerCase().trim() === wl);
+  if (m) return m;
+  const cands = allPlugins.filter(p => !p.error &&
+    (p.name.toLowerCase().includes(wl) || wl.includes(p.name.toLowerCase())));
+  return cands.sort((a, b) => b.parameter_count - a.parameter_count)[0] || null;
 }
 
 // ── Toast ──

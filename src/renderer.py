@@ -889,11 +889,12 @@ def _render_insert_params_screen(state):
         # Bottom separator
         draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
         
-        # Bottom button labels: actions 1-3
+        # Bottom button labels: actions 1-4
         labels = [
             ("OPEN UI", (200, 200, 200)),
             ("BYPASS", (0, 160, 200)),
             ("DEACTIV", (200, 60, 60)),
+            ("EDIT MAP", (180, 120, 220)),
         ]
         for idx, (label, color) in enumerate(labels):
             cell_x = idx * CELL_WIDTH
