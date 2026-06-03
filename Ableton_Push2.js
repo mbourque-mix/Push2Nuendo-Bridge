@@ -1028,6 +1028,7 @@ if (page.mHostAccess.makeDirectAccess) {
     // Inserts, Modulators, Sends… — are containers). Returns -1 on non-instrument
     // tracks.
     function daFindInstrumentSlot(m) {
+        ensureDA();  // daChan's base object needs the primary DA active first
         if (!ensureDAChan()) return -1;
         var rootID = daChan.getBaseObjectID(m);
         if (rootID < 0 || !daChan.getObjectTypeName) return -1;
@@ -1581,6 +1582,9 @@ if (page.mHostAccess.makeDirectAccess) {
     // Sends the instrument name (0x3C), the params (0x29) and completion (0x2A),
     // reusing the same protocol as insert param enumeration.
     function daEnumInstrumentParams(activeDevice) {
+        // ensureDA() must run first — daChan's base object isn't resolved until
+        // the primary DirectAccess is active (activation dependency).
+        ensureDA();
         if (!ensureDAChan()) {
             midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x2A, 0, 0, 0, 0xF7]);
             return;
