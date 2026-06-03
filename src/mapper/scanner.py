@@ -132,6 +132,45 @@ def discover_vst3_plugins(extra_dirs=None):
     return sorted(unique, key=lambda p: Path(p).stem.lower())
 
 
+def _macos_failure_hint(plugin_path):
+    """On macOS, return a clearer reason a plugin failed to scan (architecture
+    mismatch / PACE-iLok protection), or None. Cheap — only called on errors."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import platform, subprocess
+        host = platform.machine()  # 'arm64' or 'x86_64'
+        p = Path(plugin_path)
+        notes = []
+        macos_dir = p / "Contents" / "MacOS"
+        bins = [f for f in macos_dir.glob("*") if f.is_file()] if macos_dir.exists() else []
+        if bins:
+            try:
+                out = subprocess.run(["lipo", "-archs", str(bins[0])],
+                                     capture_output=True, text=True, timeout=5)
+                archs = out.stdout.split()
+                if archs and host not in archs:
+                    notes.append(f"{'/'.join(archs)}-only plugin — incompatible with this {host} build")
+            except Exception:
+                pass
+        if any("pace" in f.name.lower() for f in p.glob("Contents/*")):
+            notes.append("PACE/iLok-protected")
+        return " · ".join(notes) if notes else None
+    except Exception:
+        return None
+
+
+def _apply_failure_hints(results):
+    """Replace raw pedalboard error text with a clearer reason when we can
+    detect one (Intel-only, PACE). Adds the DirectAccess-capture suggestion."""
+    for r in results:
+        if r.get("error"):
+            hint = _macos_failure_hint(r.get("path", ""))
+            if hint:
+                r["error"] = hint + " — capture it in Nuendo with Shift+Browse instead"
+    return results
+
+
 def scan_plugin_parameters(plugin_path, timeout=120, should_skip=None):
     """Load a plugin file with pedalboard and extract its parameters.
 
@@ -240,7 +279,7 @@ print("@@JSON@@" + json.dumps(results))
                 now = time.time()
                 for d in data:
                     d["scanned_at"] = now
-                return data
+                return _apply_failure_hints(data)
         return _err_list("Could not parse scanner output")
     except Exception as e:
         logger.warning(f"Failed to scan {stem}: {e}")
