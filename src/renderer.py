@@ -17,10 +17,11 @@ import numpy as np
 import time
 from PIL import Image, ImageDraw, ImageFont
 from state import (
-    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
+    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_CR,
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
     AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
+    FS_OPTIONS, FS_PEDAL_CC, FS_OFF, FS_SUSTAIN,
     BRIDGE_VERSION, BANK_SIZE, AppState,
     STRIP_MOD_GATE, STRIP_MOD_COMPRESSOR, STRIP_MOD_TOOLS,
     STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER,
@@ -227,50 +228,6 @@ def _abbreviate(text, max_chars):
     return ''.join(text[i] for i in range(n) if i not in remove_set)[:max_chars]
 
 
-def _draw_bar(draw, x, y, width, height, value, color, bg_color=(40, 40, 40)):
-    """
-    Draw a horizontal progress bar.
-    
-    value: 0.0 to 1.0
-    """
-    # Bar background
-    draw.rectangle([x, y, x + width, y + height], fill=bg_color, outline=None)
-    # Fill proportional to value
-    fill_width = int(width * max(0.0, min(1.0, value)))
-    if fill_width > 0:
-        draw.rectangle([x, y, x + fill_width, y + height], fill=color)
-
-
-def _draw_pan_indicator(draw, x, y, width, height, pan_value, color):
-    """
-    Draw a pan indicator.
-    
-    pan_value: -1.0 (L) to +1.0 (R), 0.0 = center
-    The center is at the middle of the zone.
-    """
-    center_x = x + width // 2
-    
-    # Baseline
-    draw.line([(x, y + height // 2), (x + width, y + height // 2)],
-              fill=(60, 60, 60), width=1)
-    # Center tick
-    draw.line([(center_x, y), (center_x, y + height)],
-              fill=(70, 70, 70), width=1)
-    
-    # Indicator position
-    pos_x = center_x + int(pan_value * (width // 2))
-    pos_x = max(x + 2, min(x + width - 2, pos_x))
-    
-    # Bar from center to position
-    draw.rectangle([
-        min(center_x, pos_x), y + 2,
-        max(center_x, pos_x), y + height - 2
-    ], fill=color)
-    
-    # Cursor
-    draw.rectangle([pos_x - 2, y, pos_x + 2, y + height], fill=COLOR_TEXT_MAIN)
-
-
 def _draw_arc_knob(draw, cx, cy, radius, value, color, bg_color=(50, 50, 50)):
     """
     Draw a value indicator as a horizontal bar.
@@ -293,19 +250,6 @@ def _draw_arc_knob(draw, cx, cy, radius, value, color, bg_color=(50, 50, 50)):
     # Indicator dot
     dot_x = x1 + int(bar_width * value)
     draw.ellipse([dot_x - 4, cy - 4, dot_x + 4, cy + 4], fill=COLOR_TEXT_MAIN)
-
-
-def _draw_speaker_icon(draw, x, y, color):
-    """Draw a small speaker icon."""
-    # Speaker body (rectangle)
-    draw.rectangle([x + 2, y + 4, x + 7, y + 12], fill=color)
-    # Horn (triangle)
-    draw.polygon([(x + 7, y + 2), (x + 15, y - 2), (x + 15, y + 18), (x + 7, y + 14)], fill=color)
-    # Sound waves (arcs)
-    for i in range(2):
-        offset = 4 + i * 4
-        draw.arc([x + 14 + i * 3, y - 1 + i, x + 20 + i * 3, y + 17 - i],
-                 start=-50, end=50, fill=color, width=1)
 
 
 # ─────────────────────────────────────────────
@@ -332,8 +276,9 @@ def _draw_header(draw, cell_x, track, is_selected):
         )
     
     if track.is_muted:
-        header_color = (40, 40, 40)
-    
+        # Keep the track color, just dimmed (was a flat grey, which hid the hue)
+        header_color = (int(r * 0.45), int(g * 0.45), int(b * 0.45))
+
     draw.rectangle([cell_x, 0, cell_x + CELL_WIDTH - 1, 21],
                    fill=header_color)
     
@@ -650,8 +595,13 @@ TRACK_PARAM_COLORS = [
     (100, 80, 180),   # Send 6
 ]
 
-def _draw_track_combined_cell(draw, cell_x, track, col):
-    """Draw a cell in combined Track mode."""
+def _draw_track_combined_cell(draw, cell_x, track, col, send_on=None):
+    """Draw a cell in combined Track mode.
+
+    send_on (optional): the selected track's per-send on/off list (state.send_on),
+    the same source the Sends page and the Track upper-row buttons use. When
+    given it drives the send dimming; otherwise we fall back to track.send_enabled
+    (which only tracks the bank's current-send index, so it can be stale)."""
     label = TRACK_PARAM_LABELS[col] if col < len(TRACK_PARAM_LABELS) else '---'
     color = TRACK_PARAM_COLORS[col] if col < len(TRACK_PARAM_COLORS) else (100, 100, 100)
     
@@ -682,7 +632,11 @@ def _draw_track_combined_cell(draw, cell_x, track, col):
         # Sends 1-6
         send_idx = col - 2
         send_val = track.sends[send_idx] if send_idx < len(track.sends) else 0.0
-        send_on = track.send_enabled[send_idx] if send_idx < len(track.send_enabled) else True
+        if send_on is not None:
+            is_on = send_on[send_idx] if send_idx < len(send_on) else False
+        else:
+            is_on = track.send_enabled[send_idx] if send_idx < len(track.send_enabled) else True
+        send_on = is_on
         if send_on:
             _draw_arc_knob(draw, cx, cy, 30, send_val, color)
         else:
@@ -690,6 +644,30 @@ def _draw_track_combined_cell(draw, cell_x, track, col):
         display = track.send_display[send_idx] if send_idx < len(track.send_display) and track.send_display[send_idx] else f"{send_val * 100:.0f}%"
         text_color = COLOR_TEXT_MAIN if send_on else COLOR_TEXT_DIM
         draw.text((cell_x + CELL_WIDTH // 2 - 12, 120), display, font=FONT_MD, fill=text_color)
+
+
+def _render_track_screen(state):
+    """Dedicated Track screen (Shift+Mix): a single track-name header bar (like
+    the Sends page), then Vol / Pan / Send 1-6 across the 8 columns."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    selected = state.selected_track
+    track_name = selected.name if selected else "---"
+    r, g, b = selected.color if selected else (150, 150, 150)
+    title_bg = (min(r, 150), min(g, 150), min(b, 150))
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=title_bg)
+    draw.text((8, 3), f"◄  {track_name}  ·  TRACK  ►", font=FONT_MD_BOLD,
+              fill=_text_color_for_bg(title_bg))
+
+    send_on = getattr(state, 'send_on', None)
+    for col in range(8):
+        cell_x = col * CELL_WIDTH
+        if col > 0:
+            draw.line([(cell_x, 22), (cell_x, 141)], fill=COLOR_SEPARATOR)
+        _draw_track_combined_cell(draw, cell_x, selected, col, send_on=send_on)
+
+    return _to_push2_frame(img)
 
 
 def _draw_insert_cell(draw, cell_x, insert, is_selected):
@@ -1353,7 +1331,6 @@ def _draw_bottom_bar(draw, state, cr_state=None):
         MODE_DEVICE:  "■ DEVICE",
         MODE_INSERTS: "■ INSERTS",
         MODE_TRACK:   "■ TRACK",
-        MODE_OVERVIEW: "■ OVERVIEW",
     }
     mode_text = mode_labels.get(state.mode, state.mode.upper())
     draw.text((6, 147), mode_text, font=FONT_SM, fill=COLOR_ACCENT)
@@ -1512,6 +1489,47 @@ def _render_xy_screen(state):
     return _to_push2_frame(img)
 
 
+def _render_navigation_screen(state):
+    """Navigation page: 4 corner D-pads (zoom / scroll / markers / nudge)."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    # Header
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(40, 40, 55))
+    draw.text((8, 3), "NAVIGATION  -  64-pad D-pads", font=FONT_MD, fill=(220, 220, 235))
+    draw.text((SCREEN_WIDTH - 150, 5), "Master = exit", font=FONT_SM, fill=(140, 140, 160))
+
+    # Four quadrant panels matching the corner D-pad positions on the grid.
+    panels = [
+        # (x, y, title, color, up, down, left, right)
+        (0,            22, "ZOOM",    (90, 220, 120),  "Zoom In V", "Zoom Out V", "Zoom Out", "Zoom In"),
+        (SCREEN_WIDTH // 2, 22, "SCROLL", (90, 160, 240),  "Track Up", "Track Down", "Cursor ←", "Cursor →"),
+        (0,            91, "MARKERS", (240, 170, 60),  "Locator L", "Locator R", "Prev Mark", "Next Mark"),
+        (SCREEN_WIDTH // 2, 91, "NUDGE",  (190, 130, 240),  "Prev Trk", "Next Trk", "Move ←", "Move →"),
+    ]
+    pw = SCREEN_WIDTH // 2
+    ph = 69
+    for (x, y, title, color, up, down, left, right) in panels:
+        cx = x + pw // 2
+        cy = y + ph // 2
+        # Panel border + title
+        draw.rectangle([x + 2, y + 1, x + pw - 2, y + ph - 1], outline=(55, 55, 70))
+        draw.text((x + 10, y + 4), title, font=FONT_SM_BOLD, fill=color)
+        dim = tuple(int(c * 0.85) for c in color)
+        # Up / Down (centered), Left / Right (sides)
+        def ctext(tx, ty, s, f=FONT_SM):
+            bbox = draw.textbbox((0, 0), s, font=f)
+            draw.text((tx - (bbox[2] - bbox[0]) // 2, ty), s, font=f, fill=dim)
+        ctext(cx, y + 18, "↑ " + up)
+        ctext(cx, y + ph - 16, "↓ " + down)
+        draw.text((x + 8, cy - 2), "← " + left, font=FONT_SM, fill=dim)
+        rt = "→ " + right
+        rb = draw.textbbox((0, 0), rt, font=FONT_SM)
+        draw.text((x + pw - 10 - (rb[2] - rb[0]), cy - 2), rt, font=FONT_SM, fill=dim)
+
+    return _to_push2_frame(img)
+
+
 def _render_midicc_screen(state):
     """Render the MIDI CC controller page."""
     try:
@@ -1597,7 +1615,7 @@ def _render_midicc_screen(state):
 # ─────────────────────────────────────────────
 
 # Setup page definitions
-SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', None, None, None, None, 'About']
+SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', None, None, 'About']
 
 # Per-page options: list of (label, value) for lower row buttons
 SETUP_PAGE_OPTIONS = {
@@ -1617,6 +1635,8 @@ SETUP_PAGE_OPTIONS = {
         ('Main',    False),
         ('Phones',  True),
     ],
+    3: list(FS_OPTIONS),  # Footswitch pedal 1 (CC 64) — action on lower-row 1-6
+    4: list(FS_OPTIONS),  # Footswitch pedal 2 (CC 69)
 }
 
 def _render_setup_screen(state):
@@ -1636,7 +1656,13 @@ def _render_setup_screen(state):
     for i in range(8):
         x = i * CELL_WIDTH
         draw.line([(x, 20), (x, 38)], fill=COLOR_SEPARATOR)
-        if i < len(SETUP_PAGE_NAMES) and SETUP_PAGE_NAMES[i] is not None:
+        if i == 6:
+            # Reload Script action button (not a page tab)
+            name = "↻ Reload"
+            tw = FONT_SM.getlength(name) if hasattr(FONT_SM, 'getlength') else len(name) * 6
+            tx = x + (CELL_WIDTH - tw) // 2
+            draw.text((tx, 23), name, fill=(150, 150, 150), font=FONT_SM)
+        elif i < len(SETUP_PAGE_NAMES) and SETUP_PAGE_NAMES[i] is not None:
             name = SETUP_PAGE_NAMES[i]
             is_active = (i == page_idx)
             if is_active:
@@ -1711,6 +1737,32 @@ def _render_setup_screen(state):
         draw.text((20, 75), name, fill=COLOR_ACCENT, font=FONT_LG)
         draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
 
+    elif page_idx in (3, 4):
+        # ── Pages 3/4: Footswitch (pedal 1 = CC 64, pedal 2 = CC 69) ──
+        pedal = page_idx - 2
+        cfg = getattr(state, 'footswitch', {}).get(pedal, {})
+        cc_num = FS_PEDAL_CC.get(pedal, 64)
+        action = cfg.get('action', FS_OFF)
+        invert = cfg.get('invert', False)
+        # Friendly name for the current action
+        label_map = {v: lbl for lbl, v in FS_OPTIONS}
+        act_name = label_map.get(action, action)
+        draw.text((20, 46), f"Footswitch {pedal}   (jack {pedal} = CC {cc_num})",
+                  fill=(200, 200, 200), font=FONT_MD)
+        draw.text((20, 70), act_name, fill=COLOR_ACCENT, font=FONT_LG)
+        # Sub-line describing behavior
+        if action == FS_SUSTAIN:
+            desc = "Sends CC 64 (sustain) to the instrument"
+        elif action == FS_OFF:
+            desc = "Pedal does nothing"
+        else:
+            desc = "Fires on press"
+        draw.text((20, 98), desc, fill=(100, 100, 100), font=FONT_SM)
+        # Invert state
+        inv_txt = "Invert: ON" if invert else "Invert: off"
+        inv_col = COLOR_ACCENT if invert else (90, 90, 90)
+        draw.text((20, 116), inv_txt, fill=inv_col, font=FONT_SM)
+
     elif page_idx == 7:
         # ── Page 7: About ──
         # Bridge version
@@ -1740,6 +1792,10 @@ def _render_setup_screen(state):
                 is_selected = (state.velocity_curve == value)
             elif page_idx == 2:
                 is_selected = (getattr(state, 'cr_phones_default', False) == value)
+            elif page_idx in (3, 4):
+                pedal = page_idx - 2
+                cfg = getattr(state, 'footswitch', {}).get(pedal, {})
+                is_selected = (cfg.get('action') == value)
             else:
                 is_selected = False
             
@@ -1752,10 +1808,16 @@ def _render_setup_screen(state):
             tx = x + (CELL_WIDTH - tw) // 2
             draw.text((tx, 146), label, fill=color, font=FONT_SM)
 
-    # Rescan action on lower row 8 (available on every Setup page)
-    rx = 7 * CELL_WIDTH
-    rtw = FONT_SM.getlength("RESCAN") if hasattr(FONT_SM, 'getlength') else 36
-    draw.text((rx + (CELL_WIDTH - rtw) // 2, 146), "RESCAN", fill=(150, 150, 150), font=FONT_SM)
+    # Invert toggle on lower row 8 (footswitch pages only)
+    if page_idx in (3, 4):
+        pedal = page_idx - 2
+        invert = getattr(state, 'footswitch', {}).get(pedal, {}).get('invert', False)
+        ix = 7 * CELL_WIDTH
+        if invert:
+            draw.rectangle([ix + 1, 142, ix + CELL_WIDTH - 1, SCREEN_HEIGHT - 1], fill=(0, 60, 80))
+        itw = FONT_SM.getlength("INVERT") if hasattr(FONT_SM, 'getlength') else 36
+        icol = COLOR_ACCENT if invert else (100, 100, 100)
+        draw.text((ix + (CELL_WIDTH - itw) // 2, 146), "INVERT", fill=icol, font=FONT_SM)
 
     return _to_push2_frame(img)
 
@@ -3153,7 +3215,7 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
 
     if not state.nuendo_connected:
         return render_splash_screen()
-    
+
     if pad_grid and pad_grid.scale_mode:
         return _render_scale_screen(pad_grid)
 
@@ -3162,33 +3224,44 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
 
     if state.accent_held:
         return _render_accent_screen(state)
-    
-    if state.mode == MODE_CR and cr_state:
+
+    # Navigation help screen: only while Master is held (and the D-pad overlay
+    # is on). Otherwise the screen follows the normal mode so the user keeps
+    # seeing the mix while the pads stay in D-pad mode.
+    if getattr(state, 'nav_active', False) and getattr(state, 'master_held', False):
+        return _render_navigation_screen(state)
+
+    mode = state.mode
+
+    if mode == MODE_CR and cr_state:
         return _render_cr_screen(state, cr_state)
-    
-    if state.mode == MODE_SETUP:
+
+    if mode == MODE_SETUP:
         return _render_setup_screen(state)
-    
-    if state.mode == MODE_MIDICC:
+
+    if mode == MODE_MIDICC:
         return _render_midicc_screen(state)
 
-    if state.mode == MODE_XY:
+    if mode == MODE_XY:
         return _render_xy_screen(state)
 
-    if state.mode == MODE_BROWSER:
+    if mode == MODE_BROWSER:
         return _render_browser_screen(state)
-    
-    if state.mode == MODE_INSERTS:
+
+    if mode == MODE_INSERTS:
         return _render_inserts_screen(state)
-    
-    if state.mode == MODE_SENDS:
+
+    if mode == MODE_SENDS:
         return _render_sends_screen(state)
-    
-    if state.mode == MODE_DEVICE:
+
+    if mode == MODE_DEVICE:
         return _render_device_screen(state)
-    
-    if state.mode == MODE_CHANNEL_STRIP:
+
+    if mode == MODE_CHANNEL_STRIP:
         return _render_channel_strip_screen(state)
+
+    if mode == MODE_TRACK:
+        return _render_track_screen(state)
     
     # Main image
     img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
@@ -3225,24 +3298,25 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
         # Header (track name)
         _draw_header(draw, cell_x, track, is_selected)
         
-        # Content according to mode
-        if state.mode == MODE_VOLUME:
+        # Content according to mode (use the effective `mode`, not state.mode,
+        # so the Navigation page can render the underlying mix screen safely)
+        if mode == MODE_VOLUME:
             _draw_volume_cell(draw, cell_x, track)
-        
-        elif state.mode == MODE_PAN:
+
+        elif mode == MODE_PAN:
             _draw_pan_cell(draw, cell_x, track)
-        
-        elif state.mode == MODE_SENDS:
+
+        elif mode == MODE_SENDS:
             _draw_send_cell(draw, cell_x, track, state.current_send)
-        
-        elif state.mode == MODE_DEVICE:
+
+        elif mode == MODE_DEVICE:
             # In Device mode, display the 8 Quick Controls
             # of the selected track (not the bank)
             selected = state.selected_track
             if col < len(selected.quick_controls):
                 _draw_device_cell(draw, cell_x, selected.quick_controls[col])
-        
-        elif state.mode == MODE_INSERTS:
+
+        elif mode == MODE_INSERTS:
             # Display inserts of the selected track
             selected = state.selected_track
             if col < len(selected.inserts):
@@ -3251,14 +3325,7 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
                 _draw_insert_cell(draw, cell_x, insert, is_insert_selected)
             else:
                 _draw_insert_cell(draw, cell_x, None, False)
-        
-        elif state.mode == MODE_TRACK:
-            selected = state.selected_track
-            _draw_track_combined_cell(draw, cell_x, selected, col)
-        
-        elif state.mode == MODE_OVERVIEW:
-            _draw_volume_cell(draw, cell_x, track)
-        
+
         # Vertical separator between cells
         draw.line([(cell_x, 0), (cell_x, 141)], fill=COLOR_SEPARATOR)
     

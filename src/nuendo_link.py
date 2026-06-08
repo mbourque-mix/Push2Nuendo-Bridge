@@ -38,7 +38,7 @@ import struct
 import os
 from state import (
     AppState, TrackInfo, InsertInfo, QuickControl,
-    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_OVERVIEW,
+    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS,
     BANK_SIZE
 )
 
@@ -330,6 +330,14 @@ class NuendoLink:
             cc_value = message[2]
             self._handle_cc(cc_num, cc_value)
         
+        # ── Value feedback — wire channel 10 (0xBA) ──
+        # Dedicated, collision-free channel for JS→bridge value feedback:
+        # CC 20-27 = bank volumes, CC 60-67 = send-enable of the active send.
+        # (On channel 0 these ranges were shadowed by the metronome/send-enable
+        # /VU handlers, leaving stale caches that absolute writes then re-sent.)
+        elif status == 0xBA and len(message) >= 3:
+            self._handle_feedback_ch10(message[1], message[2])
+
         # ── Heartbeat — Channel 15 (0xBF), CC 127 ──
         elif status == 0xBF and len(message) >= 3:
             if message[1] == 127:
@@ -366,6 +374,42 @@ class NuendoLink:
             f"{self._mtc_hours:02d}:{self._mtc_minutes:02d}:"
             f"{self._mtc_seconds:02d}.{self._mtc_frames:02d}"
         )
+
+    def _handle_feedback_ch10(self, cc_num, value):
+        """Value feedback from the JS on wire channel 10 (0xBA).
+
+        CC 20-27 = bank-track volumes, CC 60-67 = send-enable state of the
+        active send. Lives on its own channel so it can never be shadowed by
+        (or shadow) the crowded channel-0 CC map.
+        """
+        state = self.state
+
+        # ── Volumes of the 8 visible tracks (CC 20-27) ──
+        if 20 <= cc_num <= 27:
+            track_in_bank = cc_num - 20
+            abs_index = state.bank_offset + track_in_bank
+            if abs_index < len(state.tracks):
+                track = state.tracks[abs_index]
+                # Skip if encoder is being touched (avoid feedback glitch)
+                if time.time() < getattr(track, '_vol_touched_until', 0):
+                    return
+                normalized = value / 127.0
+                track.volume = normalized
+                track.volume_db = _to_db(normalized)
+                # Update touchstrip LEDs if it's the selected track
+                if abs_index == state.selected_track_index and state.touchstrip_mode == 'volume':
+                    if hasattr(self, '_touchstrip_led_callback') and self._touchstrip_led_callback:
+                        self._touchstrip_led_callback(normalized)
+
+        # ── Send-enable of the active send (CC 60-67) ──
+        elif 60 <= cc_num <= 67:
+            track_in_bank = cc_num - 60
+            abs_index = state.bank_offset + track_in_bank
+            if abs_index < len(state.tracks):
+                send_idx = state.current_send
+                state.tracks[abs_index].send_enabled[send_idx] = (value > 64)
+                if hasattr(self, '_on_selection_changed'):
+                    self._on_selection_changed()
 
     def _handle_heartbeat(self):
         """Process heartbeat from Nuendo (channel 15, CC 127)."""
@@ -467,15 +511,10 @@ class NuendoLink:
                     self._vu_prev_max = prev
         
         # ── Send enable feedback (CC 24-31) ──
-        elif 24 <= cc_num <= 31:
-            track_in_bank = cc_num - 24
-            abs_index = state.bank_offset + track_in_bank
-            if abs_index < len(state.tracks):
-                send_idx = state.current_send
-                state.tracks[abs_index].send_enabled[send_idx] = (value > 64)
-                if hasattr(self, '_on_selection_changed'):
-                    self._on_selection_changed()
-        
+        # (Send-enable feedback moved to wire channel 10, CC 60-67 — see
+        #  _handle_feedback_ch10. Its old channel-0 range CC 24-31 shadowed
+        #  the volume feedback of bank tracks 5-8 and the VU of tracks 1-2.)
+
         # ── DirectAccess status feedback (CC 68) ──
         elif cc_num == 68:
             if value == 0:
@@ -1436,7 +1475,39 @@ class NuendoLink:
                 print(f"  ✓ JS Script version: {ver}")
             except UnicodeDecodeError:
                 pass
-        
+
+        # ── Bank-zone position feedback (type 0x11) ──
+        # Payload: [msb, lsb] = absolute index (14-bit) of the first track in
+        # Nuendo's bank zone. This is the TRUTH the bridge's dead-reckoned
+        # bank_offset is corrected against (lost CC 8/9 pulses, end-of-project
+        # clamping, tracks added/removed in Nuendo...). A short grace window
+        # after each bank pulse we send avoids fighting an in-flight move with
+        # a stale report; the JS re-broadcasts ~2s so a real desync that lands
+        # inside the window is still corrected right after it.
+        elif msg_type == 0x11 and len(payload) >= 2:
+            if getattr(self, '_scanning', False) or getattr(self, '_scan_returning', False):
+                return
+            if time.time() < getattr(self, '_bank_fb_ignore_until', 0):
+                return
+            bank_start = ((payload[0] & 0x7F) << 7) | (payload[1] & 0x7F)
+            # Plausibility guard: a glitched DA read (seen when opening a
+            # plugin UI) can report a bogus position. Never accept a bank
+            # start outside the known project, or beyond our track cache —
+            # a wrong jump here makes every visible track show as a blank
+            # default ("lost all names/colours").
+            total = getattr(self.state, 'total_tracks', 0)
+            if total > 0 and bank_start >= total:
+                print(f"  Bank sync: ignoring implausible bank start {bank_start} "
+                      f"(project has {total} tracks)")
+                return
+            if bank_start >= len(self.state.tracks):
+                return
+            if bank_start != self.state.bank_offset:
+                print(f"  Bank sync: Nuendo zone starts at track {bank_start + 1} "
+                      f"(bridge thought {self.state.bank_offset + 1}) — corrected")
+                if hasattr(self, '_on_bank_switch_needed'):
+                    self._on_bank_switch_needed(bank_start)
+
         # ── DirectAccess diagnostic log (type 0x20) ──
         elif msg_type == 0x20 and len(payload) >= 1:
             try:
@@ -1547,6 +1618,10 @@ class NuendoLink:
             # Ignore VU peak clips after bank change or selection
             if cc_num in (8, 9, 80, 81, 82, 83, 84, 85, 86, 87):
                 self._vu_ignore_until = time.time() + 1.5
+            # Bank pulse (next/prev bank, shift by 1): ignore the bank-position
+            # feedback briefly so a stale pre-move report doesn't fight the move
+            if cc_num in (8, 9, 38, 39):
+                self._bank_fb_ignore_until = time.time() + 0.8
             self._midi_out.send_message([0xB0, cc_num & 0x7F, int(value) & 0x7F])
 
     def send_cc_ch2(self, cc_num, value):
@@ -1579,10 +1654,36 @@ class NuendoLink:
         if self._midi_out and self._running:
             self._midi_out.send_message([0xB6, cc_num & 0x7F, int(value) & 0x7F])
 
-    def send_cc_ch8(self, cc_num, value):
-        """Send a CC message on channel 8 (0xB7). Used for Channel Strip writes."""
+    def pulse_send_nav(self, next_send):
+        """Step the active send slot (JS sendNext/PrevBtn).
+
+        Wire channel index 10 (0xBA), CC 46 (next) / 47 (prev) — moved off
+        channel 0, where CC 46/47 are also the ABSOLUTE pan bindings of bank
+        tracks 7/8: each press used to slam a pan hard-right. The 127→0 pulse
+        guarantees a fresh rising edge on every press (a bare 127 only fired
+        the handler the first time)."""
         if self._midi_out and self._running:
-            self._midi_out.send_message([0xB7, cc_num & 0x7F, int(value) & 0x7F])
+            cc = 46 if next_send else 47
+            self._midi_out.send_message([0xBA, cc, 127])
+            self._midi_out.send_message([0xBA, cc, 0])
+
+    def send_nav_command(self, cc_num):
+        """Trigger a Navigation-page command in Nuendo: pulse CC <cc_num> on
+        channel index 0 (0xB0) 0→127 so the JS command binding fires.
+
+        Channel 0 is used (not a dedicated channel) because makeCommandBinding
+        is only confirmed to fire on channel 0 in this script — see the working
+        'Navigate'/'Down' binding for the track-nav buttons. The Navigation page
+        therefore uses otherwise-unused CC numbers on channel 0 (28-37, 48, 49,
+        59, 68, 73, 126). We emit a momentary button PRESS (127) then RELEASE (0):
+        makeCommandBinding fires the Key Command on the 127 rising edge, and the
+        trailing 0 re-arms the binding so the next press (and each hold-to-repeat
+        tick) fires again. NB: a *leading* 0 before the 127 prevented the command
+        from firing — command bindings need the 127 to be the last value, with the
+        release sent after, exactly like the working Undo/Redo buttons."""
+        if self._midi_out and self._running:
+            self._midi_out.send_message([0xB0, cc_num & 0x7F, 127])
+            self._midi_out.send_message([0xB0, cc_num & 0x7F, 0])
 
     def send_cc_ch9(self, cc_num, value):
         """Send a CC message on MIDI Remote channel index 9 (wire byte 0xB9).

@@ -20,16 +20,16 @@ import threading
 import time
 from state import (
     AppState, BANK_SIZE,
-    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_OVERVIEW, MODE_CR,
+    MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_CR,
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
     AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
+    FS_SUSTAIN, FS_PLAYSTOP, FS_PLAY, FS_STOP, FS_RECORD, FS_RECSTOP, FS_OFF, FS_OPTIONS, FS_PEDAL_CC,
 )
 from pad_grid import (
     PadGrid, KS_CHROMATIC, KS_NATURALS,
     LAYOUT_64, LAYOUT_KS8, LAYOUT_KS16, LAYOUT_DRUM,
 )
-from overview import compute_overview_layout, get_pad_color_for_overview
 from repeat import NoteRepeat
 from control_room import (
     ControlRoomState, CR_PAGES, CR_PAGE_NAMES,
@@ -51,7 +51,7 @@ BTN_MODE_SENDS   = Push2Constants.BUTTON_CLIP       # "Clip"   → mode Sends (S
 BTN_MODE_NOTE    = Push2Constants.BUTTON_NOTE       # "Note"   → MIDI note grid
 BTN_DEVICE       = Push2Constants.BUTTON_DEVICE     # "Device" → mode Device (Quick Controls)
 BTN_MODE_INSERTS = Push2Constants.BUTTON_BROWSE     # "Browse" → mode Inserts
-BTN_MODE_OVERVIEW = Push2Constants.BUTTON_SESSION   # "Session" → mode Overview
+BTN_SESSION       = Push2Constants.BUTTON_SESSION   # "Session" → XY pad
 
 # Bank navigation
 BTN_LEFT         = Push2Constants.BUTTON_LEFT       # ◄ left arrow
@@ -72,9 +72,6 @@ BTN_DELETE       = getattr(Push2Constants, 'BUTTON_DELETE', 'Delete')
 BTN_MUTE         = Push2Constants.BUTTON_MUTE
 BTN_SOLO         = Push2Constants.BUTTON_SOLO
 
-# Rescan button (7th lower row button)
-BTN_RESCAN       = Push2Constants.BUTTON_LOWER_ROW_7
-
 # Lower row buttons (for Mute/Solo/Monitor/Rec)
 BUTTONS_LOWER_ROW = [
     Push2Constants.BUTTON_LOWER_ROW_1,
@@ -87,9 +84,6 @@ BUTTONS_LOWER_ROW = [
     Push2Constants.BUTTON_LOWER_ROW_8,
 ]
 
-# Buttons to change the lower row mode (Monitor / Rec Arm)
-# CC 60 and CC 61 on the Push 2
-BTN_MONITOR_MODE = Push2Constants.BUTTON_LOWER_ROW_8  # 8th button = placeholder
 # Use the actual button names from push2-python
 # CC60 = "Stop Clip" (in Ableton), CC61 = non-standard
 # Use the physical buttons named in push2-python instead
@@ -209,9 +203,33 @@ MODE_COLORS = {
     MODE_DEVICE:  LED_CYAN,
     MODE_INSERTS: LED_BLUE,
     MODE_TRACK:   LED_WHITE,
-    MODE_OVERVIEW: LED_PURPLE,
     MODE_BROWSER: LED_BLUE,
     MODE_CHANNEL_STRIP: LED_WHITE,  # Mix button toggled into Channel Strip view
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Navigation page: the 64 pads form 4 directional "D-pads" in the corners.
+# Each entry maps a pad (row, col) → (command_cc, cluster_color).
+# command_cc is pulsed to Nuendo (channel 0) by send_nav_command; the JS script
+# binds each CC to a Cubase/Nuendo Key Command (see navCommands in Ableton_Push2.js).
+# CC numbers are otherwise-unused values on channel 0 (28-37, 48, 49, 59, 73, 108,
+# 126); channel 0 is required because makeCommandBinding only fires on channel 0.
+# row 0 = top. Clusters: TL=Zoom, TR=Scroll/tracks, BL=Markers/locators, BR=Nudge.
+# ─────────────────────────────────────────────────────────────────────────────
+NAV_ZOOM   = 21   # green
+NAV_SCROLL = 45   # blue
+NAV_MARK   = 9    # orange
+NAV_NUDGE  = 116  # purple
+
+NAV_PAD_MAP = {
+    # Top-left D-pad = Zoom   (left/right = zoom out/in H, up/down = zoom in/out V)
+    (0, 1): (30, NAV_ZOOM),  (1, 0): (28, NAV_ZOOM),  (1, 2): (29, NAV_ZOOM),  (2, 1): (31, NAV_ZOOM),
+    # Top-right D-pad = Scroll (left/right = nudge cursor L/R, up/down = tracks up/down)
+    (0, 6): (34, NAV_SCROLL),(1, 5): (32, NAV_SCROLL),(1, 7): (33, NAV_SCROLL),(2, 6): (35, NAV_SCROLL),
+    # Bottom-left D-pad = Markers (left/right = prev/next marker, up/down = locator L/R)
+    (5, 1): (48, NAV_MARK),  (6, 0): (36, NAV_MARK),  (6, 2): (37, NAV_MARK),  (7, 1): (49, NAV_MARK),
+    # Bottom-right D-pad = Nudge event (left/right = move event L/R, up/down = prev/next track)
+    (5, 6): (73, NAV_NUDGE), (6, 5): (59, NAV_NUDGE), (6, 7): (108, NAV_NUDGE), (7, 6): (126, NAV_NUDGE),
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -453,6 +471,11 @@ class Push2Controller:
         self._xy_centroid = None           # last smoothed (cx, cy) centroid, or None when lifted
         self._xy_last_sent = (None, None)  # last integer (x, y) CC values sent
 
+        # Navigation D-pad overlay (state.nav_active): hold-to-repeat state
+        self._nav_active = None            # (row, col) of the held D-pad, or None
+        self._nav_repeat_stop = None       # threading.Event to stop the repeat loop
+        self._nav_repeat_thread = None
+
         # Callback for initial scan when Nuendo connects
         self.nuendo_link._on_connected_callback = lambda: self._initial_bank_refresh()
         
@@ -513,6 +536,8 @@ class Push2Controller:
         print("  ✓ Push 2 MIDI configured")
 
         self._register_callbacks()
+        self._install_footswitch_hook()
+        self._load_settings()   # restore persisted Setup options before applying them
         self._update_all_leds()
         self._update_pad_colors()
         self._configure_touchstrip_mode()
@@ -540,7 +565,7 @@ class Push2Controller:
             try:
                 self._restore_default_palette()
                 for btn in [BTN_MODE_VOLUME, BTN_MODE_SENDS, BTN_MODE_NOTE,
-                            BTN_DEVICE, BTN_MODE_INSERTS, BTN_MODE_OVERVIEW, BTN_LEFT, BTN_RIGHT]:
+                            BTN_DEVICE, BTN_MODE_INSERTS, BTN_SESSION, BTN_LEFT, BTN_RIGHT]:
                     self.push.buttons.set_button_color(btn, LED_OFF)
             except Exception:
                 pass
@@ -723,12 +748,13 @@ class Push2Controller:
         # Delta = how much to change the value (between -1.0 and +1.0)
         delta = increment * sensitivity
         
-        # Get the current value
+        # Get the current value (the Navigation D-pad overlay no longer hijacks
+        # state.mode, so encoders always reflect the real screen mode)
         current_val = self.state.get_encoder_value_for_mode(encoder_index)
-        
+
         # Calculate the new value (clamped between 0.0 and 1.0)
         new_val = max(0.0, min(1.0, current_val + delta))
-        
+
         # Update state AND send to Nuendo
         state = self.state
         mode  = state.mode
@@ -915,15 +941,18 @@ class Push2Controller:
                 selected.pan = pan_val
                 self.nuendo_link.send_pan_change(sel_in_bank, pan_val)
             elif encoder_index >= 2 and encoder_index <= 7:
-                # Sends 1-6 — CC 48-55 routes to sendVars[currentSendIndex]
-                # Temporarily change currentSendIndex via CC 19
+                # Sends 1-6 — drive the selected track's send DIRECTLY with a
+                # relative delta (ch3 CC 20+send, same path as the Sends page).
+                # The old path wrote an ABSOLUTE level to the bank-zone send
+                # knob after retargeting the JS send index over CC 19: a stale
+                # cached level or the 10ms retarget race could slam a send to
+                # min/max (reported as "send jumped to +12").
                 send_idx = encoder_index - 2
-                # Send the send index change + the value
-                self.nuendo_link.send_cc(19, send_idx)  # Change send index in the JS
-                import time as _t; _t.sleep(0.01)
-                if send_idx < len(selected.sends):
-                    selected.sends[send_idx] = new_val
-                self.nuendo_link.send_send_change(sel_in_bank, new_val)
+                if increment > 0:
+                    midi_val = min(63, abs(increment))
+                else:
+                    midi_val = 64 + min(63, abs(increment))
+                self.nuendo_link.send_cc_ch3(20 + send_idx, midi_val)
 
     # ─────────────────────────────────────────
     # Button handling
@@ -997,9 +1026,25 @@ class Push2Controller:
             state.select_held = True
             return
 
-        # ── Master button: Shift+Master = 🎰 Vegas mode (easter egg) ──
-        if button_name == BTN_MASTER and state.shift_held:
-            self._toggle_vegas()
+        # ── Master button: Shift+Master = 🎰 Vegas; plain = Navigation D-pads ──
+        # Navigation is a pad OVERLAY (state.nav_active), independent of the
+        # screen mode: the mix pages keep the D-pads, only Note/Scale/Session
+        # restore the normal pads. Holding Master momentarily shows the nav help
+        # screen (state.master_held); otherwise the screen keeps showing the mix.
+        # Master LED stays lit while the overlay is active.
+        if button_name == BTN_MASTER:
+            state.master_held = True
+            if state.shift_held:
+                self._toggle_vegas()
+            elif not state.nav_active:
+                # Entering: clear any other pad-takeover so D-pads own the grid
+                self.pad_grid.scale_mode = False
+                self.pad_grid.ks_edit = False
+                state.nav_active = True
+                self._nav_active = None
+                self._update_pad_colors()
+                self._update_all_leds()
+            # else: already active — the ~30fps render loop shows the help while held
             return
 
         # ── Setup (toggle Setup page) ──
@@ -1029,6 +1074,7 @@ class Push2Controller:
         
         # ── Scale ──
         if BTN_SCALE and button_name == BTN_SCALE:
+            self._exit_nav(refresh_pads=False)  # Scale takes over the pads
             self.pad_grid.scale_mode = not self.pad_grid.scale_mode
             try:
                 if self.pad_grid.scale_mode:
@@ -1152,11 +1198,11 @@ class Push2Controller:
         # ── Sends Up/Down ──
         if BTN_UP and button_name == BTN_UP:
             if state.mode == MODE_SENDS:
-                self.nuendo_link.send_cc(47, 127)  # Prev send
+                self.nuendo_link.pulse_send_nav(False)  # Prev send
             return
         if BTN_DOWN and button_name == BTN_DOWN:
             if state.mode == MODE_SENDS:
-                self.nuendo_link.send_cc(46, 127)  # Next send
+                self.nuendo_link.pulse_send_nav(True)   # Next send
             return
         
         # ── Transport ──
@@ -1215,7 +1261,7 @@ class Push2Controller:
                     self._update_lower_row_leds()
                     self._update_nav_leds()
                 return
-            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY):
+            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY, MODE_TRACK, MODE_CHANNEL_STRIP):
                 if state.selected_track_index > 0:
                     new_idx = state.selected_track_index - 1
                     need_bank = new_idx < state.bank_offset
@@ -1240,6 +1286,15 @@ class Push2Controller:
                         if current_mode == MODE_INSERTS:
                             state.insert_bank_offset = 0
                             self._scan_inserts()
+                        elif current_mode == MODE_CHANNEL_STRIP:
+                            # New track → the strip DA tree is stale. Reset the
+                            # exploration so a fresh one runs for the new channel;
+                            # re-trigger now if we're drilled into a module page
+                            # (the overview refreshes from JS feedback on its own).
+                            self.nuendo_link._da_strip_explored = False
+                            state.cs_strip_da_active = False
+                            if state.cs_page != 'overview':
+                                self.nuendo_link.request_da_strip_exploration()
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
                         self._update_nav_leds()
@@ -1257,6 +1312,15 @@ class Push2Controller:
                 return
             if state.bank_offset > 0:
                 state.bank_offset = max(0, state.bank_offset - BANK_SIZE)
+                self.nuendo_link.send_cc(9, 127)
+                time.sleep(0.02)
+                self.nuendo_link.send_cc(9, 0)
+                self.nuendo_link._ignore_selection_until = time.time() + 2.0
+            else:
+                # Already at bank 1 (as far as we know): still pulse prev-bank.
+                # If Nuendo's zone had drifted right of us, this drags it back
+                # (harmless otherwise — Nuendo clamps at the top), and the
+                # bank-position feedback then re-aligns bank_offset.
                 self.nuendo_link.send_cc(9, 127)
                 time.sleep(0.02)
                 self.nuendo_link.send_cc(9, 0)
@@ -1289,7 +1353,7 @@ class Push2Controller:
                     self._update_lower_row_leds()
                     self._update_nav_leds()
                 return
-            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY):
+            if state.mode in (MODE_INSERTS, MODE_SENDS, MODE_DEVICE, MODE_XY, MODE_TRACK, MODE_CHANNEL_STRIP):
                 if state.selected_track_index < state.total_tracks - 1:
                     new_idx = state.selected_track_index + 1
                     current_mode = state.mode
@@ -1314,6 +1378,15 @@ class Push2Controller:
                         if current_mode == MODE_INSERTS:
                             state.insert_bank_offset = 0
                             self._scan_inserts()
+                        elif current_mode == MODE_CHANNEL_STRIP:
+                            # New track → the strip DA tree is stale. Reset the
+                            # exploration so a fresh one runs for the new channel;
+                            # re-trigger now if we're drilled into a module page
+                            # (the overview refreshes from JS feedback on its own).
+                            self.nuendo_link._da_strip_explored = False
+                            state.cs_strip_da_active = False
+                            if state.cs_page != 'overview':
+                                self.nuendo_link.request_da_strip_exploration()
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
                         self._update_nav_leds()
@@ -1380,6 +1453,7 @@ class Push2Controller:
             return
         
         if button_name == BTN_MODE_NOTE:
+            self._exit_nav(refresh_pads=False)  # Note restores the note pads
             if state.shift_held:
                 # Shift+Note = MIDI CC page
                 if state.mode == MODE_MIDICC:
@@ -1388,8 +1462,8 @@ class Push2Controller:
                     self._set_mode(MODE_MIDICC)
                     state.cc_edit_mode = False
                 return
-            # Return to MIDI note pads (exit Overview / MIDI CC / XY if active)
-            if state.mode in (MODE_OVERVIEW, MODE_MIDICC, MODE_XY):
+            # Return to MIDI note pads (exit MIDI CC / XY if active)
+            if state.mode in (MODE_MIDICC, MODE_XY):
                 self._set_mode(MODE_VOLUME)
             self._update_pad_colors()
             return
@@ -1464,9 +1538,9 @@ class Push2Controller:
                 self.nuendo_link.request_da_plugin_list(0, instrument=True)
             return
         
-        # ── Overview mode ──
-        if button_name == BTN_MODE_OVERVIEW:
-            # Session = XY pad (Overview mode disabled for now)
+        # ── Session button = XY pad toggle ──
+        if button_name == BTN_SESSION:
+            self._exit_nav(refresh_pads=False)  # Session takes over the pads
             if state.mode == MODE_XY:
                 self._set_mode(MODE_VOLUME)
             else:
@@ -1476,25 +1550,10 @@ class Push2Controller:
                 self._xy_last_sent = (None, None)
             self._update_pad_colors()
             return
-        
-        # ── Page ◄/► for Overview pagination ──
-        if state.mode == MODE_OVERVIEW:
-            if BTN_PAGE_LEFT and button_name == BTN_PAGE_LEFT:
-                if state.overview_page > 0:
-                    state.overview_page -= 1
-                    self._update_overview_pads()
-                return
-            if BTN_PAGE_RIGHT and button_name == BTN_PAGE_RIGHT:
-                _, _, total_rows = compute_overview_layout(state.tracks, state.total_tracks, state.overview_page)
-                max_pages = (total_rows + 7) // 8
-                if state.overview_page < max_pages - 1:
-                    state.overview_page += 1
-                    self._update_overview_pads()
-                return
-        
+
         # (Rescan moved to the Setup page, lower row 8.)
 
-        # ── Mode MIDI CC : intercepter les boutons ──
+        # ── MIDI CC mode: intercept the buttons ──
         if state.mode == MODE_MIDICC:
             # Upper row → toggle CC edit mode per channel
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
@@ -1515,29 +1574,25 @@ class Push2Controller:
                     return
             return
         
-        # ── Mode Setup : intercepter les boutons ──
+        # ── Setup mode: intercept the buttons ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', None, None, 'About']
             
-            # Upper row → select setup page
+            # Upper row → select setup page (button 7 = Reload Script action)
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
                 if button_name == btn:
+                    if i == 6:
+                        # Reload Script: re-scan tracks + re-sync state (bridge side)
+                        self._reload_bridge_state()
+                        return
                     if i < len(SETUP_PAGES) and SETUP_PAGES[i] is not None:
                         state.setup_page = i
                         self._update_all_leds()
                     return
-            
+
             # Lower row → change settings on the current page
             for i, btn in enumerate(BUTTONS_LOWER_ROW):
                 if button_name == btn:
-                    if i == 7:
-                        # Rescan tracks (available on every Setup page)
-                        for t in state.tracks:
-                            t.name = f"Track {t.index + 1}"
-                            t.color = (150, 150, 150)
-                        self._full_scan()
-                        self._update_all_leds()
-                        return
                     if state.setup_page == 0:
                         # Page 0: MIDI Controller — Aftertouch mode (buttons 1-3)
                         if i == 0:
@@ -1561,11 +1616,21 @@ class Push2Controller:
                             state.cr_phones_default = False
                         elif i == 1:
                             state.cr_phones_default = True
+                    elif state.setup_page in (3, 4):
+                        # Pages 3/4: Footswitch (pedal 1 = CC 64, pedal 2 = CC 69)
+                        pedal = state.setup_page - 2  # page 3 -> pedal 1, page 4 -> pedal 2
+                        cfg = state.footswitch.get(pedal)
+                        if cfg is not None:
+                            if i < len(FS_OPTIONS):
+                                cfg['action'] = FS_OPTIONS[i][1]   # buttons 1-7 = action
+                            elif i == 7:
+                                cfg['invert'] = not cfg.get('invert', False)  # button 8 = invert
                     self._update_all_leds()
+                    self._save_settings()
                     return
             return
-        
-        # ── Mode Control Room : intercepter les boutons ──
+
+        # ── Control Room mode: intercept the buttons ──
         if state.mode == MODE_CR:
             # Params that don't receive JS feedback when operated from Push
             # (exclusive selects vs true toggles)
@@ -1816,7 +1881,21 @@ class Push2Controller:
                     self.nuendo_link.send_note(100 + i, 0)
                     return
             return
-        
+
+        # ── Track mode: upper row 1-2 inactive, 3-8 = send 1-6 on/off ──
+        # (Encoders 3-8 are sends 1-6, so the matching upper-row buttons toggle
+        #  their on/off via Note 90+sendIdx, like the Sends page.)
+        if state.mode == MODE_TRACK:
+            for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                if button_name == btn:
+                    if i >= 2:
+                        send_idx = i - 2          # buttons 3-8 → sends 0-5
+                        self.nuendo_link.send_note(90 + send_idx, 127)
+                        time.sleep(0.01)
+                        self.nuendo_link.send_note(90 + send_idx, 0)
+                    return  # buttons 1-2 (i < 2) are inactive
+            # lower row and other buttons fall through to the default handling
+
         # ── Browser mode: intercept buttons ──
         if state.mode == MODE_BROWSER:
             # ◄► arrows: switch insert bank (slot_select) or do nothing (plugin_list)
@@ -2007,10 +2086,11 @@ class Push2Controller:
                 if state.lower_mode == LOWER_MODE_MONITOR:
                     # Shift+Mute in Monitor mode = Clear all monitors (all tracks)
                     if self.nuendo_link._da_available:
-                        # DirectAccess path: JS clears all monitors instantly
-                        self.nuendo_link.send_cc(66, 127)
+                        # DirectAccess path: JS clears all monitors instantly.
+                        # CC 98 (was 66, which collided with sendEnable CC 60-67).
+                        self.nuendo_link.send_cc(98, 127)
                         time.sleep(0.02)
-                        self.nuendo_link.send_cc(66, 0)
+                        self.nuendo_link.send_cc(98, 0)
                         self.nuendo_link._vu_ignore_until = time.time() + 3.0
                     else:
                         # Fallback: iterate banks via CC 8/9
@@ -2066,10 +2146,11 @@ class Push2Controller:
                 if state.lower_mode == LOWER_MODE_REC:
                     # Shift+Solo in Rec mode = Clear all rec arms (all tracks)
                     if self.nuendo_link._da_available:
-                        # DirectAccess path: JS clears all rec arms instantly
-                        self.nuendo_link.send_cc(67, 127)
+                        # DirectAccess path: JS clears all rec arms instantly.
+                        # CC 109 (was 67, which collided with sendEnable CC 60-67).
+                        self.nuendo_link.send_cc(109, 127)
                         time.sleep(0.02)
-                        self.nuendo_link.send_cc(67, 0)
+                        self.nuendo_link.send_cc(109, 0)
                         self.nuendo_link._vu_ignore_until = time.time() + 3.0
                     else:
                         # Fallback: iterate banks via CC 8/9
@@ -2247,6 +2328,12 @@ class Push2Controller:
         if button_name == BTN_SELECT:
             self.state.select_held = False
 
+        # ── Master release: hide the nav help screen, but KEEP the pads in
+        # Navigation mode (exit is via another mode button). The render loop
+        # reverts the screen to the underlying mix on the next frame. ──
+        if button_name == BTN_MASTER:
+            self.state.master_held = False
+
         # XY pad: upper row is disabled
         if self.state.mode == MODE_XY and button_name in BUTTONS_UPPER_ROW:
             return
@@ -2258,6 +2345,7 @@ class Push2Controller:
                 self._layout_long_fired = False
                 return
             # Short press
+            self._exit_nav(refresh_pads=False)  # Layout restores/cycles the note pads
             if self.state.mode == MODE_XY:
                 # In XY mode the pads are the XY surface — Layout returns to note pads
                 self._set_mode(MODE_VOLUME)
@@ -2534,15 +2622,6 @@ class Push2Controller:
         else:                       # QC1-8 (index 2..9 -> qc 0..7)
             self.nuendo_link.send_quick_control_change(track_param - 2, norm)
 
-    def xy_axis_label(self, axis):
-        """Human label for an axis assignment, e.g. 'Volume', 'QC3', 'CC16'."""
-        st = self.state
-        cat = st.xy_cat_x if axis == 'x' else st.xy_cat_y
-        if cat == 'cc':
-            return f"CC{st.xy_cc_x if axis == 'x' else st.xy_cc_y}"
-        idx = st.xy_track_param_x if axis == 'x' else st.xy_track_param_y
-        return XY_TRACK_PARAMS[idx]
-
     def _update_xy_pads(self):
         """Light a crosshair at the current X/Y position."""
         from pad_grid import PAD_OFF, PAD_GREEN, PAD_CYAN
@@ -2577,14 +2656,14 @@ class Push2Controller:
             self._xy_update('press', row, col, velocity)
             return
 
+        if self.state.nav_active:
+            self._handle_nav_press(row, col)
+            return
+
         if self.pad_grid.scale_mode:
             self._handle_scale_pad(row, col)
             return
         
-        # In Overview mode, pads control mute/solo/rec/monitor
-        if self.state.mode == MODE_OVERVIEW:
-            self._handle_overview_pad(row, col)
-            return
 
         # Keyswitch section is monophonic (latch or momentary): handle separately
         if self.pad_grid.is_keyswitch_layout:
@@ -2635,10 +2714,11 @@ class Push2Controller:
             self._xy_update('release', row, col, velocity)
             return
 
-        if self.pad_grid.scale_mode:
+        if self.state.nav_active:
+            self._handle_nav_release(row, col)
             return
-        
-        if self.state.mode == MODE_OVERVIEW:
+
+        if self.pad_grid.scale_mode:
             return
 
         # Keyswitch section: monophonic release (latch keeps the note held)
@@ -2678,9 +2758,195 @@ class Push2Controller:
                         except Exception:
                             pass
 
+    # ─────────────────────────────────────────
+    # Navigation page (Master button)
+    # ─────────────────────────────────────────
+
+    def _nav_stop_repeat(self):
+        """Stop any in-flight hold-to-repeat thread (idempotent)."""
+        if getattr(self, '_nav_repeat_stop', None) is not None:
+            self._nav_repeat_stop.set()
+            self._nav_repeat_stop = None
+        self._nav_repeat_thread = None
+
+    def _exit_nav(self, refresh_pads=True):
+        """Turn off the Navigation D-pad overlay (called by Note/Scale/Session/
+        Layout/XY, which take over the pads). The screen mode is untouched."""
+        if not self.state.nav_active:
+            return
+        self._nav_stop_repeat()
+        self.state.nav_active = False
+        self._nav_active = None
+        if refresh_pads:
+            self._update_pad_colors()
+        self._update_all_leds()
+
+    def _handle_nav_press(self, row, col):
+        """A navigation D-pad was pressed: fire its command once, then hold-to-repeat."""
+        entry = NAV_PAD_MAP.get((row, col))
+        if entry is None:
+            return
+        # Ignore duplicate press events for the pad that is already held — the
+        # Push can re-emit note-on while a pad is held, and spawning a second
+        # repeat thread would orphan the first (it would keep firing forever
+        # after release → command "stuck"). One held pad = one repeat thread.
+        if self._nav_active == (row, col):
+            return
+        # A different pad was pressed: stop the previous pad's repeat first.
+        self._nav_stop_repeat()
+        cc, color = entry
+        # Flash the pad white while held
+        try:
+            pad_n = 36 + (7 - row) * 8 + col
+            self._send_midi_to_push([0x90, pad_n, 122])  # bright white
+        except Exception:
+            pass
+        # Fire immediately, then start a repeat thread (held key auto-repeat)
+        self.nuendo_link.send_nav_command(cc)
+        self._nav_active = (row, col)
+        self._nav_repeat_stop = threading.Event()
+        t = threading.Thread(
+            target=self._nav_repeat_loop, args=(cc, self._nav_repeat_stop), daemon=True
+        )
+        self._nav_repeat_thread = t
+        t.start()
+
+    def _handle_nav_release(self, row, col):
+        """A navigation D-pad was released: stop repeating and restore its color."""
+        # Only the currently-held pad's release stops the repeat. (A stray
+        # release for a pad we're not tracking shouldn't kill an active repeat,
+        # but it should still restore that pad's color.)
+        if self._nav_active == (row, col) or self._nav_active is None:
+            self._nav_stop_repeat()
+            self._nav_active = None
+        entry = NAV_PAD_MAP.get((row, col))
+        if entry is not None:
+            _cc, color = entry
+            try:
+                pad_n = 36 + (7 - row) * 8 + col
+                self._send_midi_to_push([0x90, pad_n, color])
+            except Exception:
+                pass
+
+    def _nav_repeat_loop(self, cc, stop_event):
+        """Hold-to-repeat: after an initial delay, re-fire the command periodically."""
+        # Initial delay before auto-repeat kicks in
+        if stop_event.wait(0.4):
+            return
+        while not stop_event.is_set():
+            self.nuendo_link.send_nav_command(cc)
+            if stop_event.wait(0.12):
+                return
+
+    def _update_nav_pads(self):
+        """Light the four corner D-pads; all other pads off."""
+        for r in range(8):
+            for c in range(8):
+                color = NAV_PAD_MAP.get((r, c), (None, 0))[1]
+                try:
+                    pad_n = 36 + (7 - r) * 8 + c
+                    self._send_midi_to_push([0x90, pad_n, color])
+                except Exception:
+                    pass
+
+    # ─────────────────────────────────────────
+    # Footswitch / pedals (jack 1 = CC 64, jack 2 = CC 69)
+    # ─────────────────────────────────────────
+
+    def _install_footswitch_hook(self):
+        """Intercept the Push's raw MIDI so we can act on the two pedal jacks.
+
+        push2_python only surfaces CC 64 (and only as a fixed 'sustain' action),
+        and never exposes jack 2 (CC 69). We wrap push.on_midi_message so we see
+        every CC; we only act on 64 and 69 (neither is used by any Push button or
+        encoder, so there's no collision). Wrapping the instance method makes the
+        hook survive MIDI reconnects, since configure_midi_in re-binds the port
+        callback to self.on_midi_message — which now resolves to our wrapper."""
+        if getattr(self, '_footswitch_hook_installed', False):
+            return
+        push = self.push
+        if push is None:
+            return
+        original = push.on_midi_message  # bound class method, captured before shadowing
+
+        def wrapped(message):
+            try:
+                original(message)
+            finally:
+                try:
+                    if getattr(message, 'type', None) == 'control_change' and \
+                            message.control in (64, 69):
+                        self._handle_footswitch(message.control, message.value)
+                except Exception:
+                    pass
+
+        push.on_midi_message = wrapped  # instance attr shadows the class method
+        try:
+            if push.midi_in_port is not None:
+                push.midi_in_port.callback = wrapped  # rebind the already-open port
+        except Exception:
+            pass
+        self._footswitch_hook_installed = True
+        print("  ✓ Footswitch hook installed (CC 64 = pedal 1, CC 69 = pedal 2)")
+
+    def _handle_footswitch(self, cc, value):
+        """Dispatch a pedal event according to its Setup configuration."""
+        pedal = 1 if cc == 64 else 2
+        cfg = self.state.footswitch.get(pedal)
+        if not cfg:
+            return
+        pressed = value >= 64
+        if cfg.get('invert'):
+            pressed = not pressed
+        action = cfg.get('action', FS_OFF)
+
+        if action == FS_OFF:
+            return
+        if action == FS_SUSTAIN:
+            # Pass sustain through to the instrument on the notes port (channel 1)
+            self.nuendo_link.send_midi_cc_to_notes(64, 127 if pressed else 0)
+            return
+        # Momentary transport actions fire on the press edge only
+        if not pressed:
+            return
+        if action == FS_PLAY:
+            self.nuendo_link.send_cc(50, 127)
+        elif action == FS_STOP:
+            self.nuendo_link.send_cc(51, 127)
+        elif action == FS_RECORD:
+            self.nuendo_link.send_cc(52, 127)
+        elif action == FS_PLAYSTOP:
+            if getattr(self.state, 'is_playing', False):
+                self.nuendo_link.send_cc(51, 127)  # Stop
+            else:
+                self.nuendo_link.send_cc(50, 127)  # Play
+        elif action == FS_RECSTOP:
+            # Start recording, or stop if the transport is already running
+            if getattr(self.state, 'is_playing', False) or \
+                    getattr(self.state, 'is_recording', False):
+                self.nuendo_link.send_cc(51, 127)  # Stop
+            else:
+                self.nuendo_link.send_cc(52, 127)  # Record
+
+    def _reload_bridge_state(self):
+        """Reload Script (Setup, upper row 7): re-scan tracks, re-sync the
+        bridge's view of the project, and reload plugin mappings from disk
+        (so a mapping saved in the Plugin Mapper is picked up without
+        restarting the bridge)."""
+        for t in self.state.tracks:
+            t.name = f"Track {t.index + 1}"
+            t.color = (150, 150, 150)
+        self._full_scan()
+        self._load_plugin_mappings()
+        self._update_all_leds()
+        try:
+            self._flash_message("Reloaded")
+        except Exception:
+            pass
+
     def _handle_pad_aftertouch(self, pad_n, pad_ij, velocity):
         """Called when pad pressure changes (aftertouch).
-        
+
         Push 2 hardware always sends polyphonic AT (0xA0).
         We convert based on aftertouch_mode:
         - poly: forward as-is (0xA0 per note)
@@ -2695,7 +2961,7 @@ class Push2Controller:
             return
         if self.state.aftertouch_mode == AT_OFF:
             return
-        if self.state.mode == MODE_OVERVIEW or self.pad_grid.scale_mode:
+        if self.pad_grid.scale_mode:
             return
         midi_note = self.pad_grid.pad_to_note(row, col)
         if midi_note < 0:
@@ -2717,7 +2983,7 @@ class Push2Controller:
 
     def _on_playback_note(self, note, is_on):
         """Called when Nuendo plays a note. Lights up/turns off pads."""
-        if self.state.mode == MODE_OVERVIEW or self.pad_grid.scale_mode:
+        if self.pad_grid.scale_mode:
             return
         if not self.push:
             return
@@ -2778,11 +3044,12 @@ class Push2Controller:
             pass
         if not self.push or not self.push.midi_is_configured():
             return
-        
-        # In Overview mode, pads are handled by _update_overview_pads
-        if self.state.mode == MODE_OVERVIEW:
-            self._update_overview_pads()
+
+        # Navigation D-pad overlay takes priority over the screen mode's pads.
+        if self.state.nav_active:
+            self._update_nav_pads()
             return
+
 
         if self.state.mode == MODE_XY:
             self._update_xy_pads()
@@ -2842,149 +3109,6 @@ class Push2Controller:
                 except Exception:
                     pass
 
-    # ─────────────────────────────────────────
-    # Mode Overview
-    # ─────────────────────────────────────────
-
-    def _handle_overview_pad(self, row, col):
-        """Handle a pad press in Overview mode.
-        
-        - Select held + pad = select track (and optionally navigate bank)
-        - Otherwise: Mute/Solo/Mon/Rec toggle via DA (any track) or fallback (bank only)
-        """
-        state = self.state
-        pad_map, _, _ = compute_overview_layout(state.tracks, state.total_tracks, state.overview_page)
-        
-        track_idx = pad_map.get((row, col))
-        if track_idx is None:
-            return
-        
-        track = state.tracks[track_idx]
-        target_bank = (track_idx // BANK_SIZE) * BANK_SIZE
-        track_in_bank = track_idx - target_bank
-        
-        # Select held = select track (Shift + pad)
-        if state.shift_held:
-            state.selected_track_index = track_idx
-            for j, t in enumerate(state.tracks):
-                t.is_selected = (j == track_idx)
-            # Navigate bank if needed
-            if target_bank != state.bank_offset:
-                banks_diff = (target_bank - state.bank_offset) // BANK_SIZE
-                cc = 8 if banks_diff > 0 else 9
-                import threading
-                def _navigate(diff=abs(banks_diff)):
-                    for _ in range(diff):
-                        self.nuendo_link.send_cc(cc, 127)
-                        time.sleep(0.02)
-                        self.nuendo_link.send_cc(cc, 0)
-                        time.sleep(0.08)
-                    self.state.bank_offset = target_bank
-                threading.Thread(target=_navigate, daemon=True).start()
-            else:
-                self.nuendo_link.send_select_track(track_in_bank)
-                self.nuendo_link._ignore_selection_until = time.time() + 5.0
-            self._update_overview_pads()
-            return
-        
-        # Toggle Mute/Solo/Mon/Rec
-        mode = state.lower_mode
-        
-        # Try DA for any track (instantaneous, no bank constraint)
-        if self.nuendo_link._da_available:
-            # Send DA toggle command via SysEx
-            # CC 16 = DA toggle, value encodes: track_idx in high bits, function in low bits
-            # Instead, send a SysEx with track_idx and function
-            da_func = {'mute': 0, 'solo': 1, 'monitor': 2, 'rec': 3}.get(mode, 0)
-            self.nuendo_link.send_da_toggle(track_idx, da_func)
-            # Update local state
-            if mode == LOWER_MODE_MUTE:
-                track.is_muted = not track.is_muted
-            elif mode == LOWER_MODE_SOLO:
-                track.is_solo = not track.is_solo
-            elif mode == LOWER_MODE_MONITOR:
-                track.is_monitored = not track.is_monitored
-            elif mode == LOWER_MODE_REC:
-                track.is_armed = not track.is_armed
-        else:
-            # Fallback: only works for tracks in the current bank
-            if target_bank != state.bank_offset:
-                return
-            if mode == LOWER_MODE_MUTE:
-                track.is_muted = not track.is_muted
-                self.nuendo_link.send_mute_toggle(track_in_bank, track.is_muted)
-            elif mode == LOWER_MODE_SOLO:
-                track.is_solo = not track.is_solo
-                self.nuendo_link.send_solo_toggle(track_in_bank, track.is_solo)
-            elif mode == LOWER_MODE_MONITOR:
-                track.is_monitored = not track.is_monitored
-                self.nuendo_link.send_monitor_toggle(track_in_bank, track.is_monitored)
-            elif mode == LOWER_MODE_REC:
-                track.is_armed = not track.is_armed
-                self.nuendo_link.send_rec_toggle(track_in_bank, track.is_armed)
-        
-        self._update_overview_pads()
-
-    def _update_overview_pads(self):
-        """Update pad colors in Overview mode using custom palette entries."""
-        if not self.push or self.state.mode != MODE_OVERVIEW:
-            return
-        
-        state = self.state
-        pad_map, _, total_rows = compute_overview_layout(state.tracks, state.total_tracks, state.overview_page)
-        
-        any_solo = any(t.is_solo for t in state.tracks if t.name)
-        blink_on = getattr(self, '_overview_blink_phase', True)
-        
-        # Use palette indices 1-64, skipping reserved standard colors
-        _reserved = {0, 21, 37, 45, 122, 124, 110, 111, 112, 113, 114, 115, 116, 117}
-        palette_idx = 1
-        
-        for row in range(8):
-            for col in range(8):
-                track_idx = pad_map.get((row, col))
-                pad_note = 36 + (7 - row) * 8 + col
-                
-                if track_idx is None:
-                    self._send_midi_to_push([0x90, pad_note, 0])
-                    continue
-                
-                # Find next non-reserved palette index
-                while palette_idx in _reserved:
-                    palette_idx += 1
-                
-                track = state.tracks[track_idx]
-                r, g, b = track.color
-                should_blink = False
-                
-                if r == 150 and g == 150 and b == 150:
-                    r, g, b = 80, 80, 80
-                
-                if track.is_armed:
-                    r, g, b = 255, 0, 0
-                    should_blink = True
-                elif track.is_monitored:
-                    should_blink = True
-                elif track.is_muted:
-                    r, g, b = r // 4, g // 4, b // 4
-                elif any_solo:
-                    if track.is_solo:
-                        r = min(255, int(r * 1.4))
-                        g = min(255, int(g * 1.4))
-                        b = min(255, int(b * 1.4))
-                    else:
-                        r, g, b = r // 4, g // 4, b // 4
-                
-                if should_blink and not blink_on:
-                    self._send_midi_to_push([0x90, pad_note, 0])
-                else:
-                    self._set_palette_entry(palette_idx, r, g, b)
-                    self._send_midi_to_push([0x90, pad_note, palette_idx])
-                
-                palette_idx += 1
-        
-        # Flush palette
-        self._send_midi_to_push([0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x05, 0xF7])
 
     def _set_palette_entry(self, index, r, g, b):
         """Program an RGB palette entry for Push 2."""
@@ -3239,6 +3363,13 @@ class Push2Controller:
     def _set_mode(self, new_mode):
         """Change the active mode and update LEDs."""
         old_mode = self.state.mode
+        # Leaving Setup: persist options (captures the fixed-velocity value the
+        # user may have dialed in with the encoder, which isn't a button press).
+        if old_mode == MODE_SETUP and new_mode != MODE_SETUP:
+            try:
+                self._save_settings()
+            except Exception:
+                pass
         self.state.mode = new_mode
         self.state.insert_params_mode = False  # Always reset when changing mode
         # Leaving Channel Strip: clear the CS-DA ownership flag so the insert
@@ -3253,12 +3384,11 @@ class Push2Controller:
         self.nuendo_link._vu_ignore_until = time.time() + 3.0
         self._update_all_leds()
         
-        if new_mode == MODE_OVERVIEW:
-            self.state.overview_page = 0
-        elif old_mode == MODE_OVERVIEW:
-            self._restore_default_palette()
-            self._update_pad_colors()
-    
+        if self.state.nav_active:
+            # Navigation D-pad overlay persists across mix-page changes: keep
+            # the D-pads drawn after the screen mode switches.
+            self._update_nav_pads()
+
     def _set_cs_page(self, new_page):
         """
         Change the active Channel Strip sub-page and notify the JS side so
@@ -3454,18 +3584,14 @@ class Push2Controller:
             # Layout (CC 31, monochrome): always bright
             self._send_midi_to_push([0xB0, 31, 127])
             
-            # Octave Up/Down (CC 55/54, monochrome): off in Overview, bright otherwise
-            if self.state.mode == MODE_OVERVIEW:
-                self._send_midi_to_push([0xB0, 55, 0])
-                self._send_midi_to_push([0xB0, 54, 0])
-            else:
-                self._send_midi_to_push([0xB0, 55, 127])
-                self._send_midi_to_push([0xB0, 54, 127])
-            
-            # Page Left/Right (monochrome): bright in Overview, off otherwise
-            self._set_mono_led(BTN_PAGE_LEFT, 127 if self.state.mode == MODE_OVERVIEW else 0)
-            self._set_mono_led(BTN_PAGE_RIGHT, 127 if self.state.mode == MODE_OVERVIEW else 0)
-            
+            # Octave Up/Down (CC 55/54, monochrome): bright
+            self._send_midi_to_push([0xB0, 55, 127])
+            self._send_midi_to_push([0xB0, 54, 127])
+
+            # Page Left/Right (monochrome): off (Overview pagination removed)
+            self._set_mono_led(BTN_PAGE_LEFT, 0)
+            self._set_mono_led(BTN_PAGE_RIGHT, 0)
+
             # Play (CC 85, colored): white when stopped, green or purple when playing
             if self.state.is_playing:
                 if getattr(self.state, 'cycle_active', False):
@@ -3510,6 +3636,10 @@ class Push2Controller:
             # Select (monochrome) : lit at all times — it modifies the Master
             # Encoder (CR Main <-> Phones), so keep it visibly available.
             self._set_mono_led(BTN_SELECT, 127)
+
+            # Master (monochrome) : bright while the Navigation page (D-pads) is
+            # active, dim otherwise so it reads as an available toggle.
+            self._set_mono_led(BTN_MASTER, 127 if self.state.nav_active else 40)
         except Exception:
             pass
 
@@ -3524,7 +3654,7 @@ class Push2Controller:
             BTN_MODE_SENDS:   [MODE_SENDS, MODE_PAN],
             BTN_DEVICE:       [MODE_DEVICE],
             BTN_MODE_INSERTS: [MODE_INSERTS, MODE_BROWSER],
-            BTN_MODE_OVERVIEW: [MODE_OVERVIEW],
+            BTN_SESSION:      [MODE_XY],
             BTN_MODE_NOTE:    [MODE_MIDICC],
         }
         
@@ -3576,11 +3706,13 @@ class Push2Controller:
 
         # ── Setup mode: upper row = page tabs ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', None, None, None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', None, None, 'About']
             for i in range(8):
                 cc = 102 + i
                 try:
-                    if i < len(SETUP_PAGES) and SETUP_PAGES[i] is not None:
+                    if i == 6:
+                        color = BTN_DIM  # Reload Script action (every page)
+                    elif i < len(SETUP_PAGES) and SETUP_PAGES[i] is not None:
                         color = BTN_WHITE if i == state.setup_page else BTN_DIM
                     else:
                         color = LED_OFF
@@ -3607,6 +3739,25 @@ class Push2Controller:
                     if state.send_on[i]:
                         self._send_midi_to_push([0xB0, cc, BTN_WHITE])
                     elif state.send_names[i]:
+                        self._send_midi_to_push([0xB0, cc, BTN_DIM])
+                    else:
+                        self._send_midi_to_push([0xB0, cc, LED_OFF])
+                except Exception:
+                    pass
+            return
+
+        # ── Track mode: upper row 1-2 off, 3-8 = send 1-6 on/off ──
+        if state.mode == MODE_TRACK:
+            for i in range(8):
+                cc = 102 + i
+                try:
+                    if i < 2:
+                        self._send_midi_to_push([0xB0, cc, LED_OFF])
+                        continue
+                    send_idx = i - 2
+                    if send_idx < len(state.send_on) and state.send_on[send_idx]:
+                        self._send_midi_to_push([0xB0, cc, BTN_WHITE])
+                    elif send_idx < len(state.send_names) and state.send_names[send_idx]:
                         self._send_midi_to_push([0xB0, cc, BTN_DIM])
                     else:
                         self._send_midi_to_push([0xB0, cc, LED_OFF])
@@ -3938,9 +4089,7 @@ class Push2Controller:
             for i in range(8):
                 cc = 20 + i
                 try:
-                    if i == 7:
-                        self._send_midi_to_push([0xB0, cc, BTN_DIM])  # Rescan (all pages)
-                    elif state.setup_page == 0:
+                    if state.setup_page == 0:
                         if i < 3:
                             is_sel = (state.aftertouch_mode == AT_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
@@ -3959,6 +4108,18 @@ class Push2Controller:
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if not phones_default else BTN_DIM])
                         elif i == 1:
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if phones_default else BTN_DIM])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.setup_page in (3, 4):
+                        # Footswitch: buttons 1-7 = action (white when active),
+                        # button 8 = invert toggle (white when on)
+                        pedal = state.setup_page - 2
+                        cfg = state.footswitch.get(pedal, {})
+                        if i < len(FS_OPTIONS):
+                            is_sel = (cfg.get('action') == FS_OPTIONS[i][1])
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
+                        elif i == 7:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if cfg.get('invert') else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
                     else:
@@ -4264,16 +4425,6 @@ class Push2Controller:
                 if self.state.vegas_mode:
                     self._vegas_tick(_frame_count)
 
-                # Blink for Overview mode (~2Hz)
-                if self.state.mode == MODE_OVERVIEW:
-                    if not hasattr(self, '_overview_blink_counter'):
-                        self._overview_blink_counter = 0
-                    self._overview_blink_counter += 1
-                    if self._overview_blink_counter >= 8:  # ~4Hz at 30fps
-                        self._overview_blink_counter = 0
-                        self._overview_blink_phase = not getattr(self, '_overview_blink_phase', True)
-                        self._update_overview_pads()
-
                 # Blink for Record button (~2Hz) when armed
                 if not hasattr(self, '_rec_blink_counter'):
                     self._rec_blink_counter = 0
@@ -4433,28 +4584,6 @@ class Push2Controller:
             self.state.selected_insert_slot = target_slot
         
         threading.Thread(target=_do, daemon=True).start()
-
-    def _navigate_insert_to(self, target_slot):
-        """Navigate the insert viewer to a specific slot."""
-        current = self.state.selected_insert_slot
-        self.state.selected_insert_slot = target_slot
-        
-        if target_slot == 0:
-            # Reset to first slot
-            self.nuendo_link.send_cc(89, 127)
-            time.sleep(0.01)
-            self.nuendo_link.send_cc(89, 0)
-        elif target_slot != current:
-            # Reset first, then advance
-            self.nuendo_link.send_cc(89, 127)
-            time.sleep(0.01)
-            self.nuendo_link.send_cc(89, 0)
-            time.sleep(0.05)
-            for _ in range(target_slot):
-                self.nuendo_link.send_cc(1, 127)
-                time.sleep(0.01)
-                self.nuendo_link.send_cc(1, 0)
-                time.sleep(0.05)
 
     def _flash_message(self, text, secs=2.5):
         """Print a status line and show a brief on-screen overlay."""
@@ -4631,21 +4760,6 @@ class Push2Controller:
             threading.Thread(target=_after_load, daemon=True).start()
         else:
             print(f"  Browser: Load failed — DA not available")
-
-    def _browser_cycle_collection(self):
-        """Cycle to the next plugin collection and reload the list."""
-        state = self.state
-        coll_count = state.browser_collection_count
-        if coll_count <= 1:
-            # Only one collection (or unknown), nothing to cycle
-            return
-        next_idx = (state.browser_collection_index + 1) % coll_count
-        state.browser_collection_index = next_idx
-        state.browser_scroll = 0
-        state.browser_selected = 0
-        state.browser_list_ready = False
-        self.nuendo_link.request_da_plugin_list(next_idx)
-        print(f"  Browser: Switching to collection {next_idx}/{coll_count}")
 
     def _browser_clear_slot(self, slot_index):
         """Attempt to clear (remove plugin from) an insert slot."""
@@ -4834,15 +4948,19 @@ class Push2Controller:
         threading.Thread(target=_scan_thread, daemon=True).start()
 
     def _load_plugin_mappings(self):
-        """Load all plugin mappings from ~/.push2bridge/mappings/."""
+        """(Re)load all plugin mappings from ~/.push2bridge/mappings/.
+
+        Clears the in-memory dict first so deletions made in the Plugin Mapper
+        are also picked up on a Reload (Setup, upper row 7)."""
         from pathlib import Path
         import json
-        
+
+        self.state.plugin_mappings.clear()
         mappings_dir = Path.home() / ".push2bridge" / "mappings"
         if not mappings_dir.exists():
             print("  No plugin mappings found")
             return
-        
+
         count = 0
         for f in mappings_dir.glob("*.json"):
             try:
@@ -4855,6 +4973,71 @@ class Push2Controller:
         
         if count > 0:
             print(f"  ✓ Loaded {count} plugin mapping(s)")
+
+    # ─────────────────────────────────────────
+    # Persistent Setup settings (~/.push2bridge/settings.json)
+    # ─────────────────────────────────────────
+
+    def _settings_path(self):
+        from pathlib import Path
+        return Path.home() / ".push2bridge" / "settings.json"
+
+    def _load_settings(self):
+        """Load persisted Setup options (aftertouch, velocity curve, fixed
+        velocity, CR-knob default, footswitch config) if the file exists."""
+        import json
+        path = self._settings_path()
+        try:
+            if not path.exists():
+                return
+            data = json.loads(path.read_text())
+        except Exception:
+            return
+        st = self.state
+        try:
+            if 'aftertouch_mode' in data:
+                st.aftertouch_mode = data['aftertouch_mode']
+            if 'velocity_curve' in data:
+                st.velocity_curve = data['velocity_curve']
+            if 'accent_velocity' in data:
+                st.accent_velocity = int(data['accent_velocity'])
+            if 'cr_phones_default' in data:
+                st.cr_phones_default = bool(data['cr_phones_default'])
+            fs = data.get('footswitch')
+            if isinstance(fs, dict):
+                for k, cfg in fs.items():
+                    try:
+                        pedal = int(k)
+                    except (ValueError, TypeError):
+                        continue
+                    if pedal in st.footswitch and isinstance(cfg, dict):
+                        if 'action' in cfg:
+                            st.footswitch[pedal]['action'] = cfg['action']
+                        if 'invert' in cfg:
+                            st.footswitch[pedal]['invert'] = bool(cfg['invert'])
+            print("  ✓ Settings loaded")
+        except Exception as e:
+            print(f"  ⚠ Settings load error: {e}")
+
+    def _save_settings(self):
+        """Persist the current Setup options to ~/.push2bridge/settings.json."""
+        import json
+        st = self.state
+        try:
+            data = {
+                'aftertouch_mode': st.aftertouch_mode,
+                'velocity_curve': st.velocity_curve,
+                'accent_velocity': int(getattr(st, 'accent_velocity', 100)),
+                'cr_phones_default': bool(getattr(st, 'cr_phones_default', False)),
+                'footswitch': {str(k): {'action': v.get('action'),
+                                        'invert': bool(v.get('invert', False))}
+                               for k, v in st.footswitch.items()},
+            }
+            path = self._settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"  ⚠ Settings save error: {e}")
 
     def _check_insert_mapping(self, plugin_name):
         """Check if a mapping exists for the given plugin and activate it.
@@ -4967,51 +5150,163 @@ class Push2Controller:
         if not pb_params:
             print(f"  ✗ No pedalboard cache — using direct index")
             self._param_pb_to_da = {i: i for i in range(len(da_params))}
+            self._param_pb_names = {}
         else:
+            # Multi-pass matching. A single greedy pass (exact-then-fuzzy per
+            # param) let an early FUZZY match steal the DA entry a later param
+            # would have matched EXACTLY — on console-style plugins with many
+            # similar short names (e.g. bx_Console SSL 4000 E) this left mapped
+            # params orphaned ("P12 ?"). Run each strategy over ALL params
+            # before falling back to the next, looser one.
             self._param_pb_to_da = {}
-            
-            # Build DA index list for searching
+
+            def _norm(s):
+                return (s or '').lower().replace('_', ' ').strip()
+
             da_list = [(idx, info['name']) for idx, info in da_params.items()]
+            da_words = {idx: set(_norm(name).split()) for idx, name in da_list}
             matched_da = set()  # prevent double-matching
-            
+
+            pb_entries = []
             for p in pb_params:
-                pb_idx = p['index']
-                pb_name = (p.get('name') or '').strip()
-                pb_label = (p.get('label') or '').strip()
-                
-                # Convert snake_case to words: 'band_1_frequency' → ['band', '1', 'frequency']
-                pb_words = pb_name.lower().replace('_', ' ').split()
-                
-                # Strategy 1: exact name match (normalized)
-                pb_norm = pb_name.lower().replace('_', ' ').strip()
+                name = (p.get('name') or '').strip()
+                pb_entries.append((p['index'], name, _norm(name), _norm(name).split()))
+            # Keep pb names around for readable fallback labels
+            self._param_pb_names = {e[0]: e[1] for e in pb_entries}
+
+            # Pass 1 — exact normalized equality, for every param first.
+            for pb_idx, _name, pb_norm, _words in pb_entries:
+                if not pb_norm:
+                    continue
                 for da_idx, da_name in da_list:
                     if da_idx in matched_da:
                         continue
-                    if da_name.lower().strip() == pb_norm:
+                    if _norm(da_name) == pb_norm:
                         self._param_pb_to_da[pb_idx] = da_idx
                         matched_da.add(da_idx)
                         break
-                else:
-                    # Strategy 2: fuzzy word match — all pb words must appear in DA name
-                    if len(pb_words) >= 2:
-                        best_da = None
-                        best_len = 999
-                        for da_idx, da_name in da_list:
-                            if da_idx in matched_da:
-                                continue
-                            da_lower = da_name.lower()
-                            if all(w in da_lower for w in pb_words):
-                                # Prefer shortest DA name (tightest match)
-                                if len(da_name) < best_len:
-                                    best_da = da_idx
-                                    best_len = len(da_name)
-                        if best_da is not None:
-                            self._param_pb_to_da[pb_idx] = best_da
-                            matched_da.add(best_da)
-            
+
+            # Pass 2 — whole-word containment: every pb word must appear as a
+            # FULL word of the DA name. (Substring matching mis-fired on short
+            # tokens — 'in' is a substring of 'Gain', 'q' of 'Freq'.) Works for
+            # single-word names too. Tightest DA name (fewest extra words) wins.
+            for pb_idx, _name, _norm_s, pb_words in pb_entries:
+                if pb_idx in self._param_pb_to_da or not pb_words:
+                    continue
+                pw = set(pb_words)
+                best_da, best_extra = None, 999
+                for da_idx, _da_name in da_list:
+                    if da_idx in matched_da:
+                        continue
+                    dw = da_words[da_idx]
+                    if pw <= dw:
+                        extra = len(dw - pw)
+                        if extra < best_extra:
+                            best_da, best_extra = da_idx, extra
+                if best_da is not None:
+                    self._param_pb_to_da[pb_idx] = best_da
+                    matched_da.add(best_da)
+
+            # Pass 3 — relaxed substring containment (legacy), restricted to
+            # words of 3+ characters to keep the short-token noise out.
+            for pb_idx, _name, _norm_s, pb_words in pb_entries:
+                if pb_idx in self._param_pb_to_da:
+                    continue
+                words = [w for w in pb_words if len(w) >= 3]
+                if len(words) < 2:
+                    continue
+                best_da, best_len = None, 9999
+                for da_idx, da_name in da_list:
+                    if da_idx in matched_da:
+                        continue
+                    da_lower = da_name.lower()
+                    if all(w in da_lower for w in words):
+                        if len(da_name) < best_len:
+                            best_da, best_len = da_idx, len(da_name)
+                if best_da is not None:
+                    self._param_pb_to_da[pb_idx] = best_da
+                    matched_da.add(best_da)
+
+            # Pass 4 — unit-suffix tolerance: pedalboard names often carry a
+            # trailing unit token the host name lacks ('in_gain_db' vs
+            # 'In Gain', 'lc_release_s' vs 'LC Release'). Retry exact then
+            # whole-word containment with that unit word stripped.
+            _UNITS = {'db', 'hz', 'khz', 's', 'ms', 'sec', 'pct', 'percent',
+                      'deg', 'degrees', 'cents', 'st', 'semitones'}
+            stripped_entries = []
+            for pb_idx, _name, _norm_s, pb_words in pb_entries:
+                if pb_idx in self._param_pb_to_da:
+                    continue
+                if len(pb_words) >= 2 and pb_words[-1] in _UNITS:
+                    sw = pb_words[:-1]
+                    stripped_entries.append((pb_idx, ' '.join(sw), sw))
+            for pb_idx, s_norm, _sw in stripped_entries:
+                for da_idx, da_name in da_list:
+                    if da_idx in matched_da:
+                        continue
+                    if _norm(da_name) == s_norm:
+                        self._param_pb_to_da[pb_idx] = da_idx
+                        matched_da.add(da_idx)
+                        break
+            for pb_idx, _s_norm, sw in stripped_entries:
+                if pb_idx in self._param_pb_to_da:
+                    continue
+                pw = set(sw)
+                best_da, best_extra = None, 999
+                for da_idx, _da_name in da_list:
+                    if da_idx in matched_da:
+                        continue
+                    dw = da_words[da_idx]
+                    if pw <= dw:
+                        extra = len(dw - pw)
+                        if extra < best_extra:
+                            best_da, best_extra = da_idx, extra
+                if best_da is not None:
+                    self._param_pb_to_da[pb_idx] = best_da
+                    matched_da.add(best_da)
+
+            # Pass 5 — truncated host names: DA titles can arrive truncated
+            # over SysEx ('eq high mid frequenc'). Accept a DA name that is a
+            # PREFIX of the (unit-stripped) pedalboard name — 10+ chars so an
+            # accidental short prefix can't match; longest DA prefix wins.
+            for pb_idx, _name, pb_norm, pb_words in pb_entries:
+                if pb_idx in self._param_pb_to_da:
+                    continue
+                cands = [pb_norm]
+                if len(pb_words) >= 2 and pb_words[-1] in _UNITS:
+                    cands.append(' '.join(pb_words[:-1]))
+                best_da, best_len = None, 0
+                for da_idx, da_name in da_list:
+                    if da_idx in matched_da:
+                        continue
+                    dn = _norm(da_name)
+                    if len(dn) >= 10 and any(c.startswith(dn) for c in cands):
+                        if len(dn) > best_len:
+                            best_da, best_len = da_idx, len(dn)
+                if best_da is not None:
+                    self._param_pb_to_da[pb_idx] = best_da
+                    matched_da.add(best_da)
+
             matched = len(self._param_pb_to_da)
             total_pb = len(pb_params)
             print(f"  Param matching: {matched}/{total_pb} matched")
+
+            # Diagnostic: list the UNMATCHED params actually used by the mapping
+            # pages, with their closest DA names — so name mismatches are easy
+            # to spot and report.
+            used = set()
+            for pg in mapping.get("pages", []):
+                for ix in pg.get("params", []):
+                    if ix is not None and ix >= 0:
+                        used.add(ix)
+            missing = [e for e in pb_entries if e[0] in used and e[0] not in self._param_pb_to_da]
+            if missing:
+                import difflib
+                da_norm_names = [_norm(n) for _, n in da_list]
+                print(f"  ⚠ {len(missing)} mapped param(s) have no DA match:")
+                for pb_idx, name, pb_norm, _w in missing[:10]:
+                    close = difflib.get_close_matches(pb_norm, da_norm_names, n=2, cutoff=0.4)
+                    print(f"    P{pb_idx} '{name}' — closest DA names: {close}")
             
             if matched > 0:
                 # Show a few examples
@@ -5065,7 +5360,14 @@ class Push2Controller:
             # Convert pedalboard index to DA index
             da_idx = getattr(self, '_param_pb_to_da', {}).get(pb_idx)
             if da_idx is None:
-                names[enc] = f"P{pb_idx} ?"
+                # Unmatched: show the user's label (or the scanned param name)
+                # with a '?' so the slot is readable but visibly inactive.
+                fallback = ''
+                if enc < len(labels) and labels[enc]:
+                    fallback = labels[enc]
+                else:
+                    fallback = getattr(self, '_param_pb_names', {}).get(pb_idx, f"P{pb_idx}")
+                names[enc] = f"{fallback}?"
                 continue
             
             da_info = da_params.get(da_idx)

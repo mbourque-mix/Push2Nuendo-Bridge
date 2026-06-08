@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Generate PDF documents for Push2Nuendo-Bridge v1.0.5
+"""Generate PDF documents for Push2Nuendo-Bridge.
 
 Usage: python scripts/generate_docs.py
-Output: docs/*.pdf
+Output: docs/*.pdf  (file names follow the bridge version, e.g. v1_0_6)
 """
 
 import os
+import sys
 
 # Resolve paths relative to this script
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)
 _DOCS_DIR = os.path.join(_PROJECT_DIR, "docs")
 os.makedirs(_DOCS_DIR, exist_ok=True)
+
+# Pull the version from the single source of truth (src/state.py)
+sys.path.insert(0, os.path.join(_PROJECT_DIR, "src"))
+from state import BRIDGE_VERSION as VERSION          # e.g. "1.0.6"
+VUNDER = VERSION.replace(".", "_")                    # e.g. "1_0_6"
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -53,10 +59,36 @@ def footer(c,d):
     c.drawCentredString(letter[0]/2,0.5*inch,f"Push 2 / Nuendo Bridge \u2014 Page {d.page}"); c.restoreState()
 
 def build_release_notes():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, f"Push2_Nuendo_Bridge_Release_Notes_v{VUNDER}.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
     s.append(Paragraph("Release Notes", sSub))
+
+    # \u2500\u2500 Version 1.0.6 \u2500\u2500
+    s.append(Paragraph("Version 1.0.6 \u2014 June 2026", sH1))
+    s.append(Paragraph("New Features", sH2))
+    s.append(B("<b>Footswitch / pedals</b>: both Push 2 pedal jacks are now usable (jack 1 = CC 64, jack 2 = CC 69). Each pedal gets its own Setup page (Pedal 1 / Pedal 2) and can be assigned to <i>Sustain</i> (CC 64 passed through to the instrument), <i>Play</i>, <i>Stop</i>, <i>Play/Stop</i>, <i>Record</i>, <i>Rec/Stop</i> (start recording, press again to stop), or <i>Off</i>. An <i>Invert</i> option per pedal handles normally-closed switches. Defaults: Pedal 1 = Sustain, Pedal 2 = Play/Stop."))
+    s.append(B("<b>Persistent Setup settings</b>: aftertouch mode, velocity curve, fixed velocity, the Control-Room knob default and the footswitch configuration are now saved to <font face='Courier'>~/.push2bridge/settings.json</font> and restored on the next launch."))
+    s.append(B("<b>Navigation page</b> (Master button): overlays four directional D-pads on the 64 pads (corners) for Zoom, Scroll/cursor, Markers/locators and Nudge, each with hold-to-repeat. The D-pads stay active across the mix pages so you can navigate the timeline while you work; hold Master to flash an on-screen reminder. Note / Scale / Session restore the normal pads."))
+    s.append(B("<b>DirectAccess parameter capture</b> (Shift+Browse): capture a plugin's live parameters straight from Nuendo \u2014 for inserts <b>and</b> instruments \u2014 even for plugins the offline scanner can't read (iLok/PACE-protected, Waves shells, Nuendo's stock plug-ins). Capture feeds the Plugin Mapper directly, and an <b>Edit Map</b> button (Inserts parameter page) opens the Mapper on the selected plugin. The parameter cap was raised to 16384 to cover large instruments (2000+ parameters)."))
+    s.append(B("<b>Track page redesign</b> (Shift+Mix): a single track-name header (like the Sends page); the upper row's buttons 3-8 toggle sends 1-6 on/off (buttons 1-2 inactive); the arrows navigate track by track."))
+    s.append(B("<b>Control Room Phones</b>: hold <i>Select</i> and turn the Master encoder to ride the headphone (Phones) bus instead of Main; the level shows in the Mix footer. The default target is configurable in Setup \u2192 CR Knob."))
+    s.append(B("<b>Clip button cycles Sends \u2194 Pan</b> (the way Mix cycles Volume \u2194 Channel Strip), and the top-left encoder now acts as Nuendo's <b>AI Knob</b> (controls whatever the mouse is hovering)."))
+    s.append(B("<b>Plugin Mapper</b> improvements: correct default scan paths plus user-configurable folders (incl. Nuendo/Cubase stock VST3, version-independent), multi-plugin VST3 shell support, a scan progress bar with cancel / skip-current-plugin, per-plugin rescan, manufacturer/state/type filters, parameter search, drag-and-drop between slots, mapping export/import, and clearer error messages for Intel-only / PACE-protected plug-ins."))
+    s.append(Paragraph("Bug Fixes", sH2))
+    s.append(B("<b>Bank desync in large projects fixed</b>: the bridge now receives live bank-position feedback from Nuendo (via DirectAccess on the bank zone) and self-corrects its bank offset \u2014 lost bank pulses, end-of-project clamping or tracks added/removed in Nuendo no longer leave bank 1 showing the wrong tracks. After a correction the visible bank's names and colours are re-sent so the display heals itself. Pressing \u25c4 on bank 1 also re-pulses the bank zone to drag a drifted view back to the top."))
+    s.append(B("<b>MIDI CC collisions on channel 0 fixed</b>: the Navigation \u201cNudge Right\u201d D-pad moved off CC 107 (which is Solo 8) to 108, and the DirectAccess Clear-All Monitor / Rec moved off CC 66/67 (which are send-enable 7/8) to 98/109 \u2014 so Shift+Mon / Shift+Rec no longer toggle a send."))
+    s.append(B("<b>Clear All Monitor / Record</b> now only act on channels that actually expose the Monitor / Record-Enable parameter \u2014 output busses, groups, VCA and the Control Room are skipped, so a clear no longer alters their volume/pan."))
+    s.append(B("<b>Channel Strip track navigation</b>: the arrows now move track by track in Channel Strip mode and re-explore the strip for the new channel."))
+    s.append(B("<b>Plugin parameter name matching rewritten</b> (multi-pass): exact matches can no longer be stolen by earlier fuzzy ones, single-word names match, unit suffixes are tolerated ('in_gain_db' ↔ 'In Gain') and truncated host names are recognized — fixes the cryptic “P12 ?” labels and dead encoders on console-style plug-ins (e.g. bx_Console SSL 4000 E). Parameter titles are also no longer cut at 20 characters."))
+    s.append(B("<b>Send next/prev no longer nudges pans</b>: the buttons shared CC 46/47 with the absolute pan bindings of bank tracks 7/8 — every press slammed a pan hard right. They moved to a dedicated channel, and repeated presses now always step (the second press used to be ignored)."))
+    s.append(B("<b>Track-page send encoders are now relative</b>: the old absolute write could slam a send to min/max from a stale cached level (reported as “send jumped to +12”)."))
+    s.append(B("<b>Volume / send-enable feedback moved to a dedicated MIDI channel</b>: on the old shared channel the volume feedback of tracks 3-8 was swallowed by other handlers, so faders moved in Nuendo snapped back when an encoder was next touched, and send-enable feedback could register as phantom peak-clips on tracks 1/2."))
+    s.append(B("<b>Muted tracks keep their colour</b> (dimmed) in the mixer header instead of turning a flat grey."))
+    s.append(B("<b>AI Knob</b> no longer collides with the send-enable button for track 5 (it moved off CC 64)."))
+    s.append(Paragraph("Maintenance", sH2))
+    s.append(B("Internal clean-up: removed dead code and unused helpers, and translated all remaining source comments to English."))
+    s.append(PageBreak())
 
     # \u2500\u2500 Version 1.0.5 \u2500\u2500
     s.append(Paragraph("Version 1.0.5 \u2014 May 2026", sH1))
@@ -149,63 +181,78 @@ def build_mapper_guide():
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
     s.append(Paragraph("Plugin Mapper Guide \u2014 Version 1.0", sSub))
     s.append(Paragraph("1. Overview", sH1))
-    s.append(Paragraph("The Plugin Mapper lets you create custom parameter mappings for your VST3 plugins. When you focus a mapped plugin in Inserts mode, the Push 2 encoders automatically control the parameters you have assigned, organized in pages of 8.", sB))
+    s.append(Paragraph("The Plugin Mapper lets you create custom parameter mappings for your plugins. When you focus a mapped plugin in Inserts mode, the Push 2 encoders automatically control the parameters you have assigned, organized in pages of 8.", sB))
     s.append(B("<b>Scanner</b>: discovers installed VST3 plugins and extracts their parameter lists using Spotify's pedalboard library (GPL-3.0)."))
-    s.append(B("<b>Web interface</b>: a drag-and-drop UI served by FastAPI at http://localhost:8100 for creating and editing mappings."))
-    s.append(Paragraph("The server is integrated into the bridge and starts automatically if dependencies are installed. It is entirely optional.", sB))
-    s.append(Paragraph("2. Installation", sH1))
-    s.append(Paragraph("Install the required packages:", sB))
+    s.append(B("<b>DirectAccess capture</b>: for plugins the scanner cannot read (iLok/PACE-protected, Waves shells, Nuendo's stock plug-ins), press <b>Shift+Browse</b> on the Push to capture the parameters live from the running plugin inside Nuendo \u2014 works for insert effects and instruments alike."))
+    s.append(B("<b>Web interface</b>: a drag-and-drop UI served at http://localhost:8100 for creating and editing mappings. The <b>Edit Map</b> button on the Push (Inserts parameter page, lower row 4) opens it directly on the selected plugin."))
+    s.append(Paragraph("The server is integrated into the bridge and starts automatically. It is entirely optional \u2014 the bridge works fully without it.", sB))
+    s.append(Paragraph("2. Installation &amp; Requirements", sH1))
+    s.append(Paragraph("<b>Standalone app (.app / .exe): nothing to install.</b> All Mapper dependencies (fastapi, uvicorn, pedalboard) are bundled inside the application \u2014 the Mapper and its scanner work out of the box.", sB))
+    s.append(Paragraph("Only when <b>running the bridge from source</b> do you need to install the packages yourself:", sB))
     s.append(Paragraph("pip install fastapi uvicorn pedalboard", sCode))
     s.append(Paragraph("Without pedalboard (web interface only, no scanning):", sB))
     s.append(Paragraph("pip install fastapi uvicorn", sCode))
     s.append(Paragraph("Startup messages:", sB))
-    s.append(B("<b>running at http://localhost:8100, scanner ready</b> \u2014 everything installed"))
-    s.append(B("<b>running, scanner unavailable</b> \u2014 pedalboard missing"))
+    s.append(B("<b>running at http://localhost:8100, scanner ready</b> \u2014 everything available (always the case with the standalone app)"))
+    s.append(B("<b>running, scanner unavailable</b> \u2014 pedalboard missing (source installs only)"))
     s.append(B("<b>not available</b> \u2014 fastapi/uvicorn missing (bridge works normally)"))
     s.append(Paragraph("3. File Locations", sH1))
     s.append(T([['File','Location','Description'],
         ['Plugin cache','~/.push2bridge/plugin_cache.json','Scanned plugin parameters (auto-generated)'],
         ['Mappings','~/.push2bridge/mappings/*.json','One JSON file per mapped plugin'],
-        ['Settings','~/.push2bridge/mapper_settings.json','Scanner settings (directories, auto-scan)'],
+        ['Settings','~/.push2bridge/mapper_settings.json','Scanner settings (extra folders)'],
         ['Mapper source','src/mapper/','Scanner, server, and web interface files']],w=[90,210,180]))
     s.append(Spacer(1,8))
-    s.append(Paragraph("All user data is stored in <b>~/.push2bridge/</b>. Mappings are plain JSON files that can be shared, backed up, or edited manually.", sNote))
+    s.append(Paragraph("All user data is stored in <b>~/.push2bridge/</b>. Mappings are plain JSON files that can be shared, backed up, or edited manually \u2014 and exported/imported in bulk from the web interface (Export / Import buttons).", sNote))
     s.append(Paragraph("4. Scanning Plugins", sH1))
-    s.append(Paragraph("The scanner discovers VST3 plugins in standard directories:", sB))
-    s.append(B("macOS: /Library/Audio/Plug-Ins/VST3/ and ~/Library/Audio/Plug-Ins/VST3/"))
-    s.append(B("Windows: C:/Program Files/Common Files/VST3/"))
-    s.append(Paragraph("To scan, open the web interface and click Scan. Each plugin is loaded in an isolated subprocess with a 30-second timeout.", sB))
+    s.append(Paragraph("The scanner discovers VST3 plugins in the standard directories <b>and</b> in the Nuendo/Cubase application bundles (stock plug-ins), version-independently:", sB))
+    s.append(B("macOS: /Library/Audio/Plug-Ins/VST3, ~/Library/Audio/Plug-Ins/VST3, /Applications/Nuendo*.app/Contents/VST3, /Applications/Cubase*.app/Contents/VST3, Steinberg component folders"))
+    s.append(B("Windows: C:/Program Files/Common Files/VST3, C:/Program Files/Steinberg (recursive), C:/Program Files/Common Files/Steinberg/VST3"))
+    s.append(B("Additional folders can be added with the <b>Folders</b> button in the web interface (saved in mapper_settings.json)."))
+    s.append(Paragraph("Click <b>Scan</b> in the web interface. Each plugin is loaded in an isolated subprocess with a 120-second timeout. A <b>progress bar</b> shows the current plugin, with <b>Cancel</b> (stop the whole scan) and <b>Skip</b> (skip the plugin currently being scanned) buttons.", sB))
+    s.append(B("<b>Multi-plugin VST3 shells</b> (one .vst3 file containing several plugins) are expanded into their individual plugins."))
+    s.append(B("Plugins that fail to scan are listed as <b>ignored</b> with a reason \u2014 including explicit hints for <b>Intel-only</b> binaries (on Apple Silicon) and <b>PACE/iLok-protected</b> plugins. Each ignored entry has a <b>\u21bb rescan</b> (300s timeout) and a <b>\u2715 remove</b> button."))
+    s.append(B("WaveShell containers are skipped (they cannot be scanned offline) \u2014 capture Waves plugins with Shift+Browse instead (section 5)."))
     s.append(Paragraph("Command line: cd src/mapper &amp;&amp; python scanner.py", sCode))
     s.append(Paragraph("Options: --force (rescan all), --retry (retry errors), --stats (cache statistics).", sNote))
     s.append(PageBreak())
-    s.append(Paragraph("5. Creating Mappings", sH1))
-    s.append(Paragraph("Open http://localhost:8100 or click Plugin Mapper in the macOS menu bar.", sB))
+    s.append(Paragraph("5. DirectAccess Capture (Shift+Browse)", sH1))
+    s.append(Paragraph("Some plugins cannot be scanned from disk: iLok/PACE-protected plug-ins, Waves shells, and Nuendo's host-locked stock plug-ins. For those, capture the parameters <b>live from Nuendo</b>:", sB))
+    s.append(B("1. Load the plugin in Nuendo (insert slot, or the track's instrument)."))
+    s.append(B("2. In <b>Inserts mode</b>, select the insert and press <b>Shift+Browse</b> \u2014 or, on an instrument track in any other mode, Shift+Browse captures the <b>instrument's</b> parameters."))
+    s.append(B("3. The Push shows \u201cCapturing\u2026\u201d then the parameter count (large instruments with thousands of parameters are supported)."))
+    s.append(B("4. The plugin appears in the Mapper's list with type <b>DirectAccess</b>, ready to map like any scanned plugin."))
+    s.append(Paragraph("Tip: the <b>Edit Map</b> button (Inserts parameter page, lower row 4) opens the Mapper in your browser directly on the selected plugin.", sNote))
+    s.append(Paragraph("6. Creating Mappings", sH1))
+    s.append(Paragraph("Open http://localhost:8100 (or the Plugin Mapper entry in the macOS menu bar / Windows tray).", sB))
     s.append(Paragraph("Left Panel \u2014 Plugin List", sH3))
-    s.append(B("Lists all scanned plugins with search and filter (All / Effects / Instruments / Mapped / Unmapped)."))
+    s.append(B("Lists all scanned and captured plugins with a search box and filters: <b>manufacturer</b>, <b>kind</b> (Effect/Instrument), <b>state</b> (Mapped/Unmapped), and <b>type</b> (Scanned/DirectAccess)."))
     s.append(Paragraph("Center Panel \u2014 Parameters", sH3))
-    s.append(B("Shows all parameters of the selected plugin as draggable cards."))
+    s.append(B("Shows all parameters of the selected plugin as draggable cards, with a <b>parameter search field</b> to find a parameter by name in large lists."))
     s.append(Paragraph("Right Panel \u2014 Mapping Pages", sH3))
     s.append(B("Each page has 8 slots for the 8 Push 2 encoders."))
-    s.append(B("Drag parameters from the center panel into encoder slots."))
+    s.append(B("Drag parameters from the center panel into encoder slots \u2014 and <b>drag between slots</b> to swap two assignments."))
     s.append(B("Click Add Page for additional pages (navigate with Left/Right on Push)."))
     s.append(B("Edit short labels for each slot (displayed on Push 2 screen)."))
     s.append(B("Click Save Mapping \u2014 saved to ~/.push2bridge/mappings/{plugin_name}.json."))
     s.append(B("Click Delete Mapping to remove an existing mapping."))
-    s.append(Paragraph("6. How Mappings Work", sH1))
+    s.append(Paragraph("7. How Mappings Work", sH1))
     s.append(Paragraph("When you enter the parameter view for an insert plugin:", sB))
     s.append(B("1. The bridge checks ~/.push2bridge/mappings/ for a matching JSON file."))
     s.append(B("2. If found, it asks Nuendo (via DirectAccess) to enumerate all plugin parameters."))
-    s.append(B("3. It matches pedalboard parameter names to DA names using fuzzy word matching (e.g. 'band_1_frequency' matches 'Band 1 Frequency')."))
+    s.append(B("3. It matches scanned parameter names to DA names using fuzzy word matching (e.g. 'band_1_frequency' matches 'Band 1 Frequency')."))
     s.append(B("4. Configures the 8 encoders to control the matched parameters directly."))
     s.append(B("5. Displays parameter names and live values on the Push 2 screen."))
     s.append(Paragraph("If no mapping exists, the bridge uses Nuendo's default parameter bank.", sB))
-    s.append(Paragraph("Mappings are loaded at startup. Restart the bridge after creating or modifying mappings.", sNote))
-    s.append(Paragraph("7. Troubleshooting", sH1))
-    s.append(B("<b>Web interface not loading</b>: check that fastapi and uvicorn are installed."))
-    s.append(B("<b>Plugin not in list</b>: click Scan. Some plugins are incompatible with pedalboard."))
+    s.append(Paragraph("Mappings are loaded at startup. After creating or modifying a mapping, press <b>\u21bb Reload</b> on the Push (Setup page, upper row 7) \u2014 or restart the bridge.", sNote))
+    s.append(Paragraph("8. Troubleshooting", sH1))
+    s.append(B("<b>Plugin not in list</b>: click Scan, or add its folder via the Folders button. If it still fails (PACE/iLok, Waves, Nuendo stock), capture it with Shift+Browse (section 5)."))
+    s.append(B("<b>\u201cIntel-only\u201d error on Apple Silicon</b>: the plugin has no arm64 binary \u2014 the offline scanner cannot load it. Use Shift+Browse capture instead."))
     s.append(B("<b>Parameters don't match</b>: edit the mapping JSON manually if fuzzy matching fails."))
     s.append(B("<b>Encoders don't respond</b>: ensure DA insert cache is built. Re-enter the insert to re-trigger."))
-    s.append(Paragraph("8. Dependencies", sH1))
+    s.append(B("<b>Web interface not loading</b> (source installs only): check that fastapi and uvicorn are installed."))
+    s.append(Paragraph("9. Dependencies", sH1))
+    s.append(Paragraph("Bundled inside the standalone .app/.exe; only source installs need to install them:", sB))
     s.append(T([['Package','Version','License','Purpose'],
         ['pedalboard','>=0.9.0','GPL-3.0','VST3 plugin loading and parameter extraction'],
         ['fastapi','>=0.104.0','MIT','REST API server'],
@@ -216,15 +263,15 @@ def build_mapper_guide():
     print("  done: Plugin Mapper Guide")
 
 def build_user_guide():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, f"Push2_Nuendo_Bridge_User_Guide_v{VUNDER}.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
-    s.append(Paragraph("User Guide &amp; Installation Manual \u2014 Version 1.0.5", sSub))
+    s.append(Paragraph(f"User Guide &amp; Installation Manual \u2014 Version {VERSION}", sSub))
     s.append(Paragraph("Compatible with Nuendo 14+ and Cubase 14+ \u2014 macOS and Windows", sCtr))
     s.append(Paragraph("This guide covers installation, configuration, and use of the Push 2 / Nuendo Bridge.", sB))
     # TOC
     s.append(Paragraph("Table of Contents", sH1))
-    for item in ["1. System Requirements","2. Installation \u2014 macOS","3. Installation \u2014 Windows","4. First Launch","5. Nuendo Configuration","6. Using the Bridge","7. Mixer Modes","8. Sends Mode","9. Inserts Mode","10. Plugin Browser","11. Quick Controls","12. Transport","13. Automation","14. Touchstrip","15. Note Input","16. Control Room","17. Channel Strip","18. Channel EQ Page","19. Setup Page","20. MIDI CC Controller","21. Plugin Mapper","22. Button Reference","23. MIDI Channel Allocation","24. Troubleshooting","25. Support"]:
+    for item in ["1. System Requirements","2. Installation \u2014 macOS","3. Installation \u2014 Windows","4. First Launch","5. Nuendo Configuration","6. Using the Bridge","7. Mixer Modes","8. Sends Mode","9. Inserts Mode","10. Plugin Browser","11. Quick Controls","12. Transport","13. Automation","14. Touchstrip","15. Note Input","16. Control Room","17. Channel Strip","18. Channel EQ Page","19. Setup Page","20. Navigation Page","21. MIDI CC Controller","22. Plugin Mapper","23. Button Reference","24. MIDI Channel Allocation","25. Troubleshooting","26. Support"]:
         s.append(Paragraph(item, ParagraphStyle('toc',parent=sB,spaceAfter=1,fontSize=10)))
     s.append(PageBreak())
     # 1
@@ -240,7 +287,7 @@ def build_user_guide():
     s.append(Paragraph("The pre-built .app is <b>Apple Silicon (arm64) only</b>. On an M1/M2/M3 Mac it bundles everything (Python, all dependencies and the libusb USB runtime) \u2014 no Homebrew, libusb or Python required. <b>Intel Macs: see Option B below.</b>", sNote))
     s.append(B("Step 1: Copy Push2 Nuendo Bridge.app to /Applications"))
     s.append(B("Step 2: The app is <b>not code-signed</b>, so macOS Gatekeeper blocks it on first launch. Open Terminal and remove the quarantine flag (match the version in the .app name to your copy):"))
-    s.append(Paragraph("xattr -dr com.apple.quarantine \"/Applications/Push2 Nuendo Bridge_v1.0.5.app\"", sCode))
+    s.append(Paragraph(f"xattr -dr com.apple.quarantine \"/Applications/Push2 Nuendo Bridge_v{VERSION}.app\"", sCode))
     s.append(B("Step 3: Copy Ableton_Push2.js to:<br/>~/Documents/Steinberg/Nuendo/MIDI Remote/Driver Scripts/Local/Ableton/Push2/<br/>Create the Ableton/Push2 folder if it doesn't exist."))
     s.append(B("Step 4: Double-click the app. A P2 icon appears in the menu bar."))
     s.append(Paragraph("Option B: Run from Source \u2014 Intel Macs", sH2))
@@ -286,7 +333,7 @@ def build_user_guide():
     # 6
     s.append(Paragraph("6. Using the Bridge", sH1))
     s.append(Paragraph("8 vertical zones on the Push 2 screen. Left/Right = bank by 8 tracks. Shift+Left/Right = nudge by 1 track (Volume/Pan modes).", sB))
-    s.append(T([['Button','Mode','Encoders'],['Mix','Volume','8 track volumes'],['Mix (again)','Channel Strip','Strip module params'],['Shift+Mix','Track','Vol+Pan+Sends'],['Clip','Sends','8 sends'],['Shift+Clip','Pan','8 track pans'],['Device','Quick Controls','8 QC'],['Browse','Inserts','Plugin params'],['Add Device','Plugin Browser','Browse/load plugins'],['Session','XY pad','Morph 2 track params / CC']],w=[80,90,290]))
+    s.append(T([['Button','Mode','Encoders'],['Mix','Volume','8 track volumes'],['Mix (again)','Channel Strip','Strip module params'],['Shift+Mix','Track','Vol+Pan+Sends'],['Clip','Sends','8 sends'],['Clip (again)','Pan','8 track pans'],['Device','Quick Controls','8 QC'],['Browse','Inserts','Plugin params'],['Add Device','Plugin Browser','Browse/load plugins'],['Session','XY pad','Morph 2 track params / CC'],['Master','Navigation','D-pads: zoom / scroll / markers / nudge']],w=[80,90,290]))
     s.append(Spacer(1,6))
     s.append(Paragraph("Lower row: Mute toggles Mute/Monitor. Solo toggles Solo/Rec. Shift+Mute/Solo clears all.", sB))
     # 7
@@ -388,27 +435,37 @@ def build_user_guide():
     s.append(PageBreak())
     # 19
     s.append(Paragraph("19. Setup Page", sH1))
-    s.append(Paragraph("Press Setup. Tabs: MIDI Ctrl (aftertouch), Vel Curve (5 presets), About. Rescan (reload track names/colours) is on lower-row button 8 on every Setup page.", sB))
+    s.append(Paragraph("Press Setup. The upper-row buttons switch tabs: <b>MIDI Ctrl</b>, <b>Vel Curve</b>, <b>CR Knob</b>, <b>Pedal 1</b>, <b>Pedal 2</b>, and <b>About</b>. Upper-row button 7 is <b>Reload Script</b> (re-scan tracks and re-sync the bridge's view of the project), available on every tab. All Setup choices are saved to <font face='Courier'>~/.push2bridge/settings.json</font> and restored on the next launch.", sB))
     s.append(Paragraph("MIDI Ctrl", sH2))
     s.append(B("Aftertouch mode for the pads: Polyphonic (per-note pressure), Channel (global pressure), or Off."))
     s.append(Paragraph("Vel Curve", sH2))
     s.append(B("Five velocity-response presets (Linear, Log, Exp, S-Curve, Fixed). In Fixed mode, Encoder 5 sets the fixed velocity value."))
+    s.append(Paragraph("CR Knob", sH2))
+    s.append(B("Sets what the Master encoder controls by default — Control Room <i>Main</i> or <i>Phones</i> level. Holding <i>Select</i> always gives the other one."))
+    s.append(Paragraph("Pedal 1 / Pedal 2 (Footswitch)", sH2))
+    s.append(B("The Push 2 has two pedal jacks: jack 1 sends CC 64, jack 2 sends CC 69. Each pedal has its own tab. The lower row picks the action — <i>Sustain</i> (CC 64 passed through to the instrument), <i>Play/Stop</i>, <i>Play</i>, <i>Stop</i>, <i>Rec</i>, <i>Rec/Stop</i> (start recording, press again to stop), or <i>Off</i> — and lower-row button 8 toggles <i>Invert</i> (for normally-closed pedals). Defaults: Pedal 1 = Sustain, Pedal 2 = Play/Stop."))
+    # Navigation
+    s.append(Paragraph("20. Navigation Page", sH1))
+    s.append(Paragraph("Press the <b>Master</b> button to overlay four directional D-pads on the 64 pads, one in each corner: <b>Zoom</b> (top-left), <b>Scroll / cursor</b> (top-right), <b>Markers / locators</b> (bottom-left) and <b>Nudge</b> (bottom-right). Each pad has hold-to-repeat. The overlay stays active across the mix pages, so you can navigate the timeline while you keep working — and Note, Scale or Session restore the normal pads.", sB))
+    s.append(Paragraph("Showing the legend", sH2))
+    s.append(B("<b>Hold the Master button</b> to flash an on-screen legend of the four D-pads (what each direction does). Release Master and the screen returns to the mix while the D-pads stay live. Tap Master any time you need a reminder."))
+    s.append(Paragraph("The D-pads drive Nuendo Key Commands via the MIDI Remote script. If a direction does nothing, verify the matching command name in Nuendo's File → Key Commands (names must match your version / language).", sNote))
     # 18
-    s.append(Paragraph("20. MIDI CC Controller", sH1))
+    s.append(Paragraph("21. MIDI CC Controller", sH1))
     s.append(Paragraph("Shift+Note. 8 assignable CC faders on BridgeNotes port. Upper row = edit CC number. Lower row = toggle 0/127. Defaults: CC 1,2,7,8,10,11,64,65.", sB))
     # 19
-    s.append(Paragraph("21. Plugin Mapper", sH1))
-    s.append(Paragraph("Create custom parameter mappings for VST3 plugins. Access via menu bar (Plugin Mapper) or http://localhost:8100. Mappings saved in <b>~/.push2bridge/mappings/</b>. See the separate Plugin Mapper Guide for details.", sB))
-    s.append(Paragraph("Requires: pip install fastapi uvicorn pedalboard. The bridge works without these \u2014 the Mapper is optional.", sNote))
+    s.append(Paragraph("22. Plugin Mapper", sH1))
+    s.append(Paragraph("Create custom parameter mappings for your plugins. Access via the macOS menu bar / Windows tray (Plugin Mapper) or http://localhost:8100. Plugins the scanner can't read (iLok/PACE, Waves shells, Nuendo stock plug-ins) can be captured live from Nuendo with <b>Shift+Browse</b>; the <b>Edit Map</b> button (Inserts parameter page) opens the Mapper on the selected plugin. Mappings are saved in <b>~/.push2bridge/mappings/</b> \u2014 after saving, press <b>\u21bb Reload</b> (Setup) to pick them up. See the separate Plugin Mapper Guide for details.", sB))
+    s.append(Paragraph("All Mapper dependencies are bundled in the standalone .app/.exe \u2014 nothing to install. Only source installs need: pip install fastapi uvicorn pedalboard.", sNote))
     # 20
-    s.append(Paragraph("22. Button Reference", sH1))
-    s.append(T([['Button','Action','Shift + Button'],['Mix','Volume mode (press again: Channel Strip)','Track mode'],['Clip','Sends mode','Pan mode'],['Device','Quick Controls',''],['Browse','Inserts mode',''],['Add Device','Plugin Browser',''],['Note','MIDI note pads','MIDI CC controller'],['Setup','Setup page',''],['Left/Right','Bank nav (8)','Nudge (1) in Vol/Pan'],['Play','Playback',''],['Record','Record toggle',''],['Mute','Mute/Monitor','Clear all'],['Solo','Solo/Rec arm','Clear all'],['User','Control Room',''],['Layout','Drum/Chromatic','Touchstrip cycle'],['Upper (dbl / Shift)','Edit Channel Settings',''],['Scale','Scale selector',''],['Accent','Fixed velocity',''],['Repeat','Auto-repeat','']],w=[80,170,200]))
+    s.append(Paragraph("23. Button Reference", sH1))
+    s.append(T([['Button','Action','Shift + Button'],['Mix','Volume mode (press again: Channel Strip)','Track mode'],['Clip','Sends mode (press again: Pan)',''],['Device','Quick Controls',''],['Browse','Inserts mode','Capture params (DirectAccess)'],['Add Device','Plugin Browser',''],['Session','XY pad',''],['Master','Navigation D-pads',''],['Select','(hold) Master encoder → Phones',''],['Note','MIDI note pads','MIDI CC controller'],['Setup','Setup page',''],['Left/Right','Bank nav (8) / track nav','Nudge (1) in Vol/Pan'],['Play','Playback',''],['Record','Record toggle',''],['Mute','Mute/Monitor','Clear all'],['Solo','Solo/Rec arm','Clear all'],['User','Control Room',''],['Layout','Drum/Chromatic','Touchstrip cycle'],['Upper (dbl / Shift)','Edit Channel Settings',''],['Scale','Scale selector',''],['Accent','Fixed velocity',''],['Repeat','Auto-repeat','']],w=[80,180,190]))
     s.append(PageBreak())
     # 23
-    s.append(Paragraph("23. MIDI Channel Allocation", sH1))
+    s.append(Paragraph("24. MIDI Channel Allocation", sH1))
     s.append(T([['Channel','Usage'],['1 (0xB0)','Mixer (volume, pan, transport, selection, VU)'],['2 (0xB1)','Insert plugin parameters'],['3 (0xB2)','Send levels (selected track)'],['4 (0xB3)','Insert bypass toggles'],['5 (0xB4)','Quick Controls'],['6 (0xB5)','Control Room'],['7 (0xB6)','Bank zone sends'],['8 (0xB7)','DirectAccess commands (browser, bypass, edit, strip slot, param-flip, variant)'],['9 (0xB8)','DirectAccess encoder control (mapped params, strip slots)'],['16 (0xBF)','Heartbeat']],w=[80,380]))
     # 22
-    s.append(Paragraph("24. Troubleshooting", sH1))
+    s.append(Paragraph("25. Troubleshooting", sH1))
     s.append(B("<b>Push 2 not found</b>: check USB, libusb, close Ableton Live."))
     s.append(B("<b>push2-python error</b>: install it from source \u2014 pip install git+https://github.com/ffont/push2-python.git. Use Python 3.11.9 or lower."))
     s.append(B("<b>No Nuendo connection</b>: check bridge is running; add the surface manually (MIDI Remote Manager \u2192 Add, Vendor Ableton / Model Push2)."))
@@ -418,7 +475,7 @@ def build_user_guide():
     s.append(B("<b>Track names not loading</b>: navigate Left/Right to refresh."))
     s.append(Paragraph("Logs: macOS \u2014 ~/Library/Logs/Push2NuendoBridge.log. Windows \u2014 terminal output.", sNote))
     # 25
-    s.append(Paragraph("25. Support", sH1))
+    s.append(Paragraph("26. Support", sH1))
     s.append(Paragraph("Push 2 / Nuendo Bridge is donationware.", sB))
     s.append(B("GitHub: https://github.com/mbourque-mix/Push2Nuendo-Bridge"))
     s.append(B("Buy Me A Coffee: https://buymeacoffee.com/mbourque"))
@@ -428,10 +485,10 @@ def build_user_guide():
     print("  done: User Guide")
 
 def build_windows_install_guide():
-    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
+    doc = SimpleDocTemplate(os.path.join(_DOCS_DIR, f"Push2_Nuendo_Bridge_Windows_Installation_Guide_v{VUNDER}.pdf"), pagesize=letter, topMargin=0.75*inch, bottomMargin=0.75*inch, leftMargin=inch, rightMargin=inch)
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
-    s.append(Paragraph("Windows Installation Guide — Version 1.0.5", sSub))
+    s.append(Paragraph(f"Windows Installation Guide — Version {VERSION}", sSub))
     s.append(Paragraph("Standalone .exe — no Python, no pip, no command line", sCtr))
     s.append(Paragraph("From version 1.0.4 the Windows bridge is a single self-contained executable. The Python interpreter, every dependency and the libusb USB runtime are bundled inside the .exe. You only need to set up the virtual MIDI ports (loopMIDI) and the Nuendo/Cubase MIDI Remote script — the Push 2's USB driver installs itself automatically on Windows.", sB))
     s.append(Paragraph("On Windows the bridge runs from the <b>system tray</b> (look for its icon near the clock) rather than a console window. Right-click the tray icon for status, Open Plugin Mapper, Show Log, and Quit. To run the classic console version instead, launch the .exe with the <font face='Courier'>--terminal</font> flag.", sNote))

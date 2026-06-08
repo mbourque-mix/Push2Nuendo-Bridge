@@ -73,7 +73,6 @@ pyinstaller \
     --add-data "pad_grid.py:." \
     --add-data "control_room.py:." \
     --add-data "repeat.py:." \
-    --add-data "overview.py:." \
     --add-data "main_macos.py:." \
     --add-data "assets:assets" \
     --add-data "mapper:mapper" \
@@ -120,12 +119,15 @@ rm -rf build *.spec
 # Copy JS script into dist
 cp "$PROJECT_DIR/Ableton_Push2.js" "$PROJECT_DIR/dist/"
 
-# Copy docs if they exist
+# Copy docs if they exist. PDF names follow the bundle version (v1_0_6, …); the
+# Plugin Mapper guide is versioned on minor only (v1_0). Any that don't exist
+# yet (e.g. before regenerating docs) are simply skipped.
+VUNDER="$(echo "$VERSION" | tr '.' '_')"
 for pdf in \
-    "Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf" \
-    "Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf" \
+    "Push2_Nuendo_Bridge_User_Guide_v${VUNDER}.pdf" \
+    "Push2_Nuendo_Bridge_Release_Notes_v${VUNDER}.pdf" \
     "Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf" \
-    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf"; do
+    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v${VUNDER}.pdf"; do
     [ -f "$PROJECT_DIR/docs/$pdf" ] && cp "$PROJECT_DIR/docs/$pdf" "$PROJECT_DIR/dist/"
 done
 

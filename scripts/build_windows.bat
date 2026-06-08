@@ -96,7 +96,6 @@ pyinstaller ^
     --add-data "pad_grid.py;." ^
     --add-data "control_room.py;." ^
     --add-data "repeat.py;." ^
-    --add-data "overview.py;." ^
     --add-data "main_windows.py;." ^
     --collect-all pystray ^
     --hidden-import main_windows ^
@@ -107,7 +106,6 @@ pyinstaller ^
     --hidden-import pad_grid ^
     --hidden-import control_room ^
     --hidden-import repeat ^
-    --hidden-import overview ^
     !ADD_LIBUSB! ^
     --hidden-import push2_python ^
     --hidden-import push2_python.constants ^
@@ -157,8 +155,16 @@ rmdir /s /q "%SRC_DIR%\dist"   2>nul
 del /q "%SRC_DIR%\%APP_NAME%.spec" 2>nul
 
 REM ── Bundle the JS script + docs next to the .exe ──
+REM Only the CURRENT version's PDFs (a *.pdf wildcard would also pick up stale
+REM PDFs from older versions left in docs\). VUNDER = version with dots -> _
 copy "%PROJECT_DIR%\Ableton_Push2.js" "%PROJECT_DIR%\dist\" >nul
-for %%P in ("%PROJECT_DIR%\docs\*.pdf") do copy "%%P" "%PROJECT_DIR%\dist\" >nul 2>&1
+set "VUNDER=%VERSION:.=_%"
+for %%P in (
+    "Push2_Nuendo_Bridge_User_Guide_v%VUNDER%.pdf"
+    "Push2_Nuendo_Bridge_Release_Notes_v%VUNDER%.pdf"
+    "Push2_Nuendo_Bridge_Windows_Installation_Guide_v%VUNDER%.pdf"
+    "Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf"
+) do if exist "%PROJECT_DIR%\docs\%%~P" copy "%PROJECT_DIR%\docs\%%~P" "%PROJECT_DIR%\dist\" >nul 2>&1
 
 REM ── Zip for release ──
 echo [4/4] Creating release zip...

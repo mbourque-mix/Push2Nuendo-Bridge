@@ -18,7 +18,6 @@ MODE_SENDS   = "sends"    # Encoders control sends
 MODE_DEVICE  = "device"   # Encoders control Quick Controls / plugin parameters
 MODE_INSERTS = "inserts"  # Displays the insert list for the current track
 MODE_TRACK   = "track"    # Combined mode: Vol+Pan+Sends on the selected track
-MODE_OVERVIEW = "overview" # Overview mode: pads = project tracks
 MODE_CR      = "controlroom"  # Control Room mode
 MODE_SETUP   = "setup"    # Setup page (aftertouch mode, etc.)
 MODE_MIDICC  = "midicc"   # MIDI CC controller page
@@ -39,7 +38,7 @@ CS_PAGE_SAT = "sat"
 CS_PAGE_LIMITER = "limiter"
 
 # Bridge version
-BRIDGE_VERSION = "1.0.6-dev"
+BRIDGE_VERSION = "1.0.6"
 
 # Aftertouch modes
 AT_POLY    = "poly"       # Polyphonic aftertouch (per-note)
@@ -52,6 +51,28 @@ VC_LOG     = "log"       # Logarithmic (more sensitive at low velocities)
 VC_EXP     = "exp"       # Exponential (more sensitive at high velocities)
 VC_SCURVE  = "s-curve"   # S-curve (compressed extremes, expanded middle)
 VC_FIXED   = "fixed"     # Fixed velocity (always 100)
+
+# Footswitch / pedal actions (Push 2 has two pedal jacks: jack 1 = CC 64,
+# jack 2 = CC 69). Each pedal is assigned one of these, with an optional invert.
+FS_SUSTAIN  = "sustain"    # Pass CC 64 (sustain) through to the instrument
+FS_PLAYSTOP = "playstop"   # Toggle Play / Stop
+FS_PLAY     = "play"       # Start playback
+FS_STOP     = "stop"       # Stop playback
+FS_RECORD   = "record"     # Record
+FS_RECSTOP  = "recstop"    # Toggle Record / Stop (start recording, then stop)
+FS_OFF      = "off"        # Do nothing
+# (label, value) order shown on the Setup pedal pages (lower-row buttons 1-7)
+FS_OPTIONS = [
+    ("Sustain", FS_SUSTAIN),
+    ("Play/Stop", FS_PLAYSTOP),
+    ("Play", FS_PLAY),
+    ("Stop", FS_STOP),
+    ("Rec", FS_RECORD),
+    ("Rec/Stop", FS_RECSTOP),
+    ("Off", FS_OFF),
+]
+# Pedal jack -> the MIDI CC the Push emits for that jack
+FS_PEDAL_CC = {1: 64, 2: 69}
 
 # Number of tracks displayed simultaneously (= number of encoders)
 BANK_SIZE = 8
@@ -453,6 +474,10 @@ class AppState:
         self.shift_held = False
         self.user_held = False
         self.select_held = False  # Select + Master Encoder = CR Phones level
+        self.master_held = False  # Master held = momentarily show the Navigation help screen
+        self.nav_active = False   # Navigation D-pads overlay the grid; independent of the
+                                  # screen mode (mix pages keep the D-pads — only Note/Scale/
+                                  # Session restore the normal pads)
         # 🎰 Vegas mode (undocumented easter egg, toggled by Shift+Master)
         self.vegas_mode = False
         self.vegas_phase = 0
@@ -485,6 +510,14 @@ class AppState:
         self.setup_page = 0         # 0 = MIDI Controller, future pages...
         self.aftertouch_mode = AT_POLY  # default: polyphonic aftertouch
         self.velocity_curve = VC_LINEAR  # default: linear velocity
+
+        # ── Footswitch / pedals (jack 1 = CC 64, jack 2 = CC 69) ──
+        # Per pedal: {'action': FS_*, 'invert': bool}. In-memory like the other
+        # Setup options (reset on restart).
+        self.footswitch = {
+            1: {'action': FS_SUSTAIN,  'invert': False},  # jack 1 (CC 64)
+            2: {'action': FS_PLAYSTOP, 'invert': False},  # jack 2 (CC 69)
+        }
         
         # Pad note range label for the Mix footer (e.g. "C1-G5"), updated by the controller
         self.pad_note_range = ""
@@ -514,10 +547,7 @@ class AppState:
         # ── Plugin Mappings ──
         self.plugin_mappings = {}     # {plugin_name: mapping_data} loaded from ~/.push2bridge/mappings/
         self.active_mapping = None    # current mapping for the active insert plugin
-        
-        # ── Overview ──
-        self.overview_page = 0
-        
+
         # ── Note Repeat ──
         self.repeat_enabled = False
         self.repeat_tempo = 120.0
@@ -548,13 +578,10 @@ class AppState:
         # Holds the selected track's PreFilter, ChannelEQ, and 5 strip slots.
         # Updated by nuendo_link.py from SysEx 0x30/0x32/0x33 messages.
         self.channel_strip = ChannelStripState()
-        # Sub-page within MODE_CHANNEL_STRIP. Starts on "overview"; upper row
-        # buttons 1-6 drill into module pages, upper row 1 on a sub-page returns.
+        # Sub-page within MODE_CHANNEL_STRIP. Starts on the 8-cell module
+        # overview; upper-row buttons 1-6 drill into module pages (gate/comp/eq/
+        # tools/sat/limiter), upper-row 1 on a sub-page returns.
         self.cs_page = CS_PAGE_OVERVIEW
-        # Sub-page within MODE_CHANNEL_STRIP:
-        #   "overview"  — 8-cell module overview (Gate/Comp/EQ/Tools/Sat/Limiter/Phase/PreGain)
-        #   "gate" / "comp" / "eq" / "tools" / "sat" / "limiter" — drill-down pages (TBD)
-        self.cs_page = "overview"
 
     @property
     def visible_tracks(self):
@@ -570,36 +597,39 @@ class AppState:
             return self.tracks[self.selected_track_index]
         return self.tracks[0]
 
-    def get_encoder_value_for_mode(self, track_index_in_bank):
+    def get_encoder_value_for_mode(self, track_index_in_bank, mode=None):
         """
         Returns the value (0.0-1.0) that encoder N should reflect
         according to the active mode.
-        
-        Used by the renderer to draw encoder positions.
+
+        Used by the renderer to draw encoder positions. `mode` overrides
+        self.mode (used by the Navigation page, whose effective mode is the
+        underlying mix mode) without mutating shared state.
         """
+        m = mode if mode is not None else self.mode
         absolute_index = self.bank_offset + track_index_in_bank
         if absolute_index >= len(self.tracks):
             return 0.0
-        
+
         track = self.tracks[absolute_index]
-        
-        if self.mode == MODE_VOLUME:
+
+        if m == MODE_VOLUME:
             return track.volume
-        
-        elif self.mode == MODE_PAN:
+
+        elif m == MODE_PAN:
             # Pan goes from -1.0 to +1.0, normalize to 0.0-1.0 for display
             return (track.pan + 1.0) / 2.0
-        
-        elif self.mode == MODE_SENDS:
+
+        elif m == MODE_SENDS:
             return track.sends[self.current_send]
-        
-        elif self.mode == MODE_DEVICE:
+
+        elif m == MODE_DEVICE:
             selected = self.selected_track
             if track_index_in_bank < len(selected.quick_controls):
                 return selected.quick_controls[track_index_in_bank].value
             return 0.0
-        
-        elif self.mode == MODE_TRACK:
+
+        elif m == MODE_TRACK:
             # Combined mode on the selected track
             selected = self.selected_track
             if track_index_in_bank == 0:

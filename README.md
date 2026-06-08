@@ -2,7 +2,7 @@
 
 Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
-![Version](https://img.shields.io/badge/version-1.0.5-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.0.6-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 
@@ -57,13 +57,14 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 
 ### Plugin Mapper *(optional)*
 - Web-based parameter mapping tool at http://localhost:8100
-- **Scanner** — discovers VST3 plugins and extracts parameters using Spotify's pedalboard library (GPL-3.0)
-- **Drag-and-drop UI** — create pages of 8 encoders with custom labels
-- **Fuzzy matching** — pedalboard parameter names matched to Nuendo's DirectAccess parameters automatically
-- Mappings saved in `~/.push2bridge/mappings/` (shareable JSON files)
-- Integrated into the bridge — starts automatically if dependencies are installed
-- Access via macOS menu bar (Plugin Mapper) or directly at http://localhost:8100
-- Install dependencies: `pip install fastapi uvicorn pedalboard`
+- **Scanner** — discovers VST3 plugins (incl. Nuendo/Cubase stock plug-ins inside the app bundles, version-independent) and extracts parameters using Spotify's pedalboard library (GPL-3.0); user-configurable extra folders, multi-plugin VST3 shells, scan progress bar with Cancel/Skip, per-plugin rescan, clear hints for Intel-only / PACE-protected plug-ins
+- **DirectAccess capture (Shift+Browse)** — capture parameters live from the running plugin inside Nuendo, for plug-ins the scanner can't read (iLok/PACE, Waves shells, Nuendo stock) — works for inserts **and** instruments
+- **Drag-and-drop UI** — create pages of 8 encoders with custom labels; filters (manufacturer/kind/state/type), parameter search, slot-to-slot drag, mapping export/import
+- **Edit Map** button on the Push (Inserts parameter page) opens the Mapper directly on the selected plugin
+- **Fuzzy matching** — scanned parameter names matched to Nuendo's DirectAccess parameters automatically
+- Mappings saved in `~/.push2bridge/mappings/` (shareable JSON files); after saving, press **↻ Reload** on the Push (Setup) to pick them up
+- Integrated into the bridge — starts automatically; access via macOS menu bar / Windows tray or directly at http://localhost:8100
+- **Nothing to install with the standalone app** — fastapi/uvicorn/pedalboard are bundled in the `.app`/`.exe`. Only source installs need `pip install fastapi uvicorn pedalboard`
 
 ### Quick Controls (Device)
 - 8 Quick Controls per selected track
@@ -87,22 +88,33 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 ### Control Room
 - 4 pages: Main, Phones, Cues, Sources
 - Full knob control for levels, click, listen, talkback
-- Master encoder always controls Main level
+- Master encoder controls the Main level by default; **hold Select** to control the Phones bus instead (the default can be swapped in Setup → CR Knob)
+- Current CR / Phones level shown in the Mix footer
+
+### Footswitch / Pedals
+- Two pedal jacks supported: **jack 1 = CC 64**, **jack 2 = CC 69**
+- Each pedal is configured on its own Setup page (Pedal 1 / Pedal 2)
+- Assignable actions: **Sustain** (CC 64 passthrough to the instrument), **Play/Stop**, **Play**, **Stop**, **Record**, **Rec/Stop** (start recording, press again to stop), **Off**
+- **Invert** option per pedal for normally-closed switches
+- Defaults: Pedal 1 = Sustain, Pedal 2 = Play/Stop
 
 ### Touchstrip
 - 3 modes (cycle with Shift+Layout): Pitch Bend / Mod Wheel / Volume Fader
 
 ### Setup Page
-- **Aftertouch Mode**: Polyphonic, Channel, or Off
-- **Velocity Curve**: Linear, Logarithmic, Exponential, S-Curve, Fixed (with adjustable value)
-- **CC Mode**: Absolute or Pick-up (direction-change detection to prevent parameter jumps)
-- **About**: Bridge version and JS Script version display
+- **MIDI Ctrl** — Aftertouch Mode: Polyphonic, Channel, or Off
+- **Vel Curve** — Velocity Curve: Linear, Logarithmic, Exponential, S-Curve, Fixed (with adjustable value)
+- **CR Knob** — Master-encoder default: Main or Phones (Select gives the other)
+- **Pedal 1 / Pedal 2** — Footswitch action + invert (see Footswitch / Pedals above)
+- **Reload Script** (upper row 7) — re-scan tracks and re-sync the bridge's view of the project
+- **About** — Bridge version and JS Script version display
+- All Setup options are **saved to `~/.push2bridge/settings.json`** and restored on the next launch
 
 ### MIDI CC Controller (Shift+Note)
 - 8 assignable CC faders with real-time value bars
 - CC number editing mode via upper row buttons
 - On/Off toggle via lower row buttons (for sustain, etc.)
-- CC Mode (Absolute/Pick-up) configurable in Setup page
+- Absolute value output (these generic CCs have no value feedback from Nuendo)
 - Default CCs: Mod Wheel, Breath, Volume, Balance, Pan, Expression, Sustain, Portamento
 
 ### Note Input
@@ -116,6 +128,12 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - 64 pads morph two parameters of the selected track (Volume / Pan / Quick Controls) or raw MIDI CC
 - Relative, pressure-weighted input (no jump on touch) with two-finger interpolation
 - Per-axis category/parameter selection, sensitivity and smoothing, plus track Mute/Solo/Monitor/Record
+
+### Navigation (Master button)
+- Overlays four directional **D-pads** on the 64 pads (corners): Zoom, Scroll/cursor, Markers/locators, Nudge — each with hold-to-repeat
+- The D-pads stay active across the mix pages, so you can navigate the timeline while you work
+- **Hold Master** to flash an on-screen reminder of each D-pad; the screen otherwise keeps showing the mix
+- Note / Scale / Session restore the normal pads
 
 ### Additional Features
 - Track color display from Nuendo
@@ -148,7 +166,7 @@ For Windows, you also need:
 
 (The Push 2's USB driver installs automatically on Windows — no Zadig needed.)
 
-For the Plugin Mapper (optional):
+For the Plugin Mapper (optional, **source installs only** — these are bundled in the standalone `.app`/`.exe`):
 ```bash
 pip install fastapi uvicorn pedalboard
 ```
@@ -164,7 +182,7 @@ The pre-built `.app` is **Apple Silicon (arm64) only**. On an M1/M2/M3 Mac, no H
 1. Copy **Push2 Nuendo Bridge.app** to `/Applications`
 2. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.5.app"
+   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.6.app"
    ```
 3. Copy **Ableton_Push2.js** to:
    ```
@@ -186,7 +204,7 @@ To build a native standalone `.app` for your architecture (e.g. an Intel `.app` 
 
 ### Windows
 
-Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
+Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_6.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
 
 Quick start:
 
@@ -261,7 +279,7 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 - **Doubled pad notes**: uncheck "In 'All MIDI Inputs'" for the Push 2 Live Port and User Port (Studio Setup → MIDI Port Setup)
 - **No connection to Nuendo**: Check that the bridge is running and MIDI Remote ports are correctly assigned (or add the surface manually in MIDI Remote Manager)
 - **Plugin Browser / Channel Strip / EQ curve not working**: Requires Nuendo 15+ (API 1.3)
-- **Plugin Mapper not loading**: Install dependencies with `pip install fastapi uvicorn pedalboard`
+- **Plugin Mapper not loading**: with the standalone app this shouldn't happen (everything is bundled) — when running from source, install the dependencies with `pip install fastapi uvicorn pedalboard`
 - **Peak clip on startup**: Normal — filtered automatically after a 3-second grace period
 - **Track names not loading**: Navigate with ◄► to force a bank refresh
 
@@ -269,10 +287,10 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 
 ## Documentation
 
-- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_5.pdf)** — Complete installation and usage manual
-- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_5.pdf)** — Version history
+- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_6.pdf)** — Complete installation and usage manual
+- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_6.pdf)** — Version history
 - **[Plugin Mapper Guide](docs/Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf)** — Plugin Mapper setup and usage
-- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_5.pdf)** — Step-by-step Windows `.exe` setup
+- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_6.pdf)** — Step-by-step Windows `.exe` setup
 
 ---
 

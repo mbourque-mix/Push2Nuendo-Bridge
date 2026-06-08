@@ -2,20 +2,20 @@
 // Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
 // Version 1.0.6-dev
 //
-// Un seul bank zone de 8 canaux.
+// A single bank zone of 8 channels.
 // Banking via mNextBank/mPrevBank (CC 8/9).
-// Scan via selButtons[0-7].setProcessValue (CC 5 start, mOnIdle séquentiel).
+// Scan via selButtons[0-7].setProcessValue (CC 5 start, sequential mOnIdle).
 // Noms/couleurs via mTrackSelection → mOnTitleChange/mOnColorChange.
 //
 // CC 20-27 : Volume     CC 40-47 : Pan
 // CC 48-55 : Send 1     CC 56-63 : Quick Controls
-// CC 80-87 : Sélection  CC 8/9 : Bank next/prev
+// CC 80-87: Selection   CC 8/9: Bank next/prev
 // CC 90-97 : Mute       CC 100-107 : Solo
 // CC 110-117 : Monitor  CC 118-125 : Record Arm
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
 
-var JS_VERSION = '1.0.6-dev';
+var JS_VERSION = '1.0.6';
 
 var midiremote_api = require('midiremote_api_v1');
 
@@ -62,11 +62,13 @@ for (var i = 0; i < 8; i++) {
     knobsQC.push(kq);
 }
 
-// Boutons Up/Down pour changer de send (CC 46/47)
+// Up/Down buttons to change the send (CC 46/47 on wire channel 10).
+// MOVED OFF channel 0: CC 46/47 there are the absolute PAN bindings of bank
+// tracks 7/8 (CC 40-47) — every next/prev-send press was also slamming a pan.
 var sendNextBtn = surface.makeButton(8, 6, 3, 2);
-sendNextBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 46);
+sendNextBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(10, 46);
 var sendPrevBtn = surface.makeButton(12, 6, 3, 2);
-sendPrevBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 47);
+sendPrevBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(10, 47);
 
 // ── BOUTONS ──
 var selButtons = [], muteButtons = [], soloButtons = [], monitorButtons = [], recButtons = [];
@@ -102,7 +104,7 @@ for (var i = 0; i < 8; i++) {
 }
 
 // ── SELECTED TRACK TOGGLE BUTTONS (CC 10-13) ──
-// Pour le mode Overview : toggle mute/solo/rec/monitor sur la piste sélectionnée
+// Toggle mute/solo/rec/monitor on the selected track
 var selMuteBtn = surface.makeButton(0, 30, 3, 2);
 selMuteBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 10);
 var selSoloBtn = surface.makeButton(4, 30, 3, 2);
@@ -156,7 +158,7 @@ undoBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlCha
 var redoBtn = surface.makeButton(4, 24, 3, 2);
 redoBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 55);
 
-// ── AUTOMATION READ/WRITE (piste sélectionnée) ──
+// ── AUTOMATION READ/WRITE (selected track) ──
 var autoReadBtn = surface.makeButton(8, 24, 3, 2);
 autoReadBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 56);
 var autoWriteBtn = surface.makeButton(12, 24, 3, 2);
@@ -166,11 +168,9 @@ autoWriteBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToContr
 var metronomeBtn = surface.makeButton(0, 26, 3, 2);
 metronomeBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 58);
 
-// ── CONTROL ROOM VOLUME (CC 65, relative) ──
-var crVolumeKnob = surface.makeKnob(4, 26, 3, 3);
-crVolumeKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop)
-    .bindToControlChange(0, 65)
-    .setTypeRelativeSignedBit();
+// (The old Control Room volume knob on CC 65 was removed: the bridge stopped
+//  sending CC 65 long ago — CR Main/Phones now use CC 79/77 — and CC 65 also
+//  collides with sendEnableButtons[5] (CC 60-67).)
 
 // ══════════════════════════════════════════════════
 // MAPPING
@@ -192,10 +192,10 @@ try {
     console.log('Bank shift not available: ' + e);
 }
 
-// Send index actif (0-7), changé par CC 46/47 ou CC 19 (set direct)
+// Active send index (0-7), changed by CC 46/47 or CC 19 (direct set)
 var currentSendIndex = 0;
 
-// Bouton pour set le send index directement (CC 19, bridge → JS)
+// Button to set the send index directly (CC 19, bridge → JS)
 var setSendIdxBtn = surface.makeButton(16, 6, 3, 2);
 setSendIdxBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 19);
 setSendIdxBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
@@ -203,7 +203,7 @@ setSendIdxBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value
     if (idx >= 0 && idx < 8) currentSendIndex = idx;
 };
 
-// État on/off de chaque send × canal
+// On/off state of each send × channel
 var sendOnState = [];
 for (var s = 0; s < 8; s++) {
     var row = [];
@@ -214,7 +214,7 @@ for (var s = 0; s < 8; s++) {
 sendNextBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
     if (value > 0.5 && currentSendIndex < 7) {
         currentSendIndex++;
-        // Notifie le bridge du send actif
+        // Notify the bridge of the active send
         midiOutput_Loop.sendMidi(activeDevice, [0xB0, 19, currentSendIndex]);
     }
 };
@@ -225,7 +225,7 @@ sendPrevBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, 
     }
 };
 
-// Custom variables pour les 8 sends × 8 canaux
+// Custom variables for the 8 sends × 8 channels
 var sendVars = [];  // sendVars[send][channel]
 for (var s = 0; s < 8; s++) {
     var sendRow = [];
@@ -235,7 +235,7 @@ for (var s = 0; s < 8; s++) {
     sendVars.push(sendRow);
 }
 
-// Custom variables pour le send enable (on/off) × 8 sends × 8 canaux
+// Custom variables for the send enable (on/off) × 8 sends × 8 channels
 var sendOnVars = [];  // sendOnVars[send][channel]
 for (var s = 0; s < 8; s++) {
     var sendOnRow = [];
@@ -245,8 +245,16 @@ for (var s = 0; s < 8; s++) {
     sendOnVars.push(sendOnRow);
 }
 
+// Keep the bank-zone channel objects: channel 0 anchors the DirectAccess used
+// for the bank-position feedback (SysEx 0x11) that keeps the bridge's
+// bank_offset in sync with Nuendo's real bank-zone position.
+var bankChannels = [];
+// Last known name per bank slot, so they can be re-sent (correctly re-filed)
+// right after a bank-position correction.
+var bankNames = [null, null, null, null, null, null, null, null];
 for (var i = 0; i < 8; i++) {
     var ch = bankZone.makeMixerBankChannel();
+    bankChannels.push(ch);
     page.makeValueBinding(knobsVol[i].mSurfaceValue, ch.mValue.mVolume);
     page.makeValueBinding(knobsPan[i].mSurfaceValue, ch.mValue.mPan);
     
@@ -256,19 +264,19 @@ for (var i = 0; i < 8; i++) {
     vuVar.mOnProcessValueChange = (function(idx) {
         return function(activeDevice, value, diff) {
             var val = Math.round(value * 127);
-            // Filtrer les valeurs max parasites (artefact lors du changement de bank/sélection)
+            // Filter spurious max values (artifact when changing bank/selection)
             if (val < 127) {
                 midiOutput_Loop.sendMidi(activeDevice, [0xB0, 30 + idx, val]);
             }
         };
     })(i);
     
-    // Binder les 8 sends (level + on) pour chaque canal
+    // Bind the 8 sends (level + on) for each channel
     for (var s = 0; s < 8; s++) {
         page.makeValueBinding(sendVars[s][i], ch.mSends.getByIndex(s).mLevel);
         page.makeValueBinding(sendOnVars[s][i], ch.mSends.getByIndex(s).mOn);
         
-        // Display value des sends → bridge via SysEx 0x07
+        // Send display value → bridge via SysEx 0x07
         // Payload: [sendIndex, channelIndex, ...chars]
         sendVars[s][i].mOnDisplayValueChange = (function(sendIdx, chIdx) {
             return function(activeDevice, value, units) {
@@ -283,15 +291,15 @@ for (var i = 0; i < 8; i++) {
         })(s, i);
     }
     
-    // Le knob send route vers le bon send via setProcessValue
+    // The send knob routes to the right send via setProcessValue
     knobsSend[i].mSurfaceValue.mOnProcessValueChange = (function(idx) {
         return function(activeDevice, value, diff) {
             sendVars[currentSendIndex][idx].setProcessValue(activeDevice, value);
         };
     })(i);
     
-    // Le bouton send enable toggle le send actif
-    // On track l'état dans un tableau
+    // The send enable button toggles the active send
+    // Track the state in an array
     sendEnableButtons[i].mSurfaceValue.mOnProcessValueChange = (function(idx) {
         return function(activeDevice, value, diff) {
             if (value > 0.5) {
@@ -302,14 +310,16 @@ for (var i = 0; i < 8; i++) {
         };
     })(i);
     // Feedback send enable → bridge
-    // On met un callback sur chaque sendOnVar pour chaque send
+    // Put a callback on each sendOnVar for each send
     for (var s = 0; s < 8; s++) {
         sendOnVars[s][i].mOnProcessValueChange = (function(sendIdx, chIdx) {
             return function(activeDevice, value, diff) {
                 sendOnState[sendIdx][chIdx] = (value > 0.5);
-                // N'envoyer le feedback que pour le send actif
+                // Only send feedback for the active send. Wire channel 10
+                // CC 60-67 — the old channel-0 CC 24-31 collided with the
+                // volume feedback (24-27) and the VU meters (30/31).
                 if (sendIdx == currentSendIndex) {
-                    midiOutput_Loop.sendMidi(activeDevice, [0xB0, 24 + chIdx, value > 0.5 ? 127 : 0]);
+                    midiOutput_Loop.sendMidi(activeDevice, [0xBA, 60 + chIdx, value > 0.5 ? 127 : 0]);
                 }
             };
         })(s, i);
@@ -343,15 +353,20 @@ for (var i = 0; i < 8; i++) {
         };
     })(i);
 
-    // Instrument Open : CC 15 channel 2 + index via Note (on utilise un bouton dédié par canal)
-    // Note 80+i channel 1 = toggle instrument UI pour canal i
+    // Instrument Open: CC 15 channel 2 + index via Note (a dedicated button per channel)
+    // Note 80+i channel 1 = toggle instrument UI for channel i
     var instrOpenBtn = surface.makeButton(80 + i, 88, 2, 2);
     instrOpenBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToNote(0, 80 + i);
     page.makeValueBinding(instrOpenBtn.mSurfaceValue, ch.mValue.mInstrumentOpen).setTypeToggle();
 
+    // Volume feedback → bridge on wire channel 10 (0xBA). MOVED OFF channel 0:
+    // there, CC 22/23 are eaten by the bridge's metronome/etc. handlers and
+    // CC 24-27 by the send-enable handler, so the cached volume floats of bank
+    // tracks 3-8 never updated from Nuendo-side fader moves (encoder grabs
+    // then jumped the fader back to the stale value).
     knobsVol[i].mSurfaceValue.mOnProcessValueChange = (function(idx) {
         return function(activeDevice, value, diff) {
-            midiOutput_Loop.sendMidi(activeDevice, [0xB0, 20 + idx, Math.round(value * 127)]);
+            midiOutput_Loop.sendMidi(activeDevice, [0xBA, 20 + idx, Math.round(value * 127)]);
         };
     })(i);
     
@@ -373,10 +388,11 @@ for (var i = 0; i < 8; i++) {
         };
     })(i);
     
-    // Nom de piste automatique via le bank zone (pas besoin de sélectionner)
+    // Automatic track name via the bank zone (no need to select)
     knobsVol[i].mSurfaceValue.mOnTitleChange = (function(idx) {
         return function(activeDevice, objectTitle, valueTitle) {
-            // objectTitle = nom de la piste
+            // objectTitle = track name
+            bankNames[idx] = objectTitle;
             var msg = [0xF0, 0x00, 0x21, 0x09, 0x01, idx & 0x7F];
             for (var c = 0; c < Math.min(objectTitle.length, 24); c++) {
                 msg.push(objectTitle.charCodeAt(c) & 0x7F);
@@ -384,7 +400,7 @@ for (var i = 0; i < 8; i++) {
             msg.push(0xF7);
             midiOutput_Loop.sendMidi(activeDevice, msg);
             
-            // Envoyer aussi la couleur stockée pour cette piste
+            // Also send the stored color for this track
             if (bankColors[idx]) {
                 midiOutput_Loop.sendMidi(activeDevice,
                     [0xF0, 0x00, 0x21, 0x09, 0x02, idx & 0x7F,
@@ -393,8 +409,8 @@ for (var i = 0; i < 8; i++) {
         };
     })(i);
     
-    // Couleur de piste automatique via le bank zone
-    // Stocker dans bankColors pour pouvoir les renvoyer avec le nom
+    // Automatic track color via the bank zone
+    // Store in bankColors so they can be re-sent with the name
     knobsVol[i].mSurfaceValue.mOnColorChange = (function(idx) {
         return function(activeDevice, r, g, b, a, isActive) {
             var cr = Math.round(r * 127);
@@ -442,7 +458,7 @@ selEditStateVar.mOnProcessValueChange = function(activeDevice, value, diff) {
 for (var i = 0; i < 8; i++) {
     page.makeValueBinding(knobsQC[i].mSurfaceValue, selectedCh.mQuickControls.getByIndex(i));
     
-    // Feedback QC process value → bridge via SysEx 0x0D (valeur normalisée)
+    // Feedback QC process value → bridge via SysEx 0x0D (normalized value)
     knobsQC[i].mSurfaceValue.mOnProcessValueChange = (function(idx) {
         return function(activeDevice, value, diff) {
             var msg = [0xF0, 0x00, 0x21, 0x09, 0x0D, idx & 0x7F, Math.round(value * 127) & 0x7F, 0xF7];
@@ -478,7 +494,7 @@ for (var i = 0; i < 8; i++) {
 }
 
 // ══════════════════════════════════════════════
-// SENDS DE LA PISTE SÉLECTIONNÉE (noms, on/off, pre/post)
+// SENDS OF THE SELECTED TRACK (names, on/off, pre/post)
 // ══════════════════════════════════════════════
 var selTrackSends = page.mHostAccess.mTrackSelection.mMixerChannel.mSends;
 
@@ -490,14 +506,14 @@ var sendPrePostVars = [];
 for (var ss = 0; ss < 8; ss++) {
     var sendSlot = selTrackSends.getByIndex(ss);
     
-    // Nom du send (via mOnTitleChange du level)
+    // Send name (via the level's mOnTitleChange)
     var sendNameVar = surface.makeCustomValueVariable('selSendName_' + ss);
     page.makeValueBinding(sendNameVar, sendSlot.mLevel);
     sendNameVars.push(sendNameVar);
     
     sendNameVar.mOnTitleChange = (function(idx) {
         return function(activeDevice, objectTitle, valueTitle) {
-            // objectTitle = nom de la destination (ex: "FX 1 - Reverb")
+            // objectTitle = destination name (e.g. "FX 1 - Reverb")
             var name = objectTitle || '';
             var bytes = [0xF0, 0x00, 0x18, idx & 0x7F];
             for (var c = 0; c < name.length && c < 20; c++) {
@@ -508,7 +524,7 @@ for (var ss = 0; ss < 8; ss++) {
         };
     })(ss);
     
-    // Display value du level
+    // Level display value
     sendNameVar.mOnDisplayValueChange = (function(idx) {
         return function(activeDevice, value, units) {
             var str = value || '';
@@ -549,7 +565,7 @@ for (var ss = 0; ss < 8; ss++) {
 }
 console.log("Selected Track Sends OK (8 sends)");
 
-// Knobs pour les send levels de la piste sélectionnée (CC 20-27 channel 3)
+// Knobs for the selected track's send levels (CC 20-27 channel 3)
 for (var sk = 0; sk < 8; sk++) {
     var sendKnob = surface.makeKnob(sk * 3, 94, 2, 2);
     sendKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop)
@@ -568,7 +584,7 @@ page.makeValueBinding(transportCycle.mSurfaceValue, page.mHostAccess.mTransport.
 page.makeCommandBinding(undoBtn.mSurfaceValue, 'Edit', 'Undo');
 page.makeCommandBinding(redoBtn.mSurfaceValue, 'Edit', 'Redo');
 
-// Navigation piste par piste (pour mode Overview, sans banking)
+// Track-by-track navigation (no banking)
 // CC 3 = select next track, CC 4 = select previous track
 var selNextTrackBtn = surface.makeButton(16, 30, 3, 2);
 selNextTrackBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 3);
@@ -617,6 +633,43 @@ var removeTracksBtn = surface.makeButton(16, 16, 2, 2);
 removeTracksBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 16);
 page.makeCommandBinding(removeTracksBtn.mSurfaceValue, 'Project', 'Remove Selected Tracks');
 
+// ── NAVIGATION PAGE commands (Push "Master" button page) ──
+// The bridge pulses CC <n> on channel index 0 (0xB0) to trigger each command.
+// Channel 0 is used (not a dedicated channel) because makeCommandBinding only
+// fires on channel 0 in this script — see the working 'Navigate'/'Down' binding
+// for the track-nav buttons (CC 3/4). These CC numbers (28-37, 48, 49, 59, 73,
+// 108, 126) are otherwise unused on channel 0. (CC 68 is avoided — it doubles as
+// DirectAccess status feedback from this script back to the bridge. CC 107 is
+// avoided — it's soloButtons[7] / CC 100-107.)
+// VERIFY these category/command names against your Cubase/Nuendo Key Commands
+// (File > Key Commands) — they must match EXACTLY (case, spaces, version/locale).
+// Edit the names below if a command doesn't fire.
+var navCommands = [
+    [28,  'Zoom', 'Zoom Out'],                   // TL ←  zoom out (horizontal)
+    [29,  'Zoom', 'Zoom In'],                    // TL →  zoom in  (horizontal)
+    [30,  'Zoom', 'Zoom In Vertically'],         // TL ↑  zoom in  (vertical)
+    [31,  'Zoom', 'Zoom Out Vertically'],        // TL ↓  zoom out (vertical)
+    [32,  'Transport', 'Nudge Cursor Left'],     // TR ←  scroll/cursor left
+    [33,  'Transport', 'Nudge Cursor Right'],    // TR →  scroll/cursor right
+    [34,  'Navigate', 'Up'],                     // TR ↑  tracks up
+    [35,  'Navigate', 'Down'],                   // TR ↓  tracks down
+    [36,  'Transport', 'Locate Previous Marker'],// BL ←  previous marker
+    [37,  'Transport', 'Locate Next Marker'],    // BL →  next marker
+    [48,  'Transport', 'To Left Locator'],       // BL ↑  left locator
+    [49,  'Transport', 'To Right Locator'],      // BL ↓  right locator
+    [59,  'Nudge', 'Left'],                      // BR ←  move event left
+    [108, 'Nudge', 'Right'],                     // BR →  move event right
+    [73,  'Navigate', 'Up'],                     // BR ↑  previous track
+    [126, 'Navigate', 'Down']                    // BR ↓  next track
+];
+var navButtons = [];   // keep references so the bindings persist (see selButtons pattern)
+for (var navI = 0; navI < navCommands.length; navI++) {
+    var nb = surface.makeButton(50 + (navI % 8) * 2, 34 + Math.floor(navI / 8) * 2, 2, 2);
+    nb.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, navCommands[navI][0]);
+    page.makeCommandBinding(nb.mSurfaceValue, navCommands[navI][1], navCommands[navI][2]);
+    navButtons.push(nb);
+}
+
 // AI Knob (Mouse Pointer)
 page.makeValueBinding(aiKnob.mSurfaceValue, page.mHostAccess.mMouseCursor.mValueUnderMouse);
 
@@ -624,7 +677,7 @@ page.makeValueBinding(aiKnob.mSurfaceValue, page.mHostAccess.mMouseCursor.mValue
 page.makeValueBinding(metronomeBtn.mSurfaceValue,
     page.mHostAccess.mTransport.mValue.mMetronomeActive).setTypeToggle();
 
-// Feedback métronome → bridge (CC 22)
+// Metronome feedback → bridge (CC 22)
 metronomeBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
     midiOutput_Loop.sendMidi(activeDevice, [0xB0, 22, value > 0.5 ? 127 : 0]);
 };
@@ -636,21 +689,21 @@ var cr = page.mHostAccess.mControlRoom;
 var crMain = cr.mMainChannel;
 var crPhones = cr.getPhonesChannelByIndex(0);
 
-// Helper : créer un knob relatif sur un CC
+// Helper: create a relative knob on a CC
 function makeCRKnob(cc) {
     var k = surface.makeKnob(cc, 40, 2, 2);
     k.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(5, cc).setTypeRelativeSignedBit();
     return k;
 }
 
-// Helper : create a toggle button on a CC (channel 6)
+// Helper: create a toggle button on a CC (channel 6)
 function makeCRBtn(cc) {
     var b = surface.makeButton(cc, 42, 2, 2);
     b.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(5, cc);
     return b;
 }
 
-// Helper : feedback valeur vers bridge via SysEx 0x0E [param_id, value_0_127]
+// Helper: value feedback to bridge via SysEx 0x0E [param_id, value_0_127]
 function crFeedback(paramId) {
     return function(activeDevice, value, numValue) {
         var val127 = Math.round(numValue * 127);
@@ -671,7 +724,7 @@ function crDisplayFeedback(paramId) {
     };
 }
 
-// Helper : feedback toggle vers bridge via SysEx 0x0F [param_id, 0/1]
+// Helper: toggle feedback to bridge via SysEx 0x0F [param_id, 0/1]
 function crToggleFeedback(paramId) {
     return function(activeDevice, value, numValue) {
         midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x0F, paramId & 0x7F, numValue > 0.5 ? 1 : 0, 0xF7]);
@@ -738,7 +791,7 @@ try {
     page.makeValueBinding(crMainListenOnBtn.mSurfaceValue, crMain.mListenEnabledValue).setTypeToggle();
     crMain.mListenEnabledValue.mOnProcessValueChange = crToggleFeedback(16);
 
-    // Cue select pour Main (exclusive)
+    // Cue select for Main (exclusive)
     var crMainCue1Btn = makeCRBtn(31);
     page.makeValueBinding(crMainCue1Btn.mSurfaceValue, crMain.getSelectSourceCueValueByIndex(0)).setTypeToggle();
     var crMainCue2Btn = makeCRBtn(49);
@@ -860,12 +913,12 @@ try {
     cr.mTalkbackDimLevelValue.mOnProcessValueChange = crFeedback(62);
     cr.mTalkbackDimLevelValue.mOnDisplayValueChange = crDisplayFeedback(62);
 
-    // ── MASTER ENCODER (toujours actif, hors mode CR) ──
+    // ── MASTER ENCODER (always active, outside CR mode) ──
     var crMasterKnob = surface.makeKnob(79, 40, 2, 2);
     crMasterKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 79).setTypeRelativeSignedBit();
     page.makeValueBinding(crMasterKnob.mSurfaceValue, crMain.mLevelValue);
 
-    // Phones toujours actif via CC 77
+    // Phones always active via CC 77
     var crPhonesAlwaysKnob = surface.makeKnob(77, 40, 2, 2);
     crPhonesAlwaysKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 77).setTypeRelativeSignedBit();
     page.makeValueBinding(crPhonesAlwaysKnob.mSurfaceValue, crPhones.mLevelValue);
@@ -875,12 +928,12 @@ try {
     console.log('ControlRoom error: ' + e);
 }
 
-// Automation Read/Write de la piste sélectionnée
+// Automation Read/Write of the selected track
 var selChAuto = page.mHostAccess.mTrackSelection.mMixerChannel;
 page.makeValueBinding(autoReadBtn.mSurfaceValue, selChAuto.mValue.mAutomationRead).setTypeToggle();
 page.makeValueBinding(autoWriteBtn.mSurfaceValue, selChAuto.mValue.mAutomationWrite).setTypeToggle();
 
-// Mute/Solo/Rec/Monitor de la piste sélectionnée (pour mode Overview)
+// Mute/Solo/Rec/Monitor of the selected track
 page.makeValueBinding(selMuteBtn.mSurfaceValue, selChAuto.mValue.mMute).setTypeToggle();
 page.makeValueBinding(selSoloBtn.mSurfaceValue, selChAuto.mValue.mSolo).setTypeToggle();
 page.makeValueBinding(selRecBtn.mSurfaceValue, selChAuto.mValue.mRecordEnable).setTypeToggle();
@@ -909,10 +962,10 @@ transportRecord.mSurfaceValue.mOnProcessValueChange = function(activeDevice, val
     midiOutput_Loop.sendMidi(activeDevice, [0xB0, 73, value > 0.5 ? 127 : 0]);
 };
 
-// Tempo et position — TODO: trouver le bon chemin API
+// Tempo and position — TODO: find the right API path
 // mTransport.mValue.mTempo et mTimeDisplay ne semblent pas exister
 
-// ── Track selection → nom et couleur ──
+// ── Track selection → name and color ──
 var nameVar = surface.makeCustomValueVariable('trackName');
 page.makeValueBinding(nameVar, page.mHostAccess.mTrackSelection.mMixerChannel.mValue.mVolume);
 
@@ -927,7 +980,7 @@ var bankColors = [null, null, null, null, null, null, null, null];
 
 nameVar.mOnTitleChange = function(activeDevice, objectTitle, valueTitle) {
     if (scanActive) {
-        // Pendant le scan : lastSelectedIndex est set par mOnIdle avant setProcessValue
+        // During the scan: lastSelectedIndex is set by mOnIdle before setProcessValue
         var idx = lastSelectedIndex;
         if (idx >= 0 && idx < 8) {
             var msg = [0xF0, 0x00, 0x21, 0x09, 0x01, idx & 0x7F];
@@ -939,7 +992,7 @@ nameVar.mOnTitleChange = function(activeDevice, objectTitle, valueTitle) {
             pendingColorForIndex = idx;
         }
     } else if (scanCooldown <= 0 && daBypassCooldown <= 0) {
-        // Hors scan et hors cooldown : envoyer le nom pour auto-switch
+        // Outside scan and cooldown: send the name for auto-switch
         var selMsg = [0xF0, 0x00, 0x21, 0x09, 0x06];
         for (var c = 0; c < Math.min(objectTitle.length, 24); c++) {
             selMsg.push(objectTitle.charCodeAt(c) & 0x7F);
@@ -990,6 +1043,8 @@ var daAvailable = false;
 var da = null;
 var daDiagDone = false;
 var daMapping = null;  // stored activeMapping from mOnActivate
+var daBank = null;        // DirectAccess anchored on bank-zone channel 0
+var daBankActive = false; // lazily activated on first bank-position poll
 var daBypassCooldown = 0;  // Suppress DA insert callbacks after our own bypass
 var pluginListQueue = null;  // Plugin list send queue (used by mOnIdle)
 
@@ -1012,6 +1067,14 @@ if (page.mHostAccess.makeDirectAccess) {
     // rather than audio effects). Triggered by Shift+Setup (DA diagnostic).
     var daChan = page.mHostAccess.makeDirectAccess(page.mHostAccess.mTrackSelection.mMixerChannel);
     var daChanActive = false;
+
+    // ── DirectAccess #4: bank-zone channel 0 (bank-position feedback) ──
+    // getMixerChannelIndex on its base object tells us the absolute mixer
+    // position of the first bank track — i.e. the REAL bank offset. Polled in
+    // mOnIdle and reported to the bridge via SysEx 0x11 so the bridge's
+    // bank_offset can never drift (lost CC pulses, end-of-project clamping,
+    // tracks added/removed...).
+    daBank = page.mHostAccess.makeDirectAccess(bankChannels[0]);
     function ensureDAChan() {
         if (!daMapping) return false;
         if (!daChanActive) { daChan.activate(daMapping); daChanActive = true; }
@@ -1128,6 +1191,21 @@ if (page.mHostAccess.makeDirectAccess) {
         return true;
     }
 
+    // True if a mixer child actually exposes the given parameter tag.
+    // Used by the Clear-All Monitor/Record routines to skip channels that don't
+    // have that param (output busses, groups, FX, VCA, Control Room). Writing a
+    // channel tag (4001/4002) to those hits unrelated params (volume/pan) and
+    // ruins the mix. Language-independent: checks tags, not parameter titles.
+    function daChildHasTag(m, childID, wantTag) {
+        try {
+            var pc = da.getNumberOfParameters(m, childID);
+            for (var p = 0; p < pc; p++) {
+                if (da.getParameterTagByIndex(m, childID, p) === wantTag) return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
     daDiagBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
         if (value < 0.5 || !daMapping || daDiagDone) return;
         if (!ensureDA()) return;
@@ -1187,9 +1265,11 @@ if (page.mHostAccess.makeDirectAccess) {
         }
     };
 
-    // ── DA Clear All Monitor (CC 66) ──
+    // ── DA Clear All Monitor (CC 98) ──
+    // (CC 66 was wrong — it collides with sendEnableButtons CC 60-67, so a clear
+    //  would also toggle a send on/off. CC 98 is unused on channel 0.)
     var daClearMonBtn = surface.makeButton(86, 22, 2, 2);
-    daClearMonBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 66);
+    daClearMonBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 98);
     daClearMonBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
         if (value < 0.5 || !daMapping) return;
         if (!ensureDA()) return;
@@ -1200,6 +1280,11 @@ if (page.mHostAccess.makeDirectAccess) {
             var cleared = 0;
             for (var i = 0; i < childCount; i++) {
                 var childID = da.getChildObjectID(m, mixConsoleID, i);
+                // Only touch channels that actually expose the Monitor param
+                // (tag 4001). Busses / groups / VCA / Control Room don't have
+                // it — blindly writing tag 4001 there hits unrelated params
+                // (volume/pan) and ruins the mix. Check the tag exists first.
+                if (!daChildHasTag(m, childID, 4001)) continue;
                 da.setParameterProcessValue(m, childID, 4001, 0);  // tag 4001 = Monitor
                 cleared++;
             }
@@ -1213,9 +1298,10 @@ if (page.mHostAccess.makeDirectAccess) {
         }
     };
 
-    // ── DA Clear All Rec (CC 67) ──
+    // ── DA Clear All Rec (CC 109) ──
+    // (CC 67 was wrong — collides with sendEnableButtons CC 60-67. CC 109 is free.)
     var daClearRecBtn = surface.makeButton(89, 22, 2, 2);
-    daClearRecBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 67);
+    daClearRecBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 109);
     daClearRecBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
         if (value < 0.5 || !daMapping) return;
         if (!ensureDA()) return;
@@ -1226,6 +1312,9 @@ if (page.mHostAccess.makeDirectAccess) {
             var cleared = 0;
             for (var i = 0; i < childCount; i++) {
                 var childID = da.getChildObjectID(m, mixConsoleID, i);
+                // Same guard as Clear Monitor: only channels that actually have
+                // the Record-Enable param (tag 4002). Skip busses/groups/VCA/CR.
+                if (!daChildHasTag(m, childID, 4002)) continue;
                 da.setParameterProcessValue(m, childID, 4002, 0);  // tag 4002 = Record Enable
                 cleared++;
             }
@@ -1558,8 +1647,9 @@ if (page.mHostAccess.makeDirectAccess) {
                 var tagB2 = (tag >> 14) & 0x7F;
                 var tagB3 = (tag >> 21) & 0x7F;
                 var msg = [0xF0, 0x00, 0x29, slotIdx & 0x7F, idxLo, idxHi, val127, tagB0, tagB1, tagB2, tagB3];
-                // Append title (truncated to 20 chars)
-                for (var c = 0; c < title.length && c < 20; c++) {
+                // Append title (truncated to 32 chars — 20 used to cut real
+                // names like 'EQ High Mid Frequency' and break name matching)
+                for (var c = 0; c < title.length && c < 32; c++) {
                     msg.push(title.charCodeAt(c) & 0x7F);
                 }
                 msg.push(0xF7);
@@ -1623,7 +1713,7 @@ if (page.mHostAccess.makeDirectAccess) {
                 var val127 = Math.round(procVal * 127) & 0x7F;
                 var msg = [0xF0, 0x00, 0x29, 0, idxLo, idxHi, val127,
                            tag & 0x7F, (tag >> 7) & 0x7F, (tag >> 14) & 0x7F, (tag >> 21) & 0x7F];
-                for (var c2 = 0; c2 < title.length && c2 < 20; c2++) msg.push(title.charCodeAt(c2) & 0x7F);
+                for (var c2 = 0; c2 < title.length && c2 < 32; c2++) msg.push(title.charCodeAt(c2) & 0x7F);
                 msg.push(0xF7);
                 midiOutput_Loop.sendMidi(activeDevice, msg);
             }
@@ -2779,6 +2869,12 @@ if (page.mHostAccess.makeDirectAccess) {
 // IDLE
 // ══════════════════════════════════════════════════
 var tick = 0;
+var bankPollTick = 0;       // throttle for the bank-position poll (~160ms)
+var lastBankStartSent = -1; // last bank start index reported via SysEx 0x11
+var bankRebroadcast = 0;    // periodic re-send counter (covers a lost 0x11)
+var bankStableVal = -1;     // debounce: a value must be read twice in a row
+                            // before it is reported (opening a plugin UI can
+                            // make getMixerChannelIndex glitch transiently)
 var scanDelay = 0;
 
 var initialSyncDone = false;
@@ -2799,7 +2895,9 @@ deviceDriver.mOnIdle = function(context) {
             for (var i = 0; i < 8; i++) {
                 var vol = knobsVol[i].mSurfaceValue.getProcessValue(context);
                 var pan = knobsPan[i].mSurfaceValue.getProcessValue(context);
-                midiOutput_Loop.sendMidi(context, [0xB0, 20 + i, Math.round(vol * 127)]);
+                // Volume feedback travels on wire channel 10 (see knobsVol
+                // mOnProcessValueChange); pan stays on channel 0 (collision-free)
+                midiOutput_Loop.sendMidi(context, [0xBA, 20 + i, Math.round(vol * 127)]);
                 midiOutput_Loop.sendMidi(context, [0xB0, 40 + i, Math.round(pan * 127)]);
             }
             // Send JS version to bridge via SysEx 0x10
@@ -2815,6 +2913,55 @@ deviceDriver.mOnIdle = function(context) {
     if (scanCooldown > 0) scanCooldown--;
     if (daBypassCooldown > 0) daBypassCooldown--;
 
+    // ── Bank-position feedback (SysEx 0x11) ──
+    // Report the absolute index of the first bank-zone track so the bridge's
+    // bank_offset never drifts. Sent on change (with a refresh of the 8 names
+    // and colours so they get re-filed under the corrected offset), plus a
+    // periodic re-broadcast (~2s) in case a 0x11 was lost or filtered.
+    bankPollTick++;
+    if (bankPollTick >= 8 && daBank && daMapping && !scanActive) {
+        bankPollTick = 0;
+        try {
+            if (!daBankActive) { daBank.activate(daMapping); daBankActive = true; }
+            var bPos = daBank.getMixerChannelIndex(daMapping, daBank.getBaseObjectID(daMapping));
+            var bStart = bPos - 1;  // mixer position is 1-based
+            if (bStart !== bankStableVal) {
+                // New reading: remember it, but only report once CONFIRMED by
+                // the next poll. Transient DA glitches never reach the bridge.
+                bankStableVal = bStart;
+                bStart = -1;  // suppress this round
+            }
+            bankRebroadcast++;
+            if (bStart >= 0 && (bStart !== lastBankStartSent || bankRebroadcast >= 12)) {
+                var bChanged = (bStart !== lastBankStartSent);
+                lastBankStartSent = bStart;
+                bankRebroadcast = 0;
+                midiOutput_Loop.sendMidi(context,
+                    [0xF0, 0x00, 0x21, 0x09, 0x11, (bStart >> 7) & 0x7F, bStart & 0x7F, 0xF7]);
+                if (bChanged) {
+                    // Re-send the visible bank's names + colours: they arrive
+                    // AFTER the 0x11, so the bridge files them at the right
+                    // absolute indices even if a desync had mis-filed them.
+                    for (var bi = 0; bi < 8; bi++) {
+                        if (bankNames[bi]) {
+                            var nMsg = [0xF0, 0x00, 0x21, 0x09, 0x01, bi & 0x7F];
+                            for (var nc = 0; nc < Math.min(bankNames[bi].length, 24); nc++) {
+                                nMsg.push(bankNames[bi].charCodeAt(nc) & 0x7F);
+                            }
+                            nMsg.push(0xF7);
+                            midiOutput_Loop.sendMidi(context, nMsg);
+                        }
+                        if (bankColors[bi]) {
+                            midiOutput_Loop.sendMidi(context,
+                                [0xF0, 0x00, 0x21, 0x09, 0x02, bi & 0x7F,
+                                 bankColors[bi][0], bankColors[bi][1], bankColors[bi][2], 0xF7]);
+                        }
+                    }
+                }
+            }
+        } catch (e) {}
+    }
+
     // Fallback couleur
     if (pendingColorForIndex >= 0) {
         var idx = pendingColorForIndex & 0x7F;
@@ -2823,14 +2970,14 @@ deviceDriver.mOnIdle = function(context) {
         pendingColorForIndex = -1;
     }
 
-    // Sélection
+    // Selection
     if (pendingAbsSelect >= 0 && !scanActive) {
         lastSelectedIndex = pendingAbsSelect;
         selButtons[pendingAbsSelect].mSurfaceValue.setProcessValue(context, 1.0);
         pendingAbsSelect = -1;
     }
 
-    // Scan séquentiel (8 pistes du bank zone visible)
+    // Sequential scan (8 tracks of the visible bank zone)
     if (scanActive) {
         scanDelay++;
         var needed = (scanTrackCounter == 0) ? 4 : 2;
@@ -2855,8 +3002,8 @@ deviceDriver.mOnIdle = function(context) {
         }
     }
 
-    // Scan séquentiel des inserts — DÉSACTIVÉ
-    // Les noms sont récupérés au fur et à mesure via mEdit.mOnTitleChange
+    // Sequential scan of inserts — DISABLED
+    // Names are retrieved on the fly via mEdit.mOnTitleChange
 
     // ── Plugin List queue: send entries in batches ──
     if (pluginListQueue) {
@@ -2938,7 +3085,7 @@ try {
     insertBypassBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(3, 20);
     page.makeValueBinding(insertBypassBtn.mSurfaceValue, insertsViewer.mBypass);
 
-    // ── INSERT PLUGIN PARAMETERS (8 paramètres via mParameterBankZone) ──
+    // ── INSERT PLUGIN PARAMETERS (8 parameters via mParameterBankZone) ──
     var insertParamZone = insertsViewer.mParameterBankZone;
     var insertParamValues = [];
     var insertParamKnobs = [];
@@ -2947,8 +3094,8 @@ try {
         var paramVal = insertParamZone.makeParameterValue();
         insertParamValues.push(paramVal);
         
-        // Knobs CC 20-27 channel 2 (pour ne pas interférer avec les knobs de volume ch1)
-        // Non — utilisons les mêmes knobs mais sur un CC différent
+        // Knobs CC 20-27 channel 2 (so as not to interfere with the volume knobs ch1)
+        // No — use the same knobs but on a different CC
         // CC 110-117 channel 2 ? Non, restons simple : custom vars
         var paramKnob = surface.makeKnob(ip * 3, 82, 2, 2);
         paramKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop)
@@ -2957,7 +3104,7 @@ try {
         
         page.makeValueBinding(paramKnob.mSurfaceValue, paramVal);
         
-        // Feedback : envoyer le nom et la valeur du paramètre au bridge
+        // Feedback: send the parameter name and value to the bridge
         paramVal.mOnTitleChange = (function(idx) {
             return function(activeDevice, activeMapping, objectTitle, valueTitle) {
                 var title = valueTitle || objectTitle || '';
@@ -2985,7 +3132,7 @@ try {
         })(ip);
     }
     
-    // Navigation banques de paramètres : CC 2 channel 2 = Next, CC 3 channel 2 = Prev
+    // Parameter bank navigation: CC 2 channel 2 = Next, CC 3 channel 2 = Prev
     var paramBankNextBtn = surface.makeButton(0, 84, 2, 2);
     paramBankNextBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(1, 2);
     page.makeActionBinding(paramBankNextBtn.mSurfaceValue, insertParamZone.mAction.mNextBank);
@@ -2996,7 +3143,7 @@ try {
     
     console.log("Insert Parameters OK (8 params + bank nav)");
 
-    // DEACTIVATE : CC 4 channel 2 toggle mOn du viewer principal
+    // DEACTIVATE: CC 4 channel 2 toggles mOn of the main viewer
     var insertDeactivateBtn = surface.makeButton(4, 86, 2, 2);
     insertDeactivateBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(1, 4);
     page.makeValueBinding(insertDeactivateBtn.mSurfaceValue, insertsViewer.mOn).setTypeToggle();
@@ -3013,12 +3160,12 @@ try {
     
     var insertCurrentViewerSlot = 0;
 
-    // EDIT : CC 99 toggle l'ouverture de l'UI du plugin focusé par le viewer principal
+    // EDIT: CC 99 toggles opening the UI of the plugin focused by the main viewer
     var insertEditBtn = surface.makeButton(99, 80, 2, 2);
     insertEditBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 99);
     page.makeValueBinding(insertEditBtn.mSurfaceValue, insertsViewer.mEdit).setTypeToggle();
 
-    // mOnTitleChange du viewer : donne le numéro de slot (1-based string "1", "2"...)
+    // the viewer's mOnTitleChange: gives the slot number (1-based string "1", "2"...)
     insertsViewer.mOnTitleChange = function(activeDevice, activeMapping, slotNumStr) {
         if (typeof slotNumStr === 'string') {
             var slotNum = parseInt(slotNumStr);
@@ -3028,7 +3175,7 @@ try {
         }
     };
 
-    // mEdit.mOnTitleChange donne le nom du plugin
+    // mEdit.mOnTitleChange gives the plugin name
     insertsViewer.mEdit.mOnTitleChange = function(activeDevice, arg1, pluginName, arg3) {
         var slotIndex = insertCurrentViewerSlot;
         if (typeof pluginName === 'string' && pluginName.length > 0 && !pluginName.match(/^\d+$/)) {
@@ -3041,7 +3188,7 @@ try {
         }
     };
 
-    // Callback : bypass change -> envoyer au bridge
+    // Callback: bypass change -> send to the bridge
     insertsViewer.mBypass.mOnProcessValueChange = function(activeDevice, activeMapping, value) {
         var slot = insertCurrentViewerSlot;
         midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x13, slot & 0x7F, value > 0.5 ? 1 : 0, 0xF7]);
