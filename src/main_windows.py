@@ -180,6 +180,63 @@ def _make_icon(connected=False, error=False):
 
 
 # ─────────────────────────────────────────────
+# Native Win32 file picker (no extra dependencies)
+# ─────────────────────────────────────────────
+
+def _pick_zip_file():
+    """Open the classic Win32 'Open File' dialog for a backup zip.
+    Returns the chosen path, or None if cancelled/unavailable."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class OPENFILENAMEW(ctypes.Structure):
+            _fields_ = [
+                ("lStructSize", wintypes.DWORD),
+                ("hwndOwner", wintypes.HWND),
+                ("hInstance", wintypes.HINSTANCE),
+                ("lpstrFilter", wintypes.LPCWSTR),
+                ("lpstrCustomFilter", wintypes.LPWSTR),
+                ("nMaxCustFilter", wintypes.DWORD),
+                ("nFilterIndex", wintypes.DWORD),
+                ("lpstrFile", wintypes.LPWSTR),
+                ("nMaxFile", wintypes.DWORD),
+                ("lpstrFileTitle", wintypes.LPWSTR),
+                ("nMaxFileTitle", wintypes.DWORD),
+                ("lpstrInitialDir", wintypes.LPCWSTR),
+                ("lpstrTitle", wintypes.LPCWSTR),
+                ("Flags", wintypes.DWORD),
+                ("nFileOffset", wintypes.WORD),
+                ("nFileExtension", wintypes.WORD),
+                ("lpstrDefExt", wintypes.LPCWSTR),
+                ("lCustData", wintypes.LPARAM),
+                ("lpfnHook", wintypes.LPVOID),
+                ("lpTemplateName", wintypes.LPCWSTR),
+                ("pvReserved", wintypes.LPVOID),
+                ("dwReserved", wintypes.DWORD),
+                ("FlagsEx", wintypes.DWORD),
+            ]
+
+        OFN_FILEMUSTEXIST = 0x00001000
+        OFN_PATHMUSTEXIST = 0x00000800
+        buf = ctypes.create_unicode_buffer(1024)
+        ofn = OPENFILENAMEW()
+        ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+        ofn.lpstrFilter = "Backup zip (*.zip)\0*.zip\0All files (*.*)\0*.*\0"
+        ofn.nFilterIndex = 1
+        ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
+        ofn.nMaxFile = 1024
+        ofn.lpstrTitle = "Restore Push 2 Bridge settings from a backup zip"
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+        if ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+            return buf.value or None
+        return None
+    except Exception as e:
+        blog(f"File picker failed: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
 # Tray app
 # ─────────────────────────────────────────────
 
@@ -202,6 +259,9 @@ class TrayApp:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Open Plugin Mapper", self.on_open_mapper),
                 pystray.MenuItem("Show Log", self.on_show_log),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Backup Settings", self.on_backup_settings),
+                pystray.MenuItem("Restore Settings...", self.on_restore_settings),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", self.on_quit),
             ),
@@ -292,6 +352,54 @@ class TrayApp:
         else:
             try:
                 icon.notify(f"Plugin Mapper: {self._mapper_status}", "Push 2 Bridge")
+            except Exception:
+                pass
+
+    def on_backup_settings(self, icon, item):
+        """Download a zip of all bridge settings via the web server (the
+        browser handles the save dialog)."""
+        if "running" in self._mapper_status:
+            webbrowser.open("http://localhost:8100/api/backup")
+        else:
+            try:
+                icon.notify(f"Backup needs the web server (status: {self._mapper_status})",
+                            "Push 2 Bridge")
+            except Exception:
+                pass
+
+    def on_restore_settings(self, icon, item):
+        """Pick a backup zip with the native Win32 chooser and restore it
+        through the web server's validated endpoint."""
+        if "running" not in self._mapper_status:
+            try:
+                icon.notify(f"Restore needs the web server (status: {self._mapper_status})",
+                            "Push 2 Bridge")
+            except Exception:
+                pass
+            return
+        path = _pick_zip_file()
+        if not path:
+            return  # cancelled
+        try:
+            import urllib.request
+            import json as _json
+            with open(path, "rb") as f:
+                data = f.read()
+            req = urllib.request.Request(
+                "http://localhost:8100/api/backup/restore", data=data,
+                headers={"Content-Type": "application/zip"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                info = _json.loads(r.read().decode())
+            try:
+                icon.notify(f"Restored {len(info.get('restored', []))} file(s). "
+                            f"{info.get('note', '')}", "Push 2 Bridge")
+            except Exception:
+                pass
+            blog(f"Settings restored from {path}: {info.get('restored')}")
+        except Exception as e:
+            blog(f"Restore failed: {e}")
+            try:
+                icon.notify(f"Restore failed: {e}", "Push 2 Bridge")
             except Exception:
                 pass
 

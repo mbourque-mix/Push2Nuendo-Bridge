@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Push 2 — Key Commands</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0f; --surface: #12121a; --surface-hover: #1a1a25; --card: #16161f;
+  --border: #2a2a3a; --accent: #00b4c8; --text: #e0e0e8; --text-dim: #6a6a7a;
+  --text-muted: #4a4a5a; --green: #00c878; --red: #ff4060;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; min-height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+.header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 14px 24px; display: flex; justify-content: space-between; align-items: center;
+  position: sticky; top: 0; z-index: 10;
+}
+.header-left { display: flex; align-items: baseline; gap: 12px; }
+.header-title { font-size: 20px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+.header-sub { font-size: 12px; color: var(--text-dim); }
+.header-right { display: flex; gap: 10px; align-items: center; }
+.btn { border: none; border-radius: 6px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
+.btn-outline { background: transparent; border: 1px solid rgba(0,180,200,0.3); color: var(--accent); }
+.btn-outline:hover { background: rgba(0,180,200,0.1); }
+.btn-accent { background: var(--accent); color: var(--bg); font-weight: 700; }
+.btn-accent:hover { filter: brightness(1.1); }
+.save-status { font-size: 12px; color: var(--text-dim); min-width: 70px; text-align: right; }
+.save-status.saved { color: var(--green); }
+
+/* Prominent action bar for the Generate button */
+.actionbar {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+}
+.btn-lg { padding: 11px 20px; font-size: 14px; }
+
+/* Two-column body: vertical page tiles (left) + content (right) */
+.main { display: flex; gap: 22px; max-width: 1200px; margin: 0 auto; padding: 20px 24px 60px; align-items: flex-start; }
+.sidebar { width: 156px; flex-shrink: 0; position: sticky; top: 20px; }
+.sidebar-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); margin: 0 0 10px 2px; }
+.content { flex: 1; min-width: 0; }
+
+.note {
+  background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 8px; padding: 12px 16px; font-size: 13px; color: var(--text-dim); margin-bottom: 20px; line-height: 1.5;
+}
+.note b { color: var(--text); }
+
+/* Vertical page tiles */
+.tabs { display: flex; flex-direction: column; gap: 6px; }
+.tab {
+  padding: 10px 12px; border-radius: 8px; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border); text-align: left;
+  font-size: 13px; font-weight: 600; color: var(--text-dim); position: relative;
+  border-left: 3px solid var(--tabcolor, var(--border));
+}
+.tab:hover { background: var(--surface-hover); }
+.tab.active { color: var(--text); background: var(--card); border-color: var(--tabcolor, var(--accent)); border-left-color: var(--tabcolor, var(--accent)); }
+.tab .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background: var(--tabcolor,#555); margin-right:6px; vertical-align: middle; }
+.tab .count { display:block; font-size: 10px; color: var(--text-muted); margin-top: 2px; font-weight: 400; }
+
+.colorrow { display:flex; align-items:center; gap:10px; margin-bottom: 18px; }
+.colorrow .lbl { font-size: 12px; color: var(--text-dim); }
+.swatch { width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; }
+.swatch.sel { border-color: var(--text); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px currentColor; }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.slot {
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px;
+  border-left: 4px solid var(--slotcolor, var(--border));
+}
+.slot.empty { border-left-color: var(--border); opacity: 0.85; }
+.slot-head { display:flex; align-items:center; gap:8px; margin-bottom: 10px; }
+.slot-num {
+  width: 22px; height: 22px; border-radius: 6px; background: var(--surface); color: var(--text-dim);
+  font-size: 12px; font-weight: 700; display:flex; align-items:center; justify-content:center;
+}
+.slot-num.on { background: var(--slotcolor); color: #0a0a0f; }
+.field { margin-bottom: 8px; position: relative; }
+.field label { display:block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 3px; }
+.field input {
+  width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 9px; color: var(--text); font-family: inherit; font-size: 13px;
+}
+.field input:focus { outline: none; border-color: var(--accent); }
+.field .hint { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.capwrap { display: flex; gap: 6px; align-items: center; }
+.fninput { flex: 1; }
+.capbtn {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 6px; padding: 7px 9px; font-size: 11px; cursor: pointer; font-family: inherit; line-height: 1;
+}
+.capbtn:hover { color: var(--text); border-color: var(--accent); }
+.fnmenu {
+  position: absolute; left: 0; right: 40px; top: 100%; z-index: 20;
+  background: var(--surface); border: 1px solid var(--accent); border-radius: 6px;
+  margin-top: 2px; max-height: 240px; overflow-y: auto; box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+}
+.fnitem {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 6px 10px; font-size: 12px; cursor: pointer; border-bottom: 1px solid var(--border);
+}
+.fnitem:hover { background: var(--surface-hover); }
+.fncat { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <span class="header-title">Key Commands</span>
+    <span class="header-sub">Push 2 / Nuendo · Cubase Bridge</span>
+  </div>
+  <div class="header-right">
+    <a class="btn btn-outline" href="/">← Plugin Mapper</a>
+    <button class="btn btn-outline" onclick="exportCfg()">Export</button>
+    <button class="btn btn-outline" onclick="document.getElementById('importFile').click()">Import</button>
+    <input type="file" id="importFile" accept="application/json" style="display:none" onchange="importCfg(this)">
+    <span class="save-status" id="saveStatus"></span>
+  </div>
+</div>
+
+<div class="actionbar">
+  <button class="btn btn-accent btn-lg" onclick="generateScript()">⚙ Generate &amp; install Nuendo / Cubase script</button>
+  <span id="genStatus" style="font-size:12px;"></span>
+</div>
+
+<div class="main">
+  <aside class="sidebar">
+    <div class="sidebar-title">Pages</div>
+    <div class="tabs" id="tabs"></div>
+  </aside>
+  <div class="content">
+    <div class="note">
+      These 8 note-value buttons (right edge of the Push) trigger commands directly.
+      Pick a <b>function</b> per button, then hit <b>Generate &amp; install</b> above and reload the script in
+      Nuendo/Cubase (MIDI Remote) — no Mapping Assistant needed. Set an optional <b>Custom label</b> (shown on the
+      Push) and the <b>page colour</b>. White is reserved for Note Repeat. Only functions picked from the list are
+      bindable (free-typed text is just a label).
+      <div style="margin-top:8px; font-size:12px; color:var(--text-dim);">
+        Function list: <span id="fnCount" style="color:var(--text)">…</span>
+        · <a onclick="document.getElementById('fnFile').click()" style="cursor:pointer; color:var(--accent)">Import your Nuendo/Cubase Key Commands XML</a>
+        <span style="color:var(--text-muted)">(to get your exact list + macros)</span>
+        <input type="file" id="fnFile" accept=".xml" style="display:none" onchange="importFunctions(this)">
+      </div>
+    </div>
+    <div class="colorrow" id="colorRow"></div>
+    <div class="grid" id="grid"></div>
+  </div>
+</div>
+
+<script>
+const PALETTE = [
+  ["red","#ff4d4d"],["coral","#ff8a66"],["yellow","#ffd23c"],["green","#46c85a"],
+  ["cyan","#3cc8d2"],["blue","#5a8cf0"],["purple","#b27be6"],["fuchsia","#e150c8"]
+];
+const COLORMAP = Object.fromEntries(PALETTE);
+// Physical note-value button labels, top → bottom (slot 0 = top button).
+const SLOT_LABELS = ['1/32t','1/32','1/16t','1/16','1/8t','1/8','1/4t','1/4'];
+let data = { pages: [] };
+let cur = 0;
+let saveTimer = null;
+
+function colorOf(name){ return COLORMAP[name] || "#3cc8d2"; }
+function pageCount(p){ return (p.slots||[]).filter(s => (s.label||s.command||"").trim()).length; }
+
+async function load() {
+  const r = await fetch('/api/keycommands');
+  data = await r.json();
+  if (!data.pages) data.pages = [];
+  render();
+}
+
+function render() { renderTabs(); renderColors(); renderGrid(); }
+
+function renderTabs() {
+  const el = document.getElementById('tabs');
+  el.innerHTML = '';
+  data.pages.forEach((p, i) => {
+    const t = document.createElement('div');
+    t.className = 'tab' + (i === cur ? ' active' : '');
+    t.style.setProperty('--tabcolor', colorOf(p.color));
+    const n = pageCount(p);
+    t.innerHTML = `<span class="dot"></span>Page ${i+1}<span class="count">${n ? n+' set' : 'empty'}</span>`;
+    t.onclick = () => { cur = i; render(); };
+    el.appendChild(t);
+  });
+}
+
+function renderColors() {
+  const el = document.getElementById('colorRow');
+  const page = data.pages[cur]; if (!page) { el.innerHTML=''; return; }
+  el.innerHTML = '<span class="lbl">Page colour:</span>';
+  PALETTE.forEach(([name, hex]) => {
+    const s = document.createElement('div');
+    s.className = 'swatch' + (page.color === name ? ' sel' : '');
+    s.style.background = hex; s.style.color = hex; s.title = name;
+    s.onclick = () => { page.color = name; scheduleSave(); render(); };
+    el.appendChild(s);
+  });
+}
+
+function renderGrid() {
+  const el = document.getElementById('grid');
+  const page = data.pages[cur]; if (!page) { el.innerHTML=''; return; }
+  el.innerHTML = '';
+  const col = colorOf(page.color);
+  // 2 columns x 4 rows, slot index r*2 + c (mirrors physical button layout)
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 2; c++) {
+      const idx = r * 2 + c;
+      const slot = page.slots[idx] || (page.slots[idx] = {command:"", category:"", label:""});
+      if (slot.category === undefined) slot.category = "";
+      const filled = (slot.label || slot.command || "").trim();
+      const card = document.createElement('div');
+      card.className = 'slot' + (filled ? '' : ' empty');
+      card.style.setProperty('--slotcolor', col);
+      card.innerHTML = `
+        <div class="slot-head">
+          <span class="slot-num ${filled?'on':''}">${idx+1}</span>
+          <span style="font-size:12px;color:var(--text-dim)">Button ${idx+1} · <b style="color:var(--text)">${SLOT_LABELS[idx]}</b></span>
+        </div>
+        <div class="field">
+          <label>Function (Nuendo)</label>
+          <div class="capwrap">
+            <input class="fninput" data-i="${idx}" autocomplete="off"
+                   value="${esc(slot.command)}" placeholder="search a Nuendo function…">
+            <button class="capbtn" data-i="${idx}" title="Clear">✕</button>
+          </div>
+          <div class="fnmenu" style="display:none"></div>
+        </div>
+        <div class="field">
+          <label>Custom label (optional — overrides on screen)</label>
+          <input class="lblinput" data-i="${idx}" value="${esc(slot.label)}" placeholder="e.g. UNDO">
+        </div>`;
+      el.appendChild(card);
+    }
+  }
+  el.querySelectorAll('.fninput').forEach(inp => bindFn(inp));
+  el.querySelectorAll('.lblinput').forEach(inp => {
+    inp.addEventListener('input', () => {
+      data.pages[cur].slots[+inp.dataset.i].label = inp.value;
+      scheduleSave();
+      refreshSlotCard(inp.closest('.slot'), +inp.dataset.i);
+      renderTabs();
+    });
+  });
+  el.querySelectorAll('.capbtn').forEach(btn => {
+    btn.addEventListener('click', () => {        // clear the function
+      const i = +btn.dataset.i, card = btn.closest('.slot'), inp = card.querySelector('.fninput');
+      inp.value = ''; saveCommandField(inp, '', ''); card.querySelector('.fnmenu').style.display = 'none';
+    });
+  });
+}
+
+function refreshSlotCard(card, i) {
+  const s = data.pages[cur].slots[i];
+  const filled = (s.label || s.command || '').trim();
+  card.classList.toggle('empty', !filled);
+  card.querySelector('.slot-num').classList.toggle('on', !!filled);
+}
+
+// ── Nuendo function picker ──
+let FUNCTIONS = [];   // flat [{cmd, cat}]
+async function loadFunctions() {
+  try {
+    const d = await (await fetch('/api/functions')).json();
+    FUNCTIONS = [];
+    (d.categories || []).forEach(c =>
+      (c.commands || []).forEach(cmd => FUNCTIONS.push({ cmd, cat: c.category })));
+  } catch (e) { FUNCTIONS = []; }
+  const el = document.getElementById('fnCount');
+  if (el) el.textContent = FUNCTIONS.length ? (FUNCTIONS.length + ' functions') : 'none loaded';
+}
+function filterFns(q) {
+  const toks = (q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const res = [];
+  for (const f of FUNCTIONS) {
+    const hay = (f.cmd + ' ' + f.cat).toLowerCase();
+    if (toks.every(t => hay.includes(t))) { res.push(f); if (res.length >= 60) break; }
+  }
+  return res;
+}
+function saveCommandField(inp, val, cat) {
+  const i = +inp.dataset.i;
+  data.pages[cur].slots[i].command = val;
+  data.pages[cur].slots[i].category = cat || '';
+  scheduleSave();
+  refreshSlotCard(inp.closest('.slot'), i);
+  renderTabs();
+}
+function bindFn(inp) {
+  const menu = inp.closest('.field').querySelector('.fnmenu');
+  const show = () => {
+    const items = filterFns(inp.value);
+    if (!items.length) { menu.style.display = 'none'; return; }
+    menu.innerHTML = items.map(f =>
+      `<div class="fnitem" data-cmd="${esc(f.cmd)}" data-cat="${esc(f.cat)}"><span>${esc(f.cmd)}</span><span class="fncat">${esc(f.cat)}</span></div>`
+    ).join('');
+    menu.style.display = 'block';
+  };
+  inp.addEventListener('focus', show);
+  // Free typing clears the category (only picks from the list are bindable).
+  inp.addEventListener('input', () => { saveCommandField(inp, inp.value, ''); show(); });
+  inp.addEventListener('blur', () => setTimeout(() => { menu.style.display = 'none'; }, 150));
+  menu.addEventListener('mousedown', (e) => {          // mousedown fires before blur
+    const it = e.target.closest('.fnitem'); if (!it) return;
+    e.preventDefault();
+    inp.value = it.dataset.cmd;
+    saveCommandField(inp, it.dataset.cmd, it.dataset.cat);
+    menu.style.display = 'none';
+  });
+}
+async function generateScript() {
+  const el = document.getElementById('genStatus');
+  el.textContent = 'generating…'; el.style.color = 'var(--text-dim)';
+  try {
+    const r = await fetch('/api/keycommands/generate', { method: 'POST' });
+    const info = await r.json();
+    if (!r.ok) throw new Error(info.detail || 'failed');
+    const inst = info.installed || [];
+    if (inst.length) {
+      el.innerHTML = `✓ ${info.bindings} binding(s) installed to ${inst.length} location(s) — reload the script in Nuendo/Cubase (MIDI Remote):<br>`
+        + inst.map(p => `<b>${esc(p)}</b>`).join('<br>');
+      el.style.color = 'var(--green)';
+    } else if (info.permission_blocked) {
+      el.innerHTML = `${info.bindings} binding(s) generated, but macOS is blocking access to your `
+        + `Documents folder, so the installed script can't be found or updated.<br>`
+        + `Fix: System Settings → Privacy &amp; Security → <b>Full Disk Access</b> → add `
+        + `<b>Push2 Nuendo Bridge</b>, enable it, then quit &amp; relaunch the app and try again.<br>`
+        + `<span style="color:var(--text-dim)">(Or <a href="/api/keycommands/script" style="color:var(--accent)">Download</a> `
+        + `it manually into Documents/Steinberg/&lt;app&gt;/MIDI Remote/Driver Scripts/Local, then reload.)</span>`;
+      el.style.color = 'var(--red)';
+    } else {
+      el.innerHTML = `${info.bindings} binding(s) generated — no installed script found. `
+        + `<a href="/api/keycommands/script" style="color:var(--accent)">Download</a> it into your `
+        + `Documents/Steinberg/&lt;app&gt;/MIDI Remote/Driver Scripts/Local folder (Nuendo or Cubase), then reload.`;
+      el.style.color = 'var(--text)';
+    }
+  } catch (e) { el.textContent = 'Failed: ' + e.message; el.style.color = 'var(--red)'; }
+}
+async function importFunctions(input) {
+  const file = input.files[0]; if (!file) return;
+  try {
+    const r = await fetch('/api/functions/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/xml' }, body: await file.text()
+    });
+    const info = await r.json();
+    if (!r.ok) throw new Error(info.detail || 'parse failed');
+    await loadFunctions();
+    alert(`Imported ${info.commands} functions from ${info.categories} categories.`);
+  } catch (e) { alert('Import failed: ' + e.message); }
+  input.value = '';
+}
+
+function esc(s){ return (s||"").replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+
+function setStatus(t, saved){
+  const el = document.getElementById('saveStatus');
+  el.textContent = t; el.className = 'save-status' + (saved ? ' saved' : '');
+}
+
+function scheduleSave() {
+  setStatus('saving…', false);
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 400);
+}
+
+async function save() {
+  try {
+    await fetch('/api/keycommands', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ pages: data.pages })
+    });
+    setStatus('✓ saved', true);
+    setTimeout(() => setStatus('', false), 1500);
+  } catch (e) { setStatus('save failed', false); }
+}
+
+function exportCfg(){ window.location = '/api/keycommands/export'; }
+
+async function importCfg(input) {
+  const file = input.files[0]; if (!file) return;
+  try {
+    const bundle = JSON.parse(await file.text());
+    const r = await fetch('/api/keycommands/import', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(bundle)
+    });
+    if (!r.ok) throw new Error('import rejected');
+    data = await r.json(); cur = 0; render();
+    setStatus('✓ imported', true);
+    setTimeout(() => setStatus('', false), 1500);
+  } catch (e) { alert('Import failed: ' + e.message); }
+  input.value = '';
+}
+
+loadFunctions();
+load();
+</script>
+</body>
+</html>

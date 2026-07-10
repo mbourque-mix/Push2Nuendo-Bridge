@@ -24,7 +24,12 @@ from state import (
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
     AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
-    FS_SUSTAIN, FS_PLAYSTOP, FS_PLAY, FS_STOP, FS_RECORD, FS_RECSTOP, FS_OFF, FS_OPTIONS, FS_PEDAL_CC,
+    FS_SUSTAIN, FS_PLAYSTOP, FS_PLAY, FS_STOP, FS_RECORD, FS_RECSTOP, FS_EXPRESSION, FS_OFF, FS_OPTIONS, FS_PEDAL_CC,
+    FS_EXPRESSION_DEFAULT_CC, FS_EXPR_TARGETS,
+    EXPAND_MENUS,
+    KC_NUM_PAGES, KC_NUM_SLOTS, KC_LONG_PRESS_SEC, KC_COLOR_MAP, KC_LED_WHITE,
+    KC_BUTTON_NAME_TO_SLOT, KC_SLOT_TO_CC,
+    kc_slot_cc, kc_slot_display_label, make_default_key_commands,
 )
 from pad_grid import (
     PadGrid, KS_CHROMATIC, KS_NATURALS,
@@ -116,6 +121,10 @@ BTN_METRONOME     = Push2Constants.BUTTON_METRONOME if hasattr(Push2Constants, '
 # Repeat
 BTN_REPEAT        = getattr(Push2Constants, 'BUTTON_REPEAT', 'Repeat')
 
+# Note-value buttons (CC 36-43): Note Repeat subdivisions when Repeat is on,
+# user-assignable Key Command slots when it is off.
+SUBDIV_BUTTON_NAMES = ['1/4', '1/4t', '1/8', '1/8t', '1/16', '1/16t', '1/32', '1/32t']
+
 # Accent
 BTN_ACCENT        = getattr(Push2Constants, 'BUTTON_ACCENT', 'Accent')
 
@@ -143,6 +152,43 @@ BTN_SETUP         = getattr(Push2Constants, 'BUTTON_SETUP', 'Setup')
 
 # Add Device button (monochrome, for Plugin Browser)
 BTN_ADD_DEVICE    = getattr(Push2Constants, 'BUTTON_ADD_DEVICE', 'Add Device')
+
+# Buttons that switch what the screen shows: pressing one of these leaves the
+# Key Command legend overlay. Any other button (Undo, transport, Mute, …) keeps
+# the legend open. (None-valued constants are filtered out.)
+KC_LEGEND_EXIT_BUTTONS = {b for b in (
+    BTN_MODE_VOLUME,   # Mix
+    BTN_MODE_SENDS,    # Clip
+    BTN_MODE_INSERTS,  # Browse
+    BTN_DEVICE,        # Device
+    BTN_ADD_DEVICE,    # Add Device
+    BTN_SCALE,         # Scale
+    BTN_SESSION,       # Session
+) if b}
+
+# Long-press expand menus: which physical button opens which EXPAND_MENUS key.
+# A short tap keeps the button's normal action (fired on release).
+EXPAND_BUTTON_TO_MENU = {b: k for b, k in (
+    (BTN_NEW, 'new'),
+    (BTN_DUPLICATE, 'duplicate'),
+    (BTN_MUTE, 'mute'),
+    (BTN_RECORD, 'record'),
+    (BTN_PLAY, 'play'),
+    (BTN_FIXED_LENGTH, 'loop'),
+) if b}
+# The expand overlay leaves on the same screen-changing buttons as the KC
+# legend, plus Setup / Note / User which also repaint the display.
+EXPAND_EXIT_BUTTONS = KC_LEGEND_EXIT_BUTTONS | {b for b in (
+    BTN_SETUP, BTN_MODE_NOTE, BTN_USER,
+) if b}
+# Mode-cycling exit buttons: when one of these CLOSES an overlay while its
+# primary page is already the underlying mode, the press is consumed so the
+# button lands on that page instead of cycling further (e.g. Mix on the Volume
+# page would otherwise drill into Channel Strip; Clip on Sends into Pan).
+OVERLAY_EXIT_PRIMARY_MODE = {b: m for b, m in (
+    (BTN_MODE_VOLUME, MODE_VOLUME),
+    (BTN_MODE_SENDS, MODE_SENDS),
+) if b}
 
 # "Select" buttons above encoders (upper row)
 BUTTONS_UPPER_ROW = [
@@ -463,6 +509,11 @@ class Push2Controller:
         self._layout_press_active = False  # True while a non-shift Layout press is held
         self._layout_long_fired = False    # True once the long-press action fired
         self._layout_press_id = 0          # generation counter to cancel stale timers
+
+        # Key Command slot press tracking (note-value buttons, Repeat off):
+        # tap fires on release; holding past KC_LONG_PRESS_SEC opens the legend.
+        self._kc_press_id = 0              # generation counter to cancel stale timers
+        self._kc_long_fired = False        # True once a hold opened the legend
         self._ks_held_note = None          # MIDI note currently sounding from the KS section (mono)
         self._ks_held_ksi = None           # KS index currently sounding, or None
 
@@ -538,13 +589,15 @@ class Push2Controller:
         self._register_callbacks()
         self._install_footswitch_hook()
         self._load_settings()   # restore persisted Setup options before applying them
+        self._apply_all_pedal_hw_configs()  # re-apply expression pedal curves
         self._update_all_leds()
         self._update_pad_colors()
         self._configure_touchstrip_mode()
         self._configure_aftertouch()
         self._setup_button_palette()
         self._load_plugin_mappings()
-        
+        self._load_key_commands()
+
         # Register callback for playback notes
         self.nuendo_link._note_display_callback = self._on_playback_note
         self.nuendo_link._cr_state = self.cr_state
@@ -587,10 +640,14 @@ class Push2Controller:
         def on_encoder(push, encoder_name, increment):
             self._handle_encoder(encoder_name, increment)
 
-        # ── Encoder touched ──
+        # ── Encoder touched / released ──
         @push2_python.on_encoder_touched()
         def on_encoder_touched(push, encoder_name):
             self._handle_encoder_touch(encoder_name)
+
+        @push2_python.on_encoder_released()
+        def on_encoder_released(push, encoder_name):
+            self._handle_encoder_release(encoder_name)
 
         # ── Button pressed ──
         @push2_python.on_button_pressed()
@@ -690,6 +747,45 @@ class Push2Controller:
                 if self.state.velocity_curve == VC_FIXED:
                     self._apply_velocity_curve()
             return
+
+        # Setup mode: on a Pedal page with Expr selected, encoder 7 (index 6)
+        # picks the pedal's TARGET (MIDI CC / Volume / QC / Send / AI Knob) and
+        # encoder 8 (index 7) its parameter (CC number, QC index). Raw encoder
+        # ticks are too fast for discrete picks, so accumulate and step once
+        # every N ticks (the remainder is kept, so slow turns still register).
+        if self.state.mode == MODE_SETUP and self.state.setup_page in (3, 4):
+            if encoder_index in (6, 7):
+                pedal = self.state.setup_page - 2
+                cfg = self.state.footswitch.get(pedal)
+                if cfg is not None and cfg.get('action') == FS_EXPRESSION:
+                    TICKS_PER_STEP = 4
+                    key = '_pedal_tgt_accum' if encoder_index == 6 else '_pedal_cc_accum'
+                    acc = getattr(self, key, 0) + increment
+                    step = int(acc / TICKS_PER_STEP)  # truncates toward 0 for both signs
+                    setattr(self, key, acc - step * TICKS_PER_STEP)
+                    if step:
+                        if encoder_index == 6:
+                            # Target selector (clamped list walk)
+                            order = [t for _, t in FS_EXPR_TARGETS]
+                            cur = cfg.get('target', 'cc')
+                            idx = order.index(cur) if cur in order else 0
+                            new = max(0, min(len(order) - 1, idx + step))
+                            if order[new] != cur:
+                                cfg['target'] = order[new]
+                                self._pedal_ai_last = None  # fresh delta baseline
+                                self._save_settings()
+                        else:
+                            target = cfg.get('target', 'cc')
+                            if target == 'cc':
+                                cfg['cc'] = max(0, min(127, cfg.get('cc', FS_EXPRESSION_DEFAULT_CC) + step))
+                                self._save_settings()
+                            elif target == 'qc':
+                                cfg['qc_idx'] = max(0, min(7, cfg.get('qc_idx', 0) + step))
+                                self._save_settings()
+                            elif target == 'send':
+                                cfg['send_idx'] = max(0, min(7, cfg.get('send_idx', 0) + step))
+                                self._save_settings()
+            return
         
         # MIDI CC mode: encoders adjust CC value or CC number
         if self.state.mode == MODE_MIDICC:
@@ -768,13 +864,15 @@ class Push2Controller:
                 # Protect against feedback glitch for 200ms
                 state.tracks[abs_track_index]._vol_touched_until = time.time() + 0.2
             self.nuendo_link.send_volume_change(encoder_index, new_val)
-        
+            self._enc_hold_update(encoder_index, 'volume', new_val)
+
         elif mode == MODE_PAN:
             # Convert 0.0-1.0 to -1.0 to +1.0 for pan
             pan_val = (new_val * 2.0) - 1.0
             if abs_track_index < len(state.tracks):
                 state.tracks[abs_track_index].pan = pan_val
             self.nuendo_link.send_pan_change(encoder_index, pan_val)
+            self._enc_hold_update(encoder_index, 'pan', pan_val)
         
         elif mode == MODE_SENDS:
             # Send CC on channel 3 for selected track send levels
@@ -866,6 +964,7 @@ class Push2Controller:
             if encoder_index < len(selected.quick_controls):
                 selected.quick_controls[encoder_index].value = new_val
             self.nuendo_link.send_quick_control_change(encoder_index, new_val)
+            self._enc_hold_update(encoder_index, 'qc', new_val)
         
         elif mode == MODE_INSERTS and state.insert_params_mode:
             if getattr(self.nuendo_link, '_da_mapping_active', False) and state.active_mapping:
@@ -893,34 +992,27 @@ class Push2Controller:
                     state.browser_coll_scroll = max(0, min(total - 1, state.browser_coll_scroll))
             return
         
+        elif mode == MODE_BROWSER and state.browser_phase == "folder_select":
+            # Folder picker: encoder scrolls through folders
+            if encoder_index in (0, 1):
+                total = len(state.browser_folders)
+                if total > 0:
+                    state.browser_folder_scroll += increment
+                    state.browser_folder_scroll = max(0, min(total - 1, state.browser_folder_scroll))
+            return
+
         elif mode == MODE_BROWSER and state.browser_phase == "plugin_list":
-            # Browser mode: encoders scroll the plugin list
-            total = len(state.browser_plugins)
+            # Vertical list: encoder 1 = page (±7), encoder 2 = fine (±1)
+            total = len(state.browser_view_indices())
             if total == 0:
                 return
             if encoder_index == 0:
-                # Encoder 1: page scroll (8 per notch)
-                state.browser_scroll += increment * 8
-                # Snap to multiples of 8
-                state.browser_scroll = (state.browser_scroll // 8) * 8
-                max_scroll = max(0, ((total - 1) // 8) * 8)
-                state.browser_scroll = max(0, min(max_scroll, state.browser_scroll))
-                # Keep selection within visible range
-                if state.browser_selected < state.browser_scroll:
-                    state.browser_selected = state.browser_scroll
-                elif state.browser_selected >= state.browser_scroll + 8:
-                    state.browser_selected = state.browser_scroll
+                state.browser_selected += increment * 7
             elif encoder_index == 1:
-                # Encoder 2: fine scroll — move highlight only, page when hitting edge
                 state.browser_selected += increment
-                state.browser_selected = max(0, min(total - 1, state.browser_selected))
-                # If selection goes out of visible range, jump to next/prev page
-                if state.browser_selected < state.browser_scroll:
-                    state.browser_scroll = (state.browser_selected // 8) * 8
-                elif state.browser_selected >= state.browser_scroll + 8:
-                    state.browser_scroll = (state.browser_selected // 8) * 8
             else:
                 return
+            state.browser_selected = max(0, min(total - 1, state.browser_selected))
             return
         
         elif mode == MODE_TRACK:
@@ -960,6 +1052,11 @@ class Push2Controller:
 
     def _handle_encoder_touch(self, encoder_name):
         """Called when the user touches an encoder."""
+        # Track touch state of the 8 track encoders (automation keep-alive)
+        if encoder_name in TRACK_ENCODERS:
+            if not hasattr(self, '_enc_touched'):
+                self._enc_touched = set()
+            self._enc_touched.add(TRACK_ENCODERS.index(encoder_name))
         if not self.state.shift_held:
             return
         if 'master' in encoder_name.lower():
@@ -970,7 +1067,55 @@ class Push2Controller:
             # JS "value > 0" guard) so every Shift+Touch produces a fresh change.
             self._cr_reset_toggle = 126 if getattr(self, '_cr_reset_toggle', 127) != 126 else 127
             self.nuendo_link.send_cc(78, self._cr_reset_toggle)
-    
+
+    def _handle_encoder_release(self, encoder_name):
+        """Called when the user releases an encoder: end its automation hold."""
+        if encoder_name in TRACK_ENCODERS:
+            idx = TRACK_ENCODERS.index(encoder_name)
+            getattr(self, '_enc_touched', set()).discard(idx)
+            getattr(self, '_enc_hold', {}).pop(idx, None)
+
+    def _enc_hold_update(self, encoder_index, kind, value):
+        """Register the last ABSOLUTE value an encoder sent (volume/pan/QC) and
+        keep re-sending it (~10 Hz) while the encoder stays touched — the
+        encoders only transmit on rotation, so resting a finger while writing
+        automation would otherwise starve Nuendo and release the write (same
+        fix as the touchstrip's note-12 keep-alive). Relative encoder paths
+        (Sends mode, plugin/DA params) can't be held this way — no absolute
+        value to repeat."""
+        if encoder_index not in getattr(self, '_enc_touched', set()):
+            return  # rotation without touch info — don't hold
+        if not hasattr(self, '_enc_hold'):
+            self._enc_hold = {}
+        self._enc_hold[encoder_index] = (kind, value)
+        if getattr(self, '_enc_ka_running', False):
+            return
+        self._enc_ka_running = True
+
+        def _loop():
+            try:
+                while True:
+                    touched = getattr(self, '_enc_touched', set())
+                    hold = getattr(self, '_enc_hold', {})
+                    live = [(i, hold[i]) for i in list(hold) if i in touched]
+                    if not live:
+                        break
+                    for i, (kind, val) in live:
+                        try:
+                            if kind == 'volume':
+                                self.nuendo_link.send_volume_change(i, val)
+                            elif kind == 'pan':
+                                self.nuendo_link.send_pan_change(i, val)
+                            elif kind == 'qc':
+                                self.nuendo_link.send_quick_control_change(i, val)
+                        except Exception:
+                            pass
+                    time.sleep(0.1)
+            finally:
+                self._enc_ka_running = False
+        import threading
+        threading.Thread(target=_loop, daemon=True).start()
+
     def _handle_button_press(self, button_name):
         """Called when the user presses a button."""
         state = self.state
@@ -984,6 +1129,78 @@ class Push2Controller:
                 pass
             return
         
+        # ── Key Command legend overlay: only a screen-changing button leaves it
+        # (then that button still performs its normal action). Everything else —
+        # Undo, transport, Mute, the KC slot buttons, Page L/R — keeps it open. ──
+        if state.kc_legend_active and button_name in KC_LEGEND_EXIT_BUTTONS:
+            state.kc_legend_active = False
+            if OVERLAY_EXIT_PRIMARY_MODE.get(button_name) == state.mode:
+                return  # just reveal the page we were already on — don't cycle
+
+        # ── Expand menu overlay (long-press New/Duplicate/Mute/Play/Record) ──
+        # While open: lower-row buttons fire the menu entries (the menu stays);
+        # a screen-changing button closes it (and then acts normally).
+        if state.expand_menu:
+            if button_name in EXPAND_EXIT_BUTTONS:
+                state.expand_menu = None
+                self._update_lower_row_leds()
+                self._update_upper_row_leds()
+                if OVERLAY_EXIT_PRIMARY_MODE.get(button_name) == state.mode:
+                    return  # just reveal the page we were already on — don't cycle
+            else:
+                _, lower_entries, upper_entries = EXPAND_MENUS.get(
+                    state.expand_menu, ('', [], []))
+
+                def _fire_expand(entries, i):
+                    if i < len(entries):
+                        label, kind, payload = entries[i]
+                        if kind == 'js':
+                            self.nuendo_link.send_expand_command(payload)
+                        else:  # 'cc' — existing channel-0 pulse paths
+                            self.nuendo_link.send_cc(payload, 127)
+                            time.sleep(0.05)
+                            self.nuendo_link.send_cc(payload, 0)
+                        print(f"  Expand: {label}")
+                for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                    if button_name == btn:
+                        _fire_expand(lower_entries, i)
+                        return
+                for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                    if button_name == btn:
+                        _fire_expand(upper_entries, i)
+                        return
+
+        # ── Long-press arming for the expand-menu buttons. The normal (short
+        # tap) action fires on RELEASE so a long-press never triggers it. ──
+        if button_name in EXPAND_BUTTON_TO_MENU and not state.shift_held and \
+                not getattr(self, '_expand_replay', False):
+            self._expand_press_id = getattr(self, '_expand_press_id', 0) + 1
+            pid = self._expand_press_id
+            self._expand_press = {'button': button_name, 'long': False, 'id': pid}
+
+            def _expand_long(pid=pid, bname=button_name):
+                time.sleep(0.45)
+                p = getattr(self, '_expand_press', None)
+                if p and p.get('id') == pid and p.get('button') == bname:
+                    p['long'] = True
+                    state.kc_legend_active = False
+                    state.expand_menu = EXPAND_BUTTON_TO_MENU[bname]
+                    self._update_lower_row_leds()
+                    self._update_upper_row_leds()
+            import threading
+            threading.Thread(target=_expand_long, daemon=True).start()
+            return
+
+        # ── Page Left / Right: navigate Key Command pages ──
+        if button_name == BTN_PAGE_LEFT:
+            state.kc_page = (state.kc_page - 1) % KC_NUM_PAGES
+            self._update_repeat_leds()
+            return
+        if button_name == BTN_PAGE_RIGHT:
+            state.kc_page = (state.kc_page + 1) % KC_NUM_PAGES
+            self._update_repeat_leds()
+            return
+
         # ── Keyswitch config screen: intercept lower row + arrows ──
         if self.pad_grid.ks_edit:
             if self._handle_ks_edit_button(button_name):
@@ -1103,6 +1320,7 @@ class Push2Controller:
                 current_idx = modes.index(self.state.touchstrip_mode) if self.state.touchstrip_mode in modes else 0
                 self.state.touchstrip_mode = modes[(current_idx + 1) % len(modes)]
                 self._configure_touchstrip_mode()
+                self._refresh_touchstrip_leds()  # show the track volume right away
                 print(f"  Touchstrip mode: {self.state.touchstrip_mode}")
                 labels = {"pitchbend": "PITCH BEND", "modwheel": "MOD WHEEL", "volume": "VOLUME FADER"}
                 self.state._touchstrip_overlay = labels[self.state.touchstrip_mode]
@@ -1146,14 +1364,17 @@ class Push2Controller:
             self._update_repeat_leds()
             return
         
-        # ── Subdivision buttons (CC 36-43 on the Push) ──
-        for subdiv_btn_name in ['1/4', '1/4t', '1/8', '1/8t', '1/16', '1/16t', '1/32', '1/32t']:
-            if button_name == subdiv_btn_name:
-                idx = ['1/4', '1/4t', '1/8', '1/8t', '1/16', '1/16t', '1/32', '1/32t'].index(subdiv_btn_name)
-                self.note_repeat.set_subdivision(idx)
+        # ── Note-value buttons (CC 36-43) ──
+        # Repeat ON  → Note Repeat subdivision selectors (fire on press).
+        # Repeat OFF → Key Command slots (tap fires on release; hold = legend).
+        if button_name in SUBDIV_BUTTON_NAMES:
+            if self.note_repeat.enabled:
+                self.note_repeat.set_subdivision(SUBDIV_BUTTON_NAMES.index(button_name))
                 self._sync_repeat_state()
                 self._update_repeat_leds()
-                return
+            else:
+                self._handle_kc_press(KC_BUTTON_NAME_TO_SLOT[button_name])
+            return
         
         # ── Accent ──
         if button_name == BTN_ACCENT:
@@ -1394,7 +1615,11 @@ class Push2Controller:
                 return
             # Shift+Right in Volume/Pan: nudge bank by 1 track
             if state.shift_held and state.mode in (MODE_VOLUME, MODE_PAN):
-                if state.bank_offset + BANK_SIZE < state.total_tracks:
+                # Respect the learned end-of-project cap (visible tracks) so the
+                # nudge can't run past the last real track into phantom slots.
+                nudge_limit = (state.bank_offset_cap if state.bank_offset_cap is not None
+                               else state.total_tracks - BANK_SIZE)
+                if state.bank_offset < nudge_limit:
                     state.bank_offset += 1
                     self.nuendo_link.send_cc(38, 127)
                     time.sleep(0.02)
@@ -1403,6 +1628,11 @@ class Push2Controller:
                 self._update_nav_leds()
                 return
             max_offset = max(0, (state.total_tracks - 1) // BANK_SIZE) * BANK_SIZE
+            # Clamp to the dynamically-learned last VISIBLE bank when known —
+            # dead reckoning against the hard-coded 128 overshoots the real end
+            # (hidden/folded channels) and shows stale "garbage" tracks.
+            if state.bank_offset_cap is not None:
+                max_offset = min(max_offset, state.bank_offset_cap)
             if state.bank_offset < max_offset:
                 state.bank_offset += BANK_SIZE
                 self.nuendo_link.send_cc(8, 127)
@@ -1526,10 +1756,12 @@ class Push2Controller:
             else:
                 # Add Device → INSTRUMENT browser for the selected Instrument
                 # track. There is a single instrument slot, so skip slot select
-                # and jump straight to the plugin list (collection 0 = Default).
+                # and jump straight to the folder picker (collection 0 = Default).
                 state.browser_prev_mode = state.mode
                 state.browser_instrument = True
-                state.browser_phase = "plugin_list"
+                state.browser_phase = "folder_select"
+                state.browser_folder = None
+                state.browser_folder_scroll = 0
                 state.browser_scroll = 0
                 state.browser_selected = 0
                 state.browser_collection_index = 0
@@ -1576,7 +1808,7 @@ class Push2Controller:
         
         # ── Setup mode: intercept the buttons ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', 'Browser', None, 'About']
             
             # Upper row → select setup page (button 7 = Reload Script action)
             for i, btn in enumerate(BUTTONS_UPPER_ROW):
@@ -1616,13 +1848,33 @@ class Push2Controller:
                             state.cr_phones_default = False
                         elif i == 1:
                             state.cr_phones_default = True
+                    elif state.setup_page == 5:
+                        # Page 5: Default-collection grouping (1 = Type, 2 = Vendor)
+                        new_mode = 'type' if i == 0 else ('vendor' if i == 1 else None)
+                        if new_mode and new_mode != state.browser_group_mode:
+                            state.browser_group_mode = new_mode
+                            # Rebuild the folder list and reset the current filter
+                            state.browser_folder = None
+                            state.browser_folder_label = ""
+                            state.browser_folder_scroll = 0
+                            state.build_browser_folders()
                     elif state.setup_page in (3, 4):
                         # Pages 3/4: Footswitch (pedal 1 = CC 64, pedal 2 = CC 69)
                         pedal = state.setup_page - 2  # page 3 -> pedal 1, page 4 -> pedal 2
                         cfg = state.footswitch.get(pedal)
                         if cfg is not None:
                             if i < len(FS_OPTIONS):
-                                cfg['action'] = FS_OPTIONS[i][1]   # buttons 1-7 = action
+                                new_action = FS_OPTIONS[i][1]
+                                if new_action == FS_EXPRESSION and \
+                                        cfg.get('action') == FS_EXPRESSION:
+                                    # Re-pressing 'Expr' starts/finishes the
+                                    # expression-pedal calibration.
+                                    self._toggle_pedal_calibration(pedal)
+                                else:
+                                    if getattr(state, 'pedal_cal', None):
+                                        state.pedal_cal = None  # cancel a stray calibration
+                                    cfg['action'] = new_action  # buttons 1-7 = action
+                                    self._apply_pedal_hw_config(pedal)
                             elif i == 7:
                                 cfg['invert'] = not cfg.get('invert', False)  # button 8 = invert
                     self._update_all_leds()
@@ -1767,8 +2019,20 @@ class Push2Controller:
                     else:
                         mod_id = _CS_PAGE_TO_MOD_ID.get(state.cs_page)
                         if mod_id is not None:
-                            self.nuendo_link.send_strip_param_toggle(mod_id, 0x00)
-                            print(f"  CS toggle on/off: {state.cs_page}")
+                            # Activate/deactivate the module via DirectAccess (mOn
+                            # tag 4098). Binding-path toggles don't survive bank-zone
+                            # refresh (bypass uses DA for the same reason).
+                            # NOTE: LOADING a tool into an empty module is NOT
+                            # possible via the API (Steinberg confirmed) — do it in
+                            # Nuendo, or map "Load FX Chain Preset" to a Key Command.
+                            variant = self._cs_page_variant(state.cs_page)
+                            da_slot = self._resolve_da_slot_for_variant(variant)
+                            strip_si = (da_slot - 16) if da_slot >= 0 else (mod_id - 0x10)
+                            slot = self.state.channel_strip.slots.get(mod_id)
+                            want_on = not (slot.on if slot else False)
+                            if not self.nuendo_link.send_da_strip_on(strip_si, want_on):
+                                self.nuendo_link.send_strip_param_toggle(mod_id, 0x00)  # DA not ready → fallback
+                            print(f"  CS on/off: {state.cs_page} -> {'ON' if want_on else 'OFF'}")
                     return
                 if button_name == btn and 2 <= i <= 4:
                     # Variant switch from Push is NOT supported by the MIDI Remote API
@@ -1914,14 +2178,17 @@ class Push2Controller:
                     if button_name == btn:
                         abs_slot = state.insert_bank_offset + i
                         state.browser_target_slot = abs_slot
-                        state.browser_phase = "plugin_list"
+                        # Go to the folder picker first (drill-down navigation)
+                        state.browser_phase = "folder_select"
+                        state.browser_folder = None
+                        state.browser_folder_scroll = 0
                         state.browser_scroll = 0
                         state.browser_selected = 0
                         # Request plugin list if not already loaded
                         if not state.browser_list_ready:
                             self.nuendo_link.request_da_plugin_list(
                                 state.browser_collection_index)
-                        print(f"  Browser: selected slot {abs_slot + 1}, browsing plugins")
+                        print(f"  Browser: selected slot {abs_slot + 1}, choosing folder")
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
                         return
@@ -1935,42 +2202,80 @@ class Push2Controller:
                         return
             
             elif state.browser_phase == "plugin_list":
-                # Upper row → load plugin from that column
-                for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                view = state.browser_view_indices()
+
+                def _load_selected():
+                    vpos = state.browser_selected
+                    if 0 <= vpos < len(view):
+                        abs_idx = view[vpos]
+                        if state.browser_plugins[abs_idx]:
+                            self._browser_load_plugin(
+                                state.browser_target_slot, abs_idx,
+                                state.browser_collection_index)
+
+                # Any upper-row button loads the highlighted plugin
+                for btn in BUTTONS_UPPER_ROW:
                     if button_name == btn:
-                        plugin_idx = state.browser_scroll + i
-                        if plugin_idx < len(state.browser_plugins):
-                            plugin = state.browser_plugins[plugin_idx]
-                            if plugin:
-                                self._browser_load_plugin(
-                                    state.browser_target_slot,
-                                    plugin_idx,
-                                    state.browser_collection_index)
+                        _load_selected()
                         return
-                
-                # Lower row
+
+                # Lower row: 1 = LOAD, 2 = ◄ FOLDERS, 8 = BACK (to folders)
                 for i, btn in enumerate(BUTTONS_LOWER_ROW):
                     if button_name == btn:
                         if i == 0:
-                            # Button 1 = open collection picker
-                            state.browser_phase = "collection_select"
-                            state.browser_coll_scroll = state.browser_collection_index
-                            state.browser_collections_ready = False
-                            self.nuendo_link.request_da_collection_info(
-                                instrument=state.browser_instrument)
+                            _load_selected()
+                        elif i in (1, 7):
+                            state.browser_phase = "folder_select"
                             self._update_upper_row_leds()
                             self._update_lower_row_leds()
-                        elif i == 7:
-                            # Last button = back. Instrument mode has no slot
-                            # selection, so exit the browser entirely.
-                            if state.browser_instrument:
-                                self._set_mode(state.browser_prev_mode)
-                            else:
-                                state.browser_phase = "slot_select"
+                        return
+
+            elif state.browser_phase == "folder_select":
+                # Upper row or lower button 1 (OPEN) = enter selected folder.
+                # Lower button 2 = collection picker. Lower button 8 = back up.
+                confirmed_open = False
+                for i, btn in enumerate(BUTTONS_UPPER_ROW):
+                    if button_name == btn:
+                        confirmed_open = True
+                        break
+                if not confirmed_open:
+                    for i, btn in enumerate(BUTTONS_LOWER_ROW):
+                        if button_name == btn:
+                            if i == 0:
+                                confirmed_open = True
+                            elif i == 1:
+                                # Open the collection picker
+                                state.browser_phase = "collection_select"
+                                state.browser_coll_scroll = state.browser_collection_index
+                                state.browser_collections_ready = False
+                                self.nuendo_link.request_da_collection_info(
+                                    instrument=state.browser_instrument)
                                 self._update_upper_row_leds()
                                 self._update_lower_row_leds()
-                        return
-            
+                                return
+                            elif i == 7:
+                                # Back up a level: exit (instrument) or slot picker
+                                if state.browser_instrument:
+                                    self._set_mode(state.browser_prev_mode)
+                                else:
+                                    state.browser_phase = "slot_select"
+                                    self._update_upper_row_leds()
+                                    self._update_lower_row_leds()
+                                return
+                            break
+                if confirmed_open and state.browser_list_ready and state.browser_folders:
+                    sel = state.browser_folder_scroll
+                    if 0 <= sel < len(state.browser_folders):
+                        fld = state.browser_folders[sel]
+                        state.browser_folder = fld['key']
+                        state.browser_folder_label = fld['label']
+                        state.browser_phase = "plugin_list"
+                        state.browser_scroll = 0
+                        state.browser_selected = 0
+                        self._update_upper_row_leds()
+                        self._update_lower_row_leds()
+                return
+
             elif state.browser_phase == "collection_select":
                 # Upper row or lower row button 1 = confirm selection
                 confirmed = False
@@ -1984,24 +2289,28 @@ class Push2Controller:
                             if i == 0:
                                 confirmed = True
                             elif i == 7:
-                                # Back to plugin list (cancel)
-                                state.browser_phase = "plugin_list"
+                                # Cancel → back to the folder picker
+                                state.browser_phase = "folder_select"
                                 self._update_upper_row_leds()
                                 self._update_lower_row_leds()
                                 return
                             break
-                
+
                 if confirmed and state.browser_collections_ready:
                     selected_coll = state.browser_coll_scroll
                     if 0 <= selected_coll < len(state.browser_collections):
                         coll = state.browser_collections[selected_coll]
                         state.browser_collection_index = coll['index']
-                        state.browser_phase = "plugin_list"
+                        # New collection → back to its folder picker
+                        state.browser_phase = "folder_select"
+                        state.browser_folder = None
+                        state.browser_folder_scroll = 0
                         state.browser_scroll = 0
                         state.browser_selected = 0
                         state.browser_list_ready = False
                         self.nuendo_link.request_da_plugin_list(
                             coll['index'], instrument=state.browser_instrument)
+                        self._save_settings()  # remember last-used collection
                         print(f"  Browser: Selected collection \"{coll['name']}\" ({coll['count']} plugins)")
                         self._update_upper_row_leds()
                         self._update_lower_row_leds()
@@ -2327,6 +2636,25 @@ class Push2Controller:
             self.state.user_held = False
         if button_name == BTN_SELECT:
             self.state.select_held = False
+
+        # ── Expand-menu buttons: a short tap performs the button's normal
+        # action on release (a hold that opened the menu does not). ──
+        p = getattr(self, '_expand_press', None)
+        if p and p.get('button') == button_name:
+            self._expand_press = None
+            if not p.get('long'):
+                self._expand_replay = True
+                try:
+                    self._handle_button_press(button_name)
+                finally:
+                    self._expand_replay = False
+            return
+
+        # ── Key Command slot release: a short tap fires the command (a hold that
+        # already opened the legend does not). Only when Repeat is off. ──
+        if button_name in SUBDIV_BUTTON_NAMES and not self.note_repeat.enabled:
+            self._handle_kc_release(KC_BUTTON_NAME_TO_SLOT[button_name])
+            return
 
         # ── Master release: hide the nav help screen, but KEEP the pads in
         # Navigation mode (exit is via another mode button). The render loop
@@ -2877,6 +3205,19 @@ class Push2Controller:
                     if getattr(message, 'type', None) == 'control_change' and \
                             message.control in (64, 69):
                         self._handle_footswitch(message.control, message.value)
+                    elif getattr(message, 'type', None) == 'sysex':
+                        # Sample Pedal Data reply (cmd 0x13): raw 12-bit ADC of
+                        # the 4 pedal contacts, as LSB/MSB pairs.
+                        d = tuple(message.data)
+                        if len(d) >= 14 and d[:6] == (0x00, 0x21, 0x1D, 0x01, 0x01, 0x13):
+                            vals = [d[6 + i * 2] | (d[7 + i * 2] << 7) for i in range(4)]
+                            self._on_pedal_adc_sample(vals)
+                    elif getattr(message, 'type', None) in ('note_on', 'note_off') and \
+                            getattr(message, 'note', None) == 12:
+                        # Note 12 = physical touch state of the touchstrip
+                        touched = (message.type == 'note_on' and
+                                   getattr(message, 'velocity', 0) > 0)
+                        self._on_strip_touch(touched)
                 except Exception:
                     pass
 
@@ -2906,6 +3247,17 @@ class Push2Controller:
             # Pass sustain through to the instrument on the notes port (channel 1)
             self.nuendo_link.send_midi_cc_to_notes(64, 127 if pressed else 0)
             return
+        if action == FS_EXPRESSION:
+            # Continuous: route the pedal position (0-127) to the configured
+            # target. Invert reverses the polarity (heel/toe).
+            out = 127 - value if cfg.get('invert') else value
+            out = max(0, min(127, out))
+            self._pedal_route_value(cfg, out)
+            # Nuendo automation releases when messages stop (the pedal only
+            # transmits on change) — hold the value while the transport rolls.
+            if cfg.get('target', 'cc') in ('volume', 'qc', 'send'):
+                self._pedal_keepalive_start(cfg, out)
+            return
         # Momentary transport actions fire on the press edge only
         if not pressed:
             return
@@ -2928,6 +3280,154 @@ class Push2Controller:
             else:
                 self.nuendo_link.send_cc(52, 127)  # Record
 
+    # ─────────────────────────────────────────────
+    # Expression pedal hardware config + calibration (Push 2 pedal SysEx)
+    #
+    # The Push 2 pedal jacks are CONTINUOUS-capable: each jack has two ADC
+    # contacts (ring/tip, 12-bit) and documented SysEx to remap them:
+    #   0x13 Sample Pedal Data   → raw ADC of all 4 contacts (calibration)
+    #   0x30 Configure Pedal     → which contact emits which CC
+    #   0x31 Set Pedal Curve Limits → heel/toe ADC values ↔ CC 0/127
+    # The factory default just configures them as switches. When the user
+    # picks 'Expr' and calibrates, we point the pedal's wiper contact at the
+    # jack's usual CC (64/69) with the measured curve — the Push then emits
+    # continuous 0-127 on its own and _handle_footswitch forwards it.
+    # ─────────────────────────────────────────────
+    _PEDAL_SYSEX_PREFIX = [0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01]
+
+    def _send_pedal_sysex(self, cmd_and_args):
+        self._send_midi_to_push(self._PEDAL_SYSEX_PREFIX + cmd_and_args + [0xF7])
+
+    def _request_pedal_sample(self, n_log2=5):
+        """Ask the Push for one averaged ADC sample of all 4 pedal contacts."""
+        self._send_pedal_sysex([0x13, n_log2 & 0x7F])
+
+    def _configure_pedal_contact(self, contact, cc):
+        """Route a pedal contact (0=J1 ring, 1=J1 tip, 2=J2 ring, 3=J2 tip) to
+        a CC (127 = disabled). Mode 0 = always, port 3 = both MIDI ports."""
+        self._send_pedal_sysex([0x30, contact & 0x03, cc & 0x7F, 0x00, 0x03])
+
+    def _set_pedal_curve_limits(self, contact, v_heel, v_toe):
+        """Map ADC v_heel→CC 0 and v_toe→CC 127 (each 0-4095, LSB/MSB pairs)."""
+        v_heel = max(0, min(4095, int(v_heel)))
+        v_toe = max(0, min(4095, int(v_toe)))
+        self._send_pedal_sysex([0x31, contact & 0x03,
+                                v_heel & 0x7F, (v_heel >> 7) & 0x1F,
+                                v_toe & 0x7F, (v_toe >> 7) & 0x1F])
+
+    def _set_pedal_curve_entries(self, contact, positions):
+        """Write the 32-entry position curve (values 0-255) for a contact, in
+        8 SysEx messages of 4 entries each (cmd 0x32). The factory SWITCH
+        behaviour is itself a step curve (0…0,255…255, no interpolation), so a
+        continuous pedal NEEDS a rising curve here — limits alone (0x31) keep
+        the output binary."""
+        for i in range(0, 32, 4):
+            msg = [0x32, contact & 0x03, i]
+            for p in positions[i:i + 4]:
+                p = max(0, min(255, int(p)))
+                msg += [p & 0x7F, (p >> 7) & 0x01]
+            self._send_pedal_sysex(msg)
+
+    def _set_pedal_curve_linear(self, contact):
+        """Linear 32-point curve: continuous 0-127 output across the limits."""
+        self._set_pedal_curve_entries(
+            contact, [round(k * 255 / 31) for k in range(32)])
+
+    def _set_pedal_curve_switch(self, contact):
+        """Factory-style step curve: binary on/off around mid-travel."""
+        self._set_pedal_curve_entries(
+            contact, [0] * 16 + [255] * 16)
+
+    def _apply_pedal_hw_config(self, pedal):
+        """Push the hardware config matching the pedal's Setup action.
+
+        Expr + calibrated → wiper contact emits the jack's CC continuously
+        with the calibrated curve, sibling contact disabled.
+        Anything else → default switch wiring (tip active full-range, ring
+        off) — only if we ever reconfigured this jack (don't touch factory
+        state otherwise)."""
+        cfg = self.state.footswitch.get(pedal)
+        if not cfg:
+            return
+        cc = FS_PEDAL_CC.get(pedal, 64)
+        base = 0 if pedal == 1 else 2          # jack's ring contact index
+        if cfg.get('action') == FS_EXPRESSION and cfg.get('calibrated'):
+            contact = cfg.get('contact', base + 1)
+            sibling = base + (1 - (contact - base))
+            self._configure_pedal_contact(contact, cc)
+            self._configure_pedal_contact(sibling, 127)
+            self._set_pedal_curve_limits(contact, cfg.get('v_min', 0), cfg.get('v_max', 4095))
+            self._set_pedal_curve_linear(contact)  # replace the factory step curve
+            print(f"  ✓ Pedal {pedal}: expression config (contact {contact}, "
+                  f"ADC {cfg.get('v_min')}–{cfg.get('v_max')} → CC {cc})")
+        elif cfg.get('calibrated'):
+            # Was expression at some point: restore switch-style wiring.
+            self._configure_pedal_contact(base + 1, cc)   # tip active
+            self._configure_pedal_contact(base, 127)      # ring off
+            self._set_pedal_curve_limits(base + 1, 0, 4095)
+            self._set_pedal_curve_switch(base + 1)
+
+    def _apply_all_pedal_hw_configs(self):
+        for pedal in (1, 2):
+            try:
+                self._apply_pedal_hw_config(pedal)
+            except Exception:
+                pass
+
+    def _on_pedal_adc_sample(self, vals):
+        """A 0x13 reply arrived (raw ADC of the 4 contacts). During calibration,
+        track live values and min/max for the jack being calibrated."""
+        cal = getattr(self.state, 'pedal_cal', None)
+        if not cal:
+            return
+        base = 0 if cal['pedal'] == 1 else 2
+        for k in range(2):
+            v = vals[base + k]
+            cal['live'][k] = v
+            cal['min'][k] = min(cal['min'][k], v)
+            cal['max'][k] = max(cal['max'][k], v)
+
+    def _toggle_pedal_calibration(self, pedal):
+        """Start/finish expression calibration for a pedal jack (re-pressing
+        'Expr' on its Setup page toggles this)."""
+        state = self.state
+        cal = getattr(state, 'pedal_cal', None)
+        if cal and cal['pedal'] == pedal:
+            # ── Finish: pick the contact that actually moved ──
+            state.pedal_cal = None
+            ranges = [cal['max'][k] - cal['min'][k] for k in range(2)]
+            k = 0 if ranges[0] >= ranges[1] else 1
+            if ranges[k] < 150:
+                self._flash_message("Pedal cal: no movement")
+                print(f"  ⚠ Pedal {pedal} calibration aborted (range {ranges[k]})")
+                return
+            base = 0 if pedal == 1 else 2
+            cfg = state.footswitch.get(pedal)
+            cfg['contact'] = base + k
+            cfg['v_min'] = cal['min'][k]
+            cfg['v_max'] = cal['max'][k]
+            cfg['calibrated'] = True
+            self._save_settings()
+            self._apply_pedal_hw_config(pedal)
+            self._flash_message("Pedal calibrated")
+            return
+        # ── Start ──
+        state.pedal_cal = {'pedal': pedal, 'live': [0, 0],
+                           'min': [4095, 4095], 'max': [0, 0]}
+
+        def _sampler():
+            while getattr(state, 'pedal_cal', None) and \
+                    state.pedal_cal['pedal'] == pedal:
+                try:
+                    self._request_pedal_sample(5)
+                except Exception:
+                    pass
+                time.sleep(0.05)
+        import threading
+        threading.Thread(target=_sampler, daemon=True).start()
+        print(f"  Pedal {pedal} calibration started — move the pedal, "
+              f"press Expr again to finish")
+
     def _reload_bridge_state(self):
         """Reload Script (Setup, upper row 7): re-scan tracks, re-sync the
         bridge's view of the project, and reload plugin mappings from disk
@@ -2938,11 +3438,83 @@ class Push2Controller:
             t.color = (150, 150, 150)
         self._full_scan()
         self._load_plugin_mappings()
+        self._load_key_commands()
         self._update_all_leds()
         try:
             self._flash_message("Reloaded")
         except Exception:
             pass
+
+    # ─────────────────────────────────────────────
+    # Key Commands (note-value buttons CC 36-43, Repeat off)
+    # ─────────────────────────────────────────────
+    def _key_commands_path(self):
+        """~/.push2bridge/keycommands.json (labels + per-page colours)."""
+        return self._settings_path().parent / "keycommands.json"
+
+    def _load_key_commands(self):
+        """Load the Key Command labels/colours written by the web config tool.
+        The actual command bound to each slot lives in Nuendo's Mapping
+        Assistant; we only keep display metadata here."""
+        import json
+        path = self._key_commands_path()
+        try:
+            if not path.exists():
+                return
+            data = json.loads(path.read_text())
+        except Exception:
+            return
+        pages = data.get('pages') if isinstance(data, dict) else None
+        if not isinstance(pages, list):
+            return
+        kc = make_default_key_commands()
+        for p in range(min(len(pages), KC_NUM_PAGES)):
+            pg = pages[p]
+            if not isinstance(pg, dict):
+                continue
+            color = pg.get('color')
+            if color in KC_COLOR_MAP:
+                kc[p]['color'] = color
+            slots = pg.get('slots')
+            if isinstance(slots, list):
+                for s in range(min(len(slots), KC_NUM_SLOTS)):
+                    sl = slots[s]
+                    if isinstance(sl, dict):
+                        kc[p]['slots'][s] = {
+                            'command': str(sl.get('command', '') or ''),
+                            'label': str(sl.get('label', '') or ''),
+                        }
+        self.state.key_commands = kc
+        print("  ✓ Key commands loaded")
+
+    def _handle_kc_press(self, slot):
+        """A Key Command slot button was pressed (Repeat off). Arm the hold
+        timer that opens the on-screen legend; the tap itself fires on release
+        so a long-press never triggers the command."""
+        self._kc_press_id += 1
+        self._kc_long_fired = False
+        pid = self._kc_press_id
+        import threading
+
+        def _long(pid=pid):
+            time.sleep(KC_LONG_PRESS_SEC)
+            if self._kc_press_id == pid and not self.note_repeat.enabled:
+                self._kc_long_fired = True
+                self.state.kc_legend_active = True
+        threading.Thread(target=_long, daemon=True).start()
+
+    def _handle_kc_release(self, slot):
+        """A Key Command slot button was released. Fire the command for the
+        current page + slot if it was a short tap (a hold opened the legend)."""
+        fired_long = self._kc_long_fired
+        self._kc_press_id += 1          # invalidate any pending hold timer
+        self._kc_long_fired = False
+        if fired_long:
+            return
+        cc = kc_slot_cc(self.state.kc_page, slot)
+        self.nuendo_link.send_cc_kc(cc, 127)
+        time.sleep(0.01)
+        self.nuendo_link.send_cc_kc(cc, 0)
 
     def _handle_pad_aftertouch(self, pad_n, pad_ij, velocity):
         """Called when pad pressure changes (aftertouch).
@@ -3134,9 +3706,112 @@ class Push2Controller:
     # Touchstrip
     # ─────────────────────────────────────────
 
+    def _pedal_route_value(self, cfg, out):
+        """Deliver an expression-pedal position (0-127, polarity already
+        applied) to its configured target. Shared by the live dispatch and the
+        automation keep-alive."""
+        target = cfg.get('target', 'cc')
+        if target == 'volume':
+            # Selected track volume (same path as the touchstrip fader)
+            rel = self.state.selected_track_index - self.state.bank_offset
+            if 0 <= rel < 8:
+                norm = out / 127.0
+                self.nuendo_link.send_volume_change(rel, norm)
+                sel = self.state.selected_track
+                if sel:
+                    sel.volume = norm
+                    sel.volume_db = _to_db(norm)
+        elif target == 'qc':
+            self.nuendo_link.send_quick_control_change(
+                cfg.get('qc_idx', 0), out / 127.0)
+        elif target == 'send':
+            # Chosen send slot of the selected track (absolute bindings)
+            self.nuendo_link.send_selected_send_level(
+                cfg.get('send_idx', 0), out / 127.0)
+        elif target == 'ai':
+            # AI Knob (value under mouse) rides the existing RELATIVE CC 2
+            # path (swing encoder): convert absolute position to deltas.
+            last = getattr(self, '_pedal_ai_last', None)
+            self._pedal_ai_last = out
+            if last is not None and out != last:
+                delta = out - last
+                if delta > 0:
+                    self.nuendo_link.send_cc(2, min(63, delta))
+                else:
+                    self.nuendo_link.send_cc(2, 64 + min(63, -delta))
+        else:
+            self.nuendo_link.send_midi_cc_to_notes(
+                cfg.get('cc', FS_EXPRESSION_DEFAULT_CC), out)
+
+    def _pedal_keepalive_start(self, cfg, out):
+        """Hold the pedal's last value for Nuendo automation writing.
+
+        The pedal (unlike the touchstrip) has no touch contact, so we can't
+        know when the foot leaves it. Instead the value is re-sent (~10 Hz)
+        while the TRANSPORT is rolling — like keeping a fader touched for the
+        whole pass — and released shortly after the transport stops (or ~1s
+        after the last movement when stopped). A new pedal move re-arms it."""
+        self._pedal_ka_data = (cfg, out, time.time())
+        if getattr(self, '_pedal_ka_running', False):
+            return
+        self._pedal_ka_running = True
+
+        def _loop():
+            state = self.state
+            try:
+                while True:
+                    cfg_l, out_l, t_last = self._pedal_ka_data
+                    rolling = getattr(state, 'is_playing', False) or \
+                        getattr(state, 'is_recording', False)
+                    if not rolling and time.time() - t_last > 1.0:
+                        break                      # transport stopped → release
+                    if cfg_l.get('action') != FS_EXPRESSION or \
+                            cfg_l.get('target', 'cc') not in ('volume', 'qc', 'send'):
+                        break                      # target changed under us
+                    try:
+                        self._pedal_route_value(cfg_l, out_l)
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+            finally:
+                self._pedal_ka_running = False
+        import threading
+        threading.Thread(target=_loop, daemon=True).start()
+
+    def _on_strip_touch(self, touched):
+        """Physical touch state of the touchstrip (note 12 from the Push).
+
+        The strip only transmits when its VALUE changes, so resting a finger
+        still while writing volume automation starves Nuendo of messages — the
+        automation write releases after the Return Time and the value snaps
+        back to the existing curve. While touched in volume mode, keep
+        re-sending the current volume (~10 Hz) so the write gesture stays held;
+        releasing the finger stops it (normal automation release)."""
+        self._strip_touched = touched
+        if not touched or self.state.touchstrip_mode != 'volume':
+            return
+        self._strip_keepalive_gen = getattr(self, '_strip_keepalive_gen', 0) + 1
+        gen = self._strip_keepalive_gen
+
+        def _keepalive():
+            state = self.state
+            while (getattr(self, '_strip_touched', False) and
+                   gen == self._strip_keepalive_gen and
+                   state.touchstrip_mode == 'volume'):
+                try:
+                    sel = state.selected_track
+                    rel = state.selected_track_index - state.bank_offset
+                    if sel is not None and 0 <= rel < 8:
+                        self.nuendo_link.send_volume_change(rel, sel.volume)
+                except Exception:
+                    pass
+                time.sleep(0.1)
+        import threading
+        threading.Thread(target=_keepalive, daemon=True).start()
+
     def _handle_touchstrip(self, value):
         """Handle the Push 2 touchstrip.
-        
+
         value: -8192 to +8191 (signed, center=0)
         In modwheel mode: ignores physical return to center.
         In volume mode: controls the volume of the selected track.
@@ -3217,14 +3892,32 @@ class Push2Controller:
         if self.state.touchstrip_mode == "pitchbend":
             # Pitchbend: Point, autoreturn to center, push controls LEDs
             config = 0b1111000  # = 0x78
+        elif self.state.touchstrip_mode == "volume":
+            # Volume: Bar from bottom, no autoreturn, HOST controls the LEDs
+            # (bit 0) so the bar mirrors the track's actual volume — including
+            # changes made in Nuendo — instead of the last touch position.
+            config = 0b0000001  # = 0x01
         else:
-            # Modwheel/Volume: Bar from bottom, no autoreturn, push controls LEDs
+            # Modwheel: Bar from bottom, no autoreturn, push controls LEDs
             config = 0b0000000  # = 0x00
         self._send_midi_to_push([0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01, 0x17, config, 0xF7])
 
     def _update_touchstrip_leds(self, value):
-        """Update touchstrip LEDs for volume mode (currently disabled)."""
-        pass
+        """Set the touchstrip LED bar to a normalized 0.0-1.0 value (volume
+        mode only — the strip is configured with host-controlled LEDs there;
+        the host sets them by sending a pitch-bend message TO the Push)."""
+        if not self.push or self.state.touchstrip_mode != 'volume':
+            return
+        pb = max(0, min(16383, int(value * 16383)))
+        self._send_midi_to_push([0xE0, pb & 0x7F, (pb >> 7) & 0x7F])
+
+    def _refresh_touchstrip_leds(self):
+        """Mirror the selected track's volume on the strip LEDs (volume mode)."""
+        if self.state.touchstrip_mode != 'volume':
+            return
+        sel = self.state.selected_track
+        if sel is not None:
+            self._update_touchstrip_leds(sel.volume)
 
     def _configure_aftertouch(self):
         """Configure Push 2 for polyphonic aftertouch.
@@ -3561,6 +4254,7 @@ class Push2Controller:
             return
         self._update_mode_leds()
         self._update_nav_leds()
+        self._refresh_touchstrip_leds()
         if self.state.mode == MODE_CR:
             self._update_cr_leds()
         else:
@@ -3588,9 +4282,8 @@ class Push2Controller:
             self._send_midi_to_push([0xB0, 55, 127])
             self._send_midi_to_push([0xB0, 54, 127])
 
-            # Page Left/Right (monochrome): off (Overview pagination removed)
-            self._set_mono_led(BTN_PAGE_LEFT, 0)
-            self._set_mono_led(BTN_PAGE_RIGHT, 0)
+            # Page Left/Right LEDs are managed by _update_repeat_leds() (above):
+            # dim when Key Commands are reachable, off while Note Repeat is on.
 
             # Play (CC 85, colored): white when stopped, green or purple when playing
             if self.state.is_playing:
@@ -3695,6 +4388,17 @@ class Push2Controller:
 
         state = self.state
 
+        # ── Expand menu overlay: white on populated entries, off elsewhere ──
+        if getattr(state, 'expand_menu', None):
+            _, _, upper_entries = EXPAND_MENUS.get(state.expand_menu, ('', [], []))
+            for i in range(8):
+                try:
+                    self._send_midi_to_push(
+                        [0xB0, 102 + i, BTN_WHITE if i < len(upper_entries) else LED_OFF])
+                except Exception:
+                    pass
+            return
+
         # ── XY pad: upper row disabled (all off) ──
         if state.mode == MODE_XY:
             for i in range(8):
@@ -3706,7 +4410,7 @@ class Push2Controller:
 
         # ── Setup mode: upper row = page tabs ──
         if state.mode == MODE_SETUP:
-            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', None, None, 'About']
+            SETUP_PAGES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', 'Browser', None, 'About']
             for i in range(8):
                 cc = 102 + i
                 try:
@@ -3811,16 +4515,18 @@ class Push2Controller:
                     except Exception:
                         pass
             elif state.browser_phase == "plugin_list":
-                # Light buttons for visible plugins
-                total = len(state.browser_plugins)
+                # Vertical list: any upper button loads the highlighted plugin
+                has_sel = len(state.browser_view_indices()) > 0
                 for i in range(8):
-                    cc = 102 + i
                     try:
-                        plugin_idx = state.browser_scroll + i
-                        if plugin_idx < total:
-                            self._send_midi_to_push([0xB0, cc, BTN_WHITE])
-                        else:
-                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                        self._send_midi_to_push([0xB0, 102 + i, BTN_WHITE if has_sel else LED_OFF])
+                    except Exception:
+                        pass
+            elif state.browser_phase == "folder_select":
+                # Any upper button opens the highlighted folder
+                for i in range(8):
+                    try:
+                        self._send_midi_to_push([0xB0, 102 + i, BTN_WHITE])
                     except Exception:
                         pass
             return
@@ -3996,22 +4702,36 @@ class Push2Controller:
             pass
 
     def _update_repeat_leds(self):
-        """Update Repeat mode LEDs."""
+        """Update the note-value buttons (CC 36-43): Note Repeat subdivisions
+        (white — reserved for Repeat) when Repeat is on, otherwise Key Command
+        slots in the current page's colour (lit only where a slot is populated).
+        Also refreshes the Page Left/Right navigation LEDs."""
         if not self.push:
             return
         try:
             # Repeat button: always lit, bright if active, dim otherwise
             self._set_mono_led(BTN_REPEAT, 127 if self.note_repeat.enabled else 40)
-            
-            # Subdivision buttons (CC 36-43)
-            for i in range(8):
-                if self.note_repeat.enabled:
-                    if i == self.note_repeat.subdivision_index:
-                        self._send_midi_to_push([0xB0, 36 + i, LED_CYAN])
-                    else:
-                        self._send_midi_to_push([0xB0, 36 + i, LED_DIM_GREY])
-                else:
-                    self._send_midi_to_push([0xB0, 36 + i, 0])
+
+            if self.note_repeat.enabled:
+                # Repeat mode: all note-value buttons white, selected one red.
+                for i in range(8):
+                    val = LED_RED if i == self.note_repeat.subdivision_index else KC_LED_WHITE
+                    self._send_midi_to_push([0xB0, 36 + i, val])
+            else:
+                # Key Command mode: page colour on populated slots, off otherwise.
+                # Slot 0 = TOP button (CC 43) … slot 7 = bottom (CC 36).
+                kc = self.state.key_commands
+                page = kc[self.state.kc_page] if 0 <= self.state.kc_page < len(kc) else None
+                color_idx = KC_COLOR_MAP.get(page['color'], LED_DIM_GREY) if page else LED_DIM_GREY
+                slots = page['slots'] if page else []
+                for slot in range(8):
+                    has = bool(kc_slot_display_label(slots[slot])) if slot < len(slots) else False
+                    self._send_midi_to_push([0xB0, KC_SLOT_TO_CC[slot], color_idx if has else LED_OFF])
+
+            # Page L/R: dim when Key Commands are reachable (Repeat off)
+            pg_val = 0 if self.note_repeat.enabled else 40
+            self._set_mono_led(BTN_PAGE_LEFT, pg_val)
+            self._set_mono_led(BTN_PAGE_RIGHT, pg_val)
         except Exception:
             pass
     
@@ -4046,6 +4766,17 @@ class Push2Controller:
             return
 
         state = self.state
+
+        # ── Expand menu overlay: white on populated entries, off elsewhere ──
+        if getattr(state, 'expand_menu', None):
+            _, lower_entries, _ = EXPAND_MENUS.get(state.expand_menu, ('', [], []))
+            for i in range(8):
+                try:
+                    self._send_midi_to_push(
+                        [0xB0, 20 + i, BTN_WHITE if i < len(lower_entries) else LED_OFF])
+                except Exception:
+                    pass
+            return
 
         # ── XY pad: lower 1/2 = X/Y category (track=white, cc=yellow); 5-8 = M/S/Mon/R ──
         if state.mode == MODE_XY:
@@ -4120,6 +4851,15 @@ class Push2Controller:
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
                         elif i == 7:
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if cfg.get('invert') else BTN_DIM])
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.setup_page == 5:
+                        # Browser grouping: 1 = Type, 2 = Vendor
+                        mode = getattr(state, 'browser_group_mode', 'type')
+                        if i == 0:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if mode == 'type' else BTN_DIM])
+                        elif i == 1:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if mode == 'vendor' else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
                     else:
@@ -4310,11 +5050,27 @@ class Push2Controller:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
                     elif state.browser_phase == "plugin_list":
                         if i == 0:
-                            # Collection cycle button
-                            self._send_midi_to_push([0xB0, cc, BTN_YELLOW])
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE])   # LOAD
+                        elif i == 1:
+                            self._send_midi_to_push([0xB0, cc, BTN_YELLOW])  # ◄ FOLDERS
                         elif i == 7:
-                            # Back button
-                            self._send_midi_to_push([0xB0, cc, BTN_RED])
+                            self._send_midi_to_push([0xB0, cc, BTN_RED])     # BACK
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.browser_phase == "folder_select":
+                        if i == 0:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE])   # OPEN
+                        elif i == 1:
+                            self._send_midi_to_push([0xB0, cc, BTN_YELLOW])  # COLL ►
+                        elif i == 7:
+                            self._send_midi_to_push([0xB0, cc, BTN_RED])     # BACK
+                        else:
+                            self._send_midi_to_push([0xB0, cc, LED_OFF])
+                    elif state.browser_phase == "collection_select":
+                        if i == 0:
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE])   # SELECT
+                        elif i == 7:
+                            self._send_midi_to_push([0xB0, cc, BTN_RED])     # BACK
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
                 except Exception:
@@ -4390,10 +5146,14 @@ class Push2Controller:
 
         TARGET_FPS        = 30
         FRAME_TIME        = 1.0 / TARGET_FPS
+        IDLE_FRAME_TIME   = 1.0 / 8      # slow render rate once the image is static
+        IDLE_AFTER        = 20           # frames unchanged (~0.66s) before idling
         midi_check_ticks  = 0
         _frame_count      = 0
         _display_ok       = True
         _display_retry    = 0
+        _last_frame       = None         # last frame sent (for change detection)
+        _idle_frames      = 0            # consecutive unchanged frames
 
         while self._running:
             frame_start = time.time()
@@ -4405,6 +5165,8 @@ class Push2Controller:
                     midi_check_ticks = 0
                     if not self.push.midi_is_configured():
                         self.push.configure_midi()
+                        # A MIDI re-init can reset the pedal hardware config
+                        self._apply_all_pedal_hw_configs()
                     if not self.state.vegas_mode:
                         self._update_all_leds()
 
@@ -4438,6 +5200,16 @@ class Push2Controller:
 
                 if _display_ok:
                     frame = render_frame(self.state, self.pad_grid, self.cr_state)
+                    # Detect a static image to drive the adaptive frame rate, but
+                    # ALWAYS send: the Push 2 blanks its screen if it stops
+                    # receiving frames (~2s timeout). Slowing the render+send rate
+                    # (below) is what saves CPU; 8fps still keeps the display lit.
+                    frame_bytes = frame.tobytes()
+                    if frame_bytes == _last_frame:
+                        _idle_frames += 1
+                    else:
+                        _last_frame = frame_bytes
+                        _idle_frames = 0
                     self.push.display.display_frame(
                         frame,
                         input_format=push2_python.constants.FRAME_FORMAT_BGR565
@@ -4459,8 +5231,21 @@ class Push2Controller:
                     _display_ok = False
                     _display_retry = 0
 
+            # Keep full rate for LED-only animations the frame diff can't see
+            # (record-arm blink, Vegas), otherwise a static screen would slow
+            # them down.
+            if self.state.vegas_mode or (
+                    not self.state.is_recording
+                    and any(t.is_armed for t in self.state.tracks if t.name)):
+                _idle_frames = 0
+
+            # Adaptive pacing: full 30fps while the display is animating (VU
+            # meters, playback position, interaction), slow to ~8fps once it has
+            # been static for ~0.66s. Any change is picked up within one idle
+            # frame (~125ms) and instantly returns to 30fps.
+            target = IDLE_FRAME_TIME if _idle_frames >= IDLE_AFTER else FRAME_TIME
             elapsed    = time.time() - frame_start
-            sleep_time = FRAME_TIME - elapsed
+            sleep_time = target - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -5003,6 +5788,16 @@ class Push2Controller:
                 st.accent_velocity = int(data['accent_velocity'])
             if 'cr_phones_default' in data:
                 st.cr_phones_default = bool(data['cr_phones_default'])
+            if 'last_collection_index' in data:
+                try:
+                    st.browser_collection_index = int(data['last_collection_index'])
+                except (ValueError, TypeError):
+                    pass
+            _bgm = data.get('browser_group_mode')
+            if _bgm == 'folder':
+                _bgm = 'type'  # migrate old key
+            if _bgm in ('type', 'vendor'):
+                st.browser_group_mode = _bgm
             fs = data.get('footswitch')
             if isinstance(fs, dict):
                 for k, cfg in fs.items():
@@ -5015,6 +5810,32 @@ class Push2Controller:
                             st.footswitch[pedal]['action'] = cfg['action']
                         if 'invert' in cfg:
                             st.footswitch[pedal]['invert'] = bool(cfg['invert'])
+                        if 'cc' in cfg:
+                            try:
+                                st.footswitch[pedal]['cc'] = max(0, min(127, int(cfg['cc'])))
+                            except (ValueError, TypeError):
+                                pass
+                        if cfg.get('target') in ('cc', 'volume', 'qc', 'send', 'ai'):
+                            st.footswitch[pedal]['target'] = cfg['target']
+                        if 'qc_idx' in cfg:
+                            try:
+                                st.footswitch[pedal]['qc_idx'] = max(0, min(7, int(cfg['qc_idx'])))
+                            except (ValueError, TypeError):
+                                pass
+                        if 'send_idx' in cfg:
+                            try:
+                                st.footswitch[pedal]['send_idx'] = max(0, min(7, int(cfg['send_idx'])))
+                            except (ValueError, TypeError):
+                                pass
+                        # Expression-pedal calibration (contact + ADC range)
+                        if cfg.get('calibrated'):
+                            try:
+                                st.footswitch[pedal]['contact'] = int(cfg.get('contact', 1))
+                                st.footswitch[pedal]['v_min'] = max(0, min(4095, int(cfg.get('v_min', 0))))
+                                st.footswitch[pedal]['v_max'] = max(0, min(4095, int(cfg.get('v_max', 4095))))
+                                st.footswitch[pedal]['calibrated'] = True
+                            except (ValueError, TypeError):
+                                pass
             print("  ✓ Settings loaded")
         except Exception as e:
             print(f"  ⚠ Settings load error: {e}")
@@ -5029,8 +5850,18 @@ class Push2Controller:
                 'velocity_curve': st.velocity_curve,
                 'accent_velocity': int(getattr(st, 'accent_velocity', 100)),
                 'cr_phones_default': bool(getattr(st, 'cr_phones_default', False)),
+                'last_collection_index': int(getattr(st, 'browser_collection_index', 1)),
+                'browser_group_mode': getattr(st, 'browser_group_mode', 'folder'),
                 'footswitch': {str(k): {'action': v.get('action'),
-                                        'invert': bool(v.get('invert', False))}
+                                        'invert': bool(v.get('invert', False)),
+                                        'cc': int(v.get('cc', FS_EXPRESSION_DEFAULT_CC)),
+                                        'target': v.get('target', 'cc'),
+                                        'qc_idx': int(v.get('qc_idx', 0)),
+                                        'send_idx': int(v.get('send_idx', 0)),
+                                        'calibrated': bool(v.get('calibrated', False)),
+                                        'contact': int(v.get('contact', 0)),
+                                        'v_min': int(v.get('v_min', 0)),
+                                        'v_max': int(v.get('v_max', 4095))}
                                for k, v in st.footswitch.items()},
             }
             path = self._settings_path()
@@ -5161,7 +5992,11 @@ class Push2Controller:
             self._param_pb_to_da = {}
 
             def _norm(s):
-                return (s or '').lower().replace('_', ' ').strip()
+                # Treat '.', '_' and whitespace as equivalent separators so a
+                # pedalboard-slugged decimal ('2_5_khz') matches the host name
+                # ('2.5 kHz') — otherwise '2.5' vs '2 5' never lines up and the
+                # param shows as unmatched ("2_5_khz?") with no value.
+                return ' '.join((s or '').lower().replace('_', ' ').replace('.', ' ').split())
 
             da_list = [(idx, info['name']) for idx, info in da_params.items()]
             da_words = {idx: set(_norm(name).split()) for idx, name in da_list}

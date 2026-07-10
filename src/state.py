@@ -38,7 +38,7 @@ CS_PAGE_SAT = "sat"
 CS_PAGE_LIMITER = "limiter"
 
 # Bridge version
-BRIDGE_VERSION = "1.0.6"
+BRIDGE_VERSION = "1.0.7"
 
 # Aftertouch modes
 AT_POLY    = "poly"       # Polyphonic aftertouch (per-note)
@@ -60,19 +60,182 @@ FS_PLAY     = "play"       # Start playback
 FS_STOP     = "stop"       # Stop playback
 FS_RECORD   = "record"     # Record
 FS_RECSTOP  = "recstop"    # Toggle Record / Stop (start recording, then stop)
+FS_EXPRESSION = "expression"  # Continuous controller: send the pedal's 0-127
+                              # position as a CC to the instrument (CC selectable)
 FS_OFF      = "off"        # Do nothing
-# (label, value) order shown on the Setup pedal pages (lower-row buttons 1-7)
+# (label, value) order shown on the Setup pedal pages (lower-row buttons 1-7).
+# 'Stop' (FS_STOP) was dropped to make room for 'Expr'; the Play/Stop and
+# Rec/Stop toggles still stop the transport. FS_STOP stays defined so any
+# previously-saved 'stop' assignment keeps working (see _handle_footswitch).
 FS_OPTIONS = [
     ("Sustain", FS_SUSTAIN),
     ("Play/Stop", FS_PLAYSTOP),
     ("Play", FS_PLAY),
-    ("Stop", FS_STOP),
+    ("Expr", FS_EXPRESSION),
     ("Rec", FS_RECORD),
     ("Rec/Stop", FS_RECSTOP),
     ("Off", FS_OFF),
 ]
+# Default CC an expression pedal sends to the instrument (11 = Expression)
+FS_EXPRESSION_DEFAULT_CC = 11
+# Expression pedal destinations: (label, value). 'cc' = MIDI CC to the
+# instrument; the others drive Nuendo directly through existing bridge paths.
+FS_EXPR_TARGETS = [
+    ("MIDI CC", "cc"),
+    ("Volume", "volume"),       # selected track volume
+    ("QC", "qc"),               # selected track Quick Control 1-8
+    ("Send", "send"),           # selected track, currently active send slot
+    ("AI Knob", "ai"),          # value under the mouse (mValueUnderMouse)
+]
 # Pedal jack -> the MIDI CC the Push emits for that jack
 FS_PEDAL_CC = {1: 64, 2: 69}
+
+# ── Key Commands ─────────────────────────────────────────────────────────────
+# The 8 note-value buttons (CC 36-43) double as user-assignable Key Command
+# slots when Note Repeat is OFF. There are KC_NUM_PAGES pages, navigated with
+# Page Left / Right, giving KC_NUM_PAGES x KC_NUM_SLOTS distinct triggers. Each
+# (page, slot) emits a unique CC on a dedicated channel; the JS MIDI Remote
+# script exposes those as UNASSIGNED buttons so the user maps each one to any
+# Nuendo Key Command in the Mapping Assistant. We only persist labels + a
+# per-page colour for the Push display/LEDs (the actual command lives in Nuendo).
+KC_NUM_PAGES = 8
+KC_NUM_SLOTS = 8
+KC_MIDI_CHANNEL = 12          # 0-indexed (MIDI channel 13, status 0xBC); collision-free
+KC_LONG_PRESS_SEC = 0.4       # hold this long on a slot to open the legend overlay
+# Selectable button colours (name -> Push 2 button LED palette INDEX). These
+# indices address the Push's *factory* palette, verified against real hardware
+# (they differ from push2-python's DEFAULT_COLOR_PALETTE, which is not what the
+# device actually renders). White (index 53) is reserved for Note Repeat, so it
+# is intentionally NOT offered here.
+#   Confirmed on hardware: 3=coral/salmon, 9=yellow, 13=green, 26=fuchsia,
+#   37=cyan, 48=blue, 53=white, 127=red.  purple(22) is still an estimate.
+KC_COLORS = [
+    ("red", 127), ("coral", 3), ("yellow", 9), ("green", 13),
+    ("cyan", 37), ("blue", 48), ("purple", 22), ("fuchsia", 26),
+]
+KC_COLOR_MAP = dict(KC_COLORS)
+KC_LED_WHITE = 53             # confirmed white index for the note-value buttons
+# Default colour for each page (one per page, in palette order)
+KC_DEFAULT_PAGE_COLORS = [name for name, _ in KC_COLORS]
+
+# Note-value buttons, ordered TOP → BOTTOM to match the labels printed on the
+# Push. Slot 0 = top button. Each entry is (physical label, the CC the Push
+# emits for that button): CC 36='1/4' (bottom) … CC 43='1/32t' (top).
+KC_SLOT_BUTTONS = [
+    ('1/32t', 43), ('1/32', 42), ('1/16t', 41), ('1/16', 40),
+    ('1/8t', 39),  ('1/8', 38),  ('1/4t', 37),  ('1/4', 36),
+]
+KC_BUTTON_NAME_TO_SLOT = {name: i for i, (name, cc) in enumerate(KC_SLOT_BUTTONS)}
+KC_SLOT_TO_CC = [cc for name, cc in KC_SLOT_BUTTONS]  # physical CC per slot index
+
+def kc_slot_cc(page, slot):
+    """The unique CC number a given (page, slot) emits on KC_MIDI_CHANNEL."""
+    return page * KC_NUM_SLOTS + slot
+
+def make_default_key_commands():
+    """Fresh in-memory KC config: KC_NUM_PAGES pages, each with a colour and
+    KC_NUM_SLOTS empty slots ({'command': str, 'label': str})."""
+    return [
+        {'color': KC_DEFAULT_PAGE_COLORS[p % len(KC_DEFAULT_PAGE_COLORS)],
+         'slots': [{'command': '', 'label': ''} for _ in range(KC_NUM_SLOTS)]}
+        for p in range(KC_NUM_PAGES)
+    ]
+
+def kc_slot_display_label(slot):
+    """Label shown on the Push for a slot: short label overrides, else the
+    command text, else '' (caller renders a positional placeholder)."""
+    if not isinstance(slot, dict):
+        return ''
+    return (slot.get('label') or slot.get('command') or '').strip()
+
+# ── Expand menus (long-press New / Duplicate / Mute / Play / Record) ────────
+# A long-press opens an on-screen menu on the lower-row buttons; it stays until
+# another display mode is selected. Entry = (label, kind, payload):
+#   kind 'js'  → payload = index into EXPAND_JS_COMMANDS (fired via wire ch 14
+#                = 0xBD, CC = index; the JS holds the matching makeCommandBinding
+#                table — KEEP BOTH TABLES IN SYNC)
+#   kind 'cc'  → payload = channel-0 CC pulsed 127/0 (existing bridge paths)
+EXPAND_JS_COMMANDS = [
+    ('TrackVersions', 'New Version'),            # 0
+    ('Audio', 'Events to Part'),                 # 1
+    ('Edit', 'To Real Copy'),                    # 2
+    ('Render in Place', 'Render'),               # 3
+    ('Edit', 'Group'),                           # 4
+    ('Transport', 'Insert Marker'),              # 5
+    ('Audio', 'Bounce'),                         # 6
+    ('Edit', 'Duplicate'),                       # 7
+    ('Edit', 'Repeat'),                          # 8
+    ('Edit', 'Fill Loop'),                       # 9
+    ('Mixer', 'Bypass: Sends'),                  # 10
+    ('Mixer', 'Bypass: Inserts'),                # 11
+    ('Mixer', 'Bypass: Channel Strip'),          # 12
+    ('Mixer', 'Bypass: EQs'),                    # 13
+    ('Transport', 'Audio Record Mode'),          # 14
+    ('Transport', 'MIDI Record Mode'),           # 15
+    ('Transport', 'MIDI Cycle Record Mode'),     # 16
+    ('Transport', 'Global Retrospective Record'),# 17
+    ('Transport', 'Auto Punch In'),              # 18
+    ('Transport', 'Auto Punch Out'),             # 19
+    ('Transport', 'Use Pre-roll'),               # 20
+    ('Transport', 'Sync Punch To Cycle'),        # 21
+    ('Transport', 'Play Selection Range'),       # 22
+    ('Transport', 'Play Selection Solo'),        # 23
+    ('Transport', 'Play from Selection Start'),  # 24
+    ('Transport', 'Play until Selection End'),   # 25
+    ('Transport', 'Play until Next Marker'),     # 26
+    ('Transport', 'Loop Selection'),             # 27
+    ('Transport', 'Shuttle Play 2x'),            # 28
+    ('Transport', 'Shuttle Play 1/2x'),          # 29
+    ('Transport', 'Start Mode'),                 # 30
+    ('Transport', 'Set Left Locator'),           # 31
+    ('Transport', 'Activate Return to Start Position'),  # 32
+    ('Transport', 'Play until Selection Start'), # 33
+    ('Transport', 'Play from Selection End'),    # 34
+    ('Transport', 'Set Right Locator'),          # 35
+    ('Transport', 'Loop Selection Solo'),        # 36
+    ('Transport', 'StartStop Preview'),          # 37
+    ('Transport', 'Use Post-roll'),              # 38
+]
+# Menu = (title, lower_row_entries, upper_row_entries) — each row up to 8.
+# Entry kinds: 'js' = one command (index into EXPAND_JS_COMMANDS), 'cc' =
+# channel-0 CC pulse (existing bridge paths).
+EXPAND_MENUS = {
+    'new': ('NEW', [
+        ('Track Vers.', 'js', 0), ('Events>Part', 'js', 1), ('Real Copy', 'js', 2),
+        ('Render', 'js', 3), ('Group', 'js', 4), ('Marker', 'js', 5),
+        ('Bounce', 'js', 6),
+    ], []),
+    'duplicate': ('DUPLICATE', [
+        ('Dup Track', 'cc', 69), ('Dup Version', 'cc', 70), ('Dup Clip', 'js', 7),
+        ('Repeat', 'js', 8), ('Fill Loop', 'js', 9),
+    ], []),
+    'mute': ('MUTE / BYPASS', [
+        # NOTE: the Mixer::Bypass commands only act when the MixConsole window
+        # is FOCUSED in Nuendo (Nuendo limitation, documented in the guide).
+        ('Unmute All', 'cc', 75), ('Byp Sends', 'js', 10),
+        ('Byp Inserts', 'js', 11), ('Byp Strip', 'js', 12),
+        ('Byp EQs', 'js', 13),
+    ], []),
+    'record': ('RECORD MODES', [
+        ('Audio Mode', 'js', 14), ('MIDI Mode', 'js', 15), ('MIDI Cycle', 'js', 16),
+        ('Retro Rec', 'js', 17), ('Punch In', 'js', 18), ('Punch Out', 'js', 19),
+        ('Punch=Cycle', 'js', 21),
+    ], [  # upper row — roll options together
+        ('Pre-roll', 'js', 20), ('Post-roll', 'js', 38),
+    ]),
+    'play': ('PLAY MODES', [
+        ('Play Sel', 'js', 22), ('Sel Solo', 'js', 23), ('From Start', 'js', 24),
+        ('Until End', 'js', 25), ('To Marker', 'js', 26),
+        ('Shuttle 2x', 'js', 28), ('Shuttle .5x', 'js', 29),
+    ], [  # upper row — start modes; locators side by side (6-7)
+        ('Start Mode', 'js', 30), ('Auto RTZ', 'js', 32), ('Until Start', 'js', 33),
+        ('From End', 'js', 34), ('Preview', 'js', 37),
+        ('Set L Loc', 'js', 31), ('Set R Loc', 'js', 35),
+    ]),
+    'loop': ('LOOP', [
+        ('Loop Sel', 'js', 27), ('Loop Sel Solo', 'js', 36),
+    ], []),
+}
 
 # Number of tracks displayed simultaneously (= number of encoders)
 BANK_SIZE = 8
@@ -89,6 +252,11 @@ class TrackInfo:
     def __init__(self, index):
         self.index = index          # Track position (0, 1, 2...)
         self.name = f"Track {index + 1}"  # Name displayed on screen
+        # True once Nuendo has actually sent a name for this slot. Cells that
+        # were never populated (banked past the last visible track) render blank
+        # instead of the "Track NN" placeholder, so the end of the project reads
+        # as empty rather than as random ghost tracks.
+        self.populated = False
         
         # Track color (RGB, as in Nuendo)
         # Default: grey, will be updated by Nuendo
@@ -405,7 +573,11 @@ class AppState:
         # bank_offset = 0 → tracks 1-8
         # bank_offset = 8 → tracks 9-16, etc.
         self.bank_offset = 0
-        
+        # Dynamically-learned last reachable bank offset (end of the VISIBLE
+        # project). None = not yet known / unlimited. Set by the end-of-project
+        # detection in nuendo_link (0x11 no-movement); reset on scan/reconnect.
+        self.bank_offset_cap = None
+
         # ── Tracks ──
         # Pre-allocate 128 tracks. They will be updated by Nuendo.
         self.tracks = [TrackInfo(i) for i in range(128)]
@@ -512,15 +684,29 @@ class AppState:
         self.velocity_curve = VC_LINEAR  # default: linear velocity
 
         # ── Footswitch / pedals (jack 1 = CC 64, jack 2 = CC 69) ──
-        # Per pedal: {'action': FS_*, 'invert': bool}. In-memory like the other
-        # Setup options (reset on restart).
+        # Per pedal: {'action': FS_*, 'invert': bool, 'cc': int}. 'cc' is the
+        # destination CC used only when action == FS_EXPRESSION. Persisted to
+        # settings.json alongside the other Setup options.
         self.footswitch = {
-            1: {'action': FS_SUSTAIN,  'invert': False},  # jack 1 (CC 64)
-            2: {'action': FS_PLAYSTOP, 'invert': False},  # jack 2 (CC 69)
+            1: {'action': FS_SUSTAIN,  'invert': False, 'cc': FS_EXPRESSION_DEFAULT_CC,
+                'target': 'cc', 'qc_idx': 0, 'send_idx': 0},  # jack 1 (CC 64)
+            2: {'action': FS_PLAYSTOP, 'invert': False, 'cc': FS_EXPRESSION_DEFAULT_CC,
+                'target': 'cc', 'qc_idx': 0, 'send_idx': 0},  # jack 2 (CC 69)
         }
+        # Expression-pedal calibration in progress: None, or
+        # {'pedal': 1|2, 'live': [ring, tip], 'min': [..], 'max': [..]} (raw ADC)
+        self.pedal_cal = None
         
         # Pad note range label for the Mix footer (e.g. "C1-G5"), updated by the controller
         self.pad_note_range = ""
+
+        # Expand menu overlay: None, or a key of EXPAND_MENUS ('new', 'mute', …)
+        self.expand_menu = None
+
+        # ── Key Commands (note-value buttons CC 36-43, active when Repeat off) ──
+        self.kc_page = 0                 # current page index (0..KC_NUM_PAGES-1)
+        self.kc_legend_active = False    # True while the on-screen legend overlay is shown
+        self.key_commands = make_default_key_commands()  # loaded from keycommands.json
 
         # ── XY pad (Shift+Device) ──
         # Each axis targets either a selected-track parameter or a raw MIDI CC.
@@ -570,9 +756,20 @@ class AppState:
         self.browser_scroll = 0             # Index of first visible plugin
         self.browser_selected = 0           # Index of selected plugin
         self.browser_target_slot = 0        # Insert slot to load into
-        self.browser_phase = "slot_select"  # "slot_select" or "plugin_list"
+        self.browser_phase = "slot_select"  # slot_select / collection_select / folder_select / plugin_list
         self.browser_prev_mode = MODE_VOLUME  # Mode to return to on cancel
         self.browser_instrument = False     # True = browsing/loading VST instruments
+        # ── Folder navigation within a collection ──
+        # Groups plugins by mCollectionPath ('folder') or by manufacturer
+        # ('vendor', virtual folders). "All" (key=None) is always first.
+        self.browser_folders = []           # [{key, label, count}]
+        self.browser_folder = None          # Selected group key; None = All (flat)
+        self.browser_folder_label = ""      # Label of the selected group (for titles)
+        self.browser_folder_scroll = 0      # Selected folder in the folder picker
+        # 'type' = the collection's own folders (mCollectionPath); 'vendor' =
+        # virtual folders by manufacturer. Only takes effect on the "Default"
+        # collection (whose folders are organised by plugin type).
+        self.browser_group_mode = 'type'
         
         # ── Channel Strip (v1.0.4) ──
         # Holds the selected track's PreFilter, ChannelEQ, and 5 strip slots.
@@ -596,6 +793,54 @@ class AppState:
         if 0 <= self.selected_track_index < len(self.tracks):
             return self.tracks[self.selected_track_index]
         return self.tracks[0]
+
+    def _browser_effective_group(self):
+        """The grouping only switches to 'vendor' on the Default collection
+        (its folders are by type); every other collection always shows its own
+        folders (mCollectionPath)."""
+        name = (getattr(self, 'browser_collection_name', '') or '').strip().lower()
+        if name == 'default' and getattr(self, 'browser_group_mode', 'type') == 'vendor':
+            return 'vendor'
+        return 'type'
+
+    def _browser_group_field(self):
+        return 'vendor' if self._browser_effective_group() == 'vendor' \
+            else 'collection_path'
+
+    def build_browser_folders(self):
+        """Group the current plugin list by folder (mCollectionPath) or by
+        manufacturer (vendor), per the effective grouping. Produces
+        self.browser_folders = [{key,label,count}] with an "All" (key=None)
+        entry first."""
+        mode = self._browser_effective_group()
+        field = self._browser_group_field()
+        counts = {}
+        for p in self.browser_plugins:
+            if not p:
+                continue
+            key = (p.get(field) or '').strip()
+            counts[key] = counts.get(key, 0) + 1
+        total = sum(counts.values())
+        folders = [{'key': None, 'label': 'All', 'count': total}]
+        for key in sorted(counts, key=lambda k: k.lower()):
+            if key == '':
+                label = '(no vendor)' if mode == 'vendor' else '(root)'
+            elif mode == 'vendor':
+                label = key
+            else:
+                label = key.lstrip('/').replace('/', ' / ')
+            folders.append({'key': key, 'label': label, 'count': counts[key]})
+        self.browser_folders = folders
+
+    def browser_view_indices(self):
+        """Absolute indices into browser_plugins for the current group filter
+        (browser_folder). None → the whole collection (flat)."""
+        key = self.browser_folder
+        if key is None:
+            return [i for i, p in enumerate(self.browser_plugins) if p]
+        field = self._browser_group_field()
+        return [i for i, p in enumerate(self.browser_plugins)
+                if p and (p.get(field) or '').strip() == key]
 
     def get_encoder_value_for_mode(self, track_index_in_bank, mode=None):
         """

@@ -1,6 +1,6 @@
 // =============================================================================
 // Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
-// Version 1.0.6-dev
+// Version 1.0.7
 //
 // A single bank zone of 8 channels.
 // Banking via mNextBank/mPrevBank (CC 8/9).
@@ -15,7 +15,37 @@
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
 
-var JS_VERSION = '1.0.6';
+var JS_VERSION = '1.0.7';
+
+// ── TEXT SANITIZER ──
+// Names/values are packed into 7-bit SysEx with `charCodeAt(c) & 0x7F`. A char
+// above U+007E (e.g. Maag EQ4's "2.5㎑" band, which uses the single glyph
+// U+3391 ㎑) gets bit-masked into a garbage/control byte that the Push renders
+// as "?". asciiSafe() maps the common unit/symbol glyphs plug-ins use to ASCII
+// and replaces anything else outside printable ASCII, so the display stays
+// clean. It is a no-op on plain-ASCII input, so wrapping any name/value source
+// is safe.
+// Keys use \uXXXX escapes (not literal glyphs) so the mapping can't be broken
+// by the host reading this source file with an unexpected text encoding.
+var ASCII_MAP = {
+    '\u3390': 'Hz', '\u3391': 'kHz', '\u3392': 'MHz', '\u3393': 'GHz', // HZ kHZ MHZ GHZ squared glyphs
+    '\u00b5': 'u',  '\u03bc': 'u',                                       // micro sign / greek mu
+    '\u2212': '-',  '\u2013': '-',  '\u2014': '-',                      // minus / en-dash / em-dash
+    '\u00b0': 'deg','\u2103': 'C',  '\u2109': 'F',  '\u221e': 'inf',   // degree / celsius / fahrenheit / infinity
+    '\u2044': '/',  '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"'  // fraction slash / smart quotes
+};
+function asciiSafe(str) {
+    if (!str) return '';
+    var out = '';
+    for (var i = 0; i < str.length; i++) {
+        var code = str.charCodeAt(i);
+        var ch = str.charAt(i);
+        if (code >= 0x20 && code <= 0x7E) { out += ch; }
+        else if (ASCII_MAP[ch] !== undefined) { out += ASCII_MAP[ch]; }
+        else { out += '?'; }
+    }
+    return out;
+}
 
 var midiremote_api = require('midiremote_api_v1');
 
@@ -168,6 +198,25 @@ autoWriteBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToContr
 var metronomeBtn = surface.makeButton(0, 26, 3, 2);
 metronomeBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, 58);
 
+// ── KEY COMMAND SLOTS ──
+// The 8 note-value buttons (CC 36-43) double as user-assignable Key Command
+// slots when Note Repeat is OFF. 8 pages x 8 slots = 64 buttons on MIDI channel
+// 13 (0xBC), CC 0-63 (cc = page*8 + slot). They are deliberately left WITHOUT a
+// host binding so the user assigns each to any Nuendo Key Command in the MIDI
+// Remote Mapping Assistant. The Python bridge emits the matching CC on channel
+// 13 when a note-value button is tapped; Page Left/Right select the page.
+var keyCmdButtons = [];
+for (var kcPage = 0; kcPage < 8; kcPage++) {
+    for (var kcSlot = 0; kcSlot < 8; kcSlot++) {
+        var kcCC = kcPage * 8 + kcSlot;
+        var kcBtn = surface.makeButton(kcSlot * 2, 30 + kcPage * 2, 2, 2);
+        kcBtn.mSurfaceValue.mMidiBinding
+            .setInputPort(midiInput_Loop)
+            .bindToControlChange(12, kcCC);
+        keyCmdButtons.push(kcBtn);
+    }
+}
+
 // (The old Control Room volume knob on CC 65 was removed: the bridge stopped
 //  sending CC 65 long ago — CR Main/Phones now use CC 79/77 — and CC 65 also
 //  collides with sendEnableButtons[5] (CC 60-67).)
@@ -176,6 +225,12 @@ metronomeBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToContr
 // MAPPING
 // ══════════════════════════════════════════════════
 var page = deviceDriver.mMapping.makePage('Push2');
+
+// === GENERATED KEY COMMAND BINDINGS START ===
+// This block is rewritten by the Key Commands web editor (Generate script).
+// Each line binds one note-value button (keyCmdButtons[page*8 + slot]) to a
+// Nuendo command. Do not edit by hand — your changes will be overwritten.
+// === GENERATED KEY COMMAND BINDINGS END ===
 
 var bankZone = page.mHostAccess.mMixConsole.makeMixerBankZone()
     .setFollowVisibility(true);
@@ -378,7 +433,7 @@ for (var i = 0; i < 8; i++) {
     })(i);
     knobsVol[i].mSurfaceValue.mOnDisplayValueChange = (function(idx) {
         return function(activeDevice, value, units) {
-            var str = value + ' ' + units;
+            var str = asciiSafe(value + ' ' + units);
             var msg = [0xF0, 0x00, 0x21, 0x09, 0x04, idx & 0x7F];
             for (var c = 0; c < Math.min(str.length, 16); c++) {
                 msg.push(str.charCodeAt(c) & 0x7F);
@@ -574,6 +629,20 @@ for (var sk = 0; sk < 8; sk++) {
 }
 console.log("Send Level Knobs OK (ch3 CC20-27)");
 
+// ABSOLUTE knobs for the selected track's send levels (CC 100-107, wire ch 7).
+// Used by the expression pedal's 'Send' target: an absolute controller can't
+// ride the relative ch3 knobs above without wind-up, so it gets its own
+// absolute bindings to the same host values.
+var selSendAbsKnobs = [];
+for (var sa = 0; sa < 8; sa++) {
+    var saKnob = surface.makeKnob(sa * 3, 97, 2, 2);
+    saKnob.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop)
+        .bindToControlChange(6, 100 + sa);
+    page.makeValueBinding(saKnob.mSurfaceValue, selTrackSends.getByIndex(sa).mLevel);
+    selSendAbsKnobs.push(saKnob);
+}
+console.log("Send Level ABS Knobs OK (ch7 CC100-107)");
+
 // Transport
 page.makeValueBinding(transportPlay.mSurfaceValue, page.mHostAccess.mTransport.mValue.mStart).setTypeToggle();
 page.makeValueBinding(transportStop.mSurfaceValue, page.mHostAccess.mTransport.mValue.mStop).setTypeToggle();
@@ -668,6 +737,63 @@ for (var navI = 0; navI < navCommands.length; navI++) {
     nb.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(0, navCommands[navI][0]);
     page.makeCommandBinding(nb.mSurfaceValue, navCommands[navI][1], navCommands[navI][2]);
     navButtons.push(nb);
+}
+
+// ── EXPAND MENU COMMANDS ──
+// Long-press menus on the bridge (New / Duplicate / Mute / Play / Record) fire
+// these commands via wire channel 14 (0xBD), CC = table index. This table MUST
+// stay in sync with EXPAND_JS_COMMANDS in the bridge's state.py.
+var expandCommands = [
+    ['TrackVersions', 'New Version'],             // 0
+    ['Audio', 'Events to Part'],                  // 1
+    ['Edit', 'To Real Copy'],                     // 2
+    ['Render in Place', 'Render'],                // 3
+    ['Edit', 'Group'],                            // 4
+    ['Transport', 'Insert Marker'],               // 5
+    ['Audio', 'Bounce'],                          // 6
+    ['Edit', 'Duplicate'],                        // 7
+    ['Edit', 'Repeat'],                           // 8
+    ['Edit', 'Fill Loop'],                        // 9
+    ['Mixer', 'Bypass: Sends'],                   // 10
+    ['Mixer', 'Bypass: Inserts'],                 // 11
+    ['Mixer', 'Bypass: Channel Strip'],           // 12
+    ['Mixer', 'Bypass: EQs'],                     // 13
+    ['Transport', 'Audio Record Mode'],           // 14
+    ['Transport', 'MIDI Record Mode'],            // 15
+    ['Transport', 'MIDI Cycle Record Mode'],      // 16
+    ['Transport', 'Global Retrospective Record'], // 17
+    ['Transport', 'Auto Punch In'],               // 18
+    ['Transport', 'Auto Punch Out'],              // 19
+    ['Transport', 'Use Pre-roll'],                // 20
+    ['Transport', 'Sync Punch To Cycle'],         // 21
+    ['Transport', 'Play Selection Range'],        // 22
+    ['Transport', 'Play Selection Solo'],         // 23
+    ['Transport', 'Play from Selection Start'],   // 24
+    ['Transport', 'Play until Selection End'],    // 25
+    ['Transport', 'Play until Next Marker'],      // 26
+    ['Transport', 'Loop Selection'],              // 27
+    ['Transport', 'Shuttle Play 2x'],             // 28
+    ['Transport', 'Shuttle Play 1/2x'],           // 29
+    ['Transport', 'Start Mode'],                  // 30
+    ['Transport', 'Set Left Locator'],            // 31
+    ['Transport', 'Activate Return to Start Position'], // 32
+    ['Transport', 'Play until Selection Start'],  // 33
+    ['Transport', 'Play from Selection End'],     // 34
+    ['Transport', 'Set Right Locator'],           // 35
+    ['Transport', 'Loop Selection Solo'],         // 36
+    ['Transport', 'StartStop Preview'],           // 37
+    ['Transport', 'Use Post-roll'],               // 38
+];
+var expandButtons = [];  // keep references so the bindings persist
+for (var exI = 0; exI < expandCommands.length; exI++) {
+    var exBtn = surface.makeButton(70 + (exI % 8) * 2, 40 + Math.floor(exI / 8) * 2, 2, 2);
+    exBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(13, exI);
+    try {
+        page.makeCommandBinding(exBtn.mSurfaceValue, expandCommands[exI][0], expandCommands[exI][1]);
+    } catch (eExp) {
+        console.log('Expand cmd ' + exI + ' (' + expandCommands[exI][1] + ') failed: ' + eExp);
+    }
+    expandButtons.push(exBtn);
 }
 
 // AI Knob (Mouse Pointer)
@@ -1042,6 +1168,7 @@ stopScanBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, 
 var daAvailable = false;
 var da = null;
 var daDiagDone = false;
+var daAvailTick = 0;   // periodic re-broadcast of the "DA available" flag (CC 68=1)
 var daMapping = null;  // stored activeMapping from mOnActivate
 var daBank = null;        // DirectAccess anchored on bank-zone channel 0
 var daBankActive = false; // lazily activated on first bank-position poll
@@ -2186,6 +2313,19 @@ if (page.mHostAccess.makeDirectAccess) {
         daBypassStripSlot(activeDevice, daMapping, slotIdx, wantBypass);
     };
 
+    // CC 89 ch8: activate/deactivate a strip slot (its mOn power state)
+    // value = (wantOn ? 0x40 : 0x00) | (slotIndex & 0x07)
+    var daStripOnBtn = surface.makeButton(89, 22, 2, 2);
+    daStripOnBtn.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, 89);
+    daStripOnBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+        var raw = Math.round(value * 127);
+        if (!daMapping) return;
+        if (!ensureDAInserts()) return;
+        var wantOn = (raw & 0x40) !== 0;
+        var slotIdx = raw & 0x07;
+        daOnStripSlot(activeDevice, daMapping, slotIdx, wantOn);
+    };
+
     // CC 72 ch8: open/close plugin UI for a strip slot
     // value = slotIndex (0-4)
     var daStripEditBtn = surface.makeButton(72, 22, 2, 2);
@@ -2564,6 +2704,31 @@ if (page.mHostAccess.makeDirectAccess) {
         }
     }
 
+    // ── daOnStripSlot ──
+    // Activate/deactivate a strip module (its mOn / "Activate" power state) via
+    // DirectAccess tag 4098 — the reliable path (the binding-path mOn toggle
+    // doesn't survive Cubase's bank-zone refresh, same reason bypass uses DA).
+    // Confirms via SysEx 0x40 [slotIdx, success, isOn].
+    function daOnStripSlot(activeDevice, activeMapping, slotIdx, wantOn) {
+        if (!daStripExplored || slotIdx >= daStripSlotCache.length) {
+            console.log('DA StripOn: cache not ready or slot ' + slotIdx + ' out of range');
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x40, slotIdx & 0x7F, 0x00, 0xF7]);
+            return;
+        }
+        try {
+            var e = daStripSlotCache[slotIdx];
+            var newVal = wantOn ? 1.0 : 0.0;
+            daBypassCooldown = 10;
+            daInserts.setParameterProcessValue(activeMapping, e.objectID, SLOT_ON_TAG, newVal);
+            e.isOn = wantOn;
+            console.log('DA StripOn ' + slotIdx + ' (' + e.slotTitle + '): ' + (wantOn ? 'ON' : 'OFF'));
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x40, slotIdx & 0x7F, 0x01, wantOn ? 1 : 0, 0xF7]);
+        } catch(err) {
+            console.log('DA StripOn error: ' + err);
+            midiOutput_Loop.sendMidi(activeDevice, [0xF0, 0x00, 0x40, slotIdx & 0x7F, 0x00, 0xF7]);
+        }
+    }
+
     // ── daEditStripSlot ──
     // Toggles SLOT_EDIT_TAG (open/close plugin UI) on a strip slot.
     // Confirms via SysEx 0x37 [slotIdx, success].
@@ -2869,6 +3034,13 @@ if (page.mHostAccess.makeDirectAccess) {
 // IDLE
 // ══════════════════════════════════════════════════
 var tick = 0;
+// NOTE (July 2026): a periodic "follow-visibility nudge" (mOnIdle DirectAccess
+// write-same-value on automation-read, from a Steinberg forum trick) was tried
+// here and REMOVED: forced re-evaluations drift the DA anchor, so the write
+// lands on WRONG channels (it flipped automation Read/Write across the whole
+// project) and feeds bogus 0x11 positions. Never nudge via DA writes. Nuendo
+// re-evaluates visibility by itself within ~10-20s; selecting a track refreshes
+// immediately (documented in the guide).
 var bankPollTick = 0;       // throttle for the bank-position poll (~160ms)
 var lastBankStartSent = -1; // last bank start index reported via SysEx 0x11
 var bankRebroadcast = 0;    // periodic re-send counter (covers a lost 0x11)
@@ -2885,6 +3057,20 @@ deviceDriver.mOnIdle = function(context) {
     if (tick >= 5) {
         tick = 0;
         midiOutput_Loop.sendMidi(context, [0xBF, 127, 1]);
+    }
+
+    // Re-broadcast "DirectAccess available" (CC 68=1) periodically. It is first
+    // sent once from mOnActivate, but on slow systems (emulated VMs) that lone
+    // message can be dropped on the MIDI loopback — leaving the bridge with
+    // _da_available=False and the Plugin Browser stuck on "Loading". Repeating
+    // it every ~2s lets the bridge recover. The bridge only acts on the
+    // False→True transition, so the repeats are harmless once it's set.
+    daAvailTick++;
+    if (daAvailTick >= 40) {
+        daAvailTick = 0;
+        if (da && daMapping) {
+            midiOutput_Loop.sendMidi(context, [0xB0, 68, 1]);
+        }
     }
 
     // After first heartbeat, send current volume/pan values to bridge
@@ -2925,6 +3111,11 @@ deviceDriver.mOnIdle = function(context) {
             if (!daBankActive) { daBank.activate(daMapping); daBankActive = true; }
             var bPos = daBank.getMixerChannelIndex(daMapping, daBank.getBaseObjectID(daMapping));
             var bStart = bPos - 1;  // mixer position is 1-based
+            // NOTE: this is the GLOBAL console position — it counts hidden
+            // channels (hidden input/output channels, children of closed
+            // folders), so it does NOT match the bridge's visible-space
+            // bank_offset in such projects. The bridge therefore treats these
+            // reports as informational only (auto-correct off by default).
             if (bStart !== bankStableVal) {
                 // New reading: remember it, but only report once CONFIRMED by
                 // the next poll. Transient DA glitches never reach the bridge.
@@ -3008,7 +3199,10 @@ deviceDriver.mOnIdle = function(context) {
     // ── Plugin List queue: send entries in batches ──
     if (pluginListQueue) {
         var q = pluginListQueue;
-        var batchSize = 10;  // ~10 entries per tick ≈ 500/s → 352 in ~0.7s
+        var batchSize = 40;  // batched per idle tick; the bridge caches the
+                             // full list to disk so this streaming only runs on
+                             // the first load / background refresh (~3s for
+                             // 1300 vs 12s at the old batch of 10)
         for (var b = 0; b < batchSize && q.sendIdx < q.total; b++) {
             try {
                 var pe = q.coll.mEntries[q.sendIdx];
@@ -3037,6 +3231,14 @@ deviceDriver.mOnIdle = function(context) {
                 var pUID = pe.mPluginUID || '';
                 for (var c = 0; c < pUID.length && c < 40; c++) {
                     var ch = pUID.charCodeAt(c) & 0x7F;
+                    if (ch > 0) msg.push(ch);
+                }
+                msg.push(0x00);
+                // Folder path within the collection (e.g. "/Arturia",
+                // "/Dynamics/Comp"). Enables folder navigation on the Push.
+                var pPath = pe.mCollectionPath || '';
+                for (var c = 0; c < pPath.length && c < 60; c++) {
+                    var ch = pPath.charCodeAt(c) & 0x7F;
                     if (ch > 0) msg.push(ch);
                 }
                 msg.push(0xF7);
@@ -3107,7 +3309,7 @@ try {
         // Feedback: send the parameter name and value to the bridge
         paramVal.mOnTitleChange = (function(idx) {
             return function(activeDevice, activeMapping, objectTitle, valueTitle) {
-                var title = valueTitle || objectTitle || '';
+                var title = asciiSafe(valueTitle || objectTitle || '');
                 if (title) {
                     var bytes = [0xF0, 0x00, 0x16, idx & 0x7F];
                     for (var c = 0; c < title.length && c < 20; c++) {
@@ -3121,7 +3323,7 @@ try {
         
         paramVal.mOnDisplayValueChange = (function(idx) {
             return function(activeDevice, activeMapping, value, units) {
-                var display = value || '';
+                var display = asciiSafe(value || '');
                 var bytes = [0xF0, 0x00, 0x17, idx & 0x7F];
                 for (var c = 0; c < display.length && c < 16; c++) {
                     bytes.push(display.charCodeAt(c) & 0x7F);
@@ -3248,6 +3450,7 @@ function makeStripVar(name, modId, paramId) {
         var combined = '';
         if (objectTitle) combined = objectTitle;
         if (valueTitle) combined = combined ? (combined + ':' + valueTitle) : valueTitle;
+        combined = asciiSafe(combined);
         for (var c = 0; c < Math.min(combined.length, 60); c++) {
             msg.push(combined.charCodeAt(c) & 0x7F);
         }
@@ -3265,8 +3468,7 @@ function makeStripVar(name, modId, paramId) {
     v.mOnDisplayValueChange = function(activeDevice, displayValue, units) {
         console.log("[StripVar " + name + "] mOnDisplayValueChange: " + displayValue + " " + units);
         var msg = [0xF0, 0x00, 0x21, 0x09, 0x32, modId & 0x7F, paramId & 0x7F];
-        var s = displayValue || '';
-        if (units) s += ' ' + units;
+        var s = asciiSafe((displayValue || '') + (units ? ' ' + units : ''));
         for (var c = 0; c < Math.min(s.length, 30); c++) {
             msg.push(s.charCodeAt(c) & 0x7F);
         }
@@ -3322,6 +3524,7 @@ function makeStripKnob(name, modId, paramId, ccNum) {
         var combined = '';
         if (objectTitle) combined = objectTitle;
         if (valueTitle) combined = combined ? (combined + ':' + valueTitle) : valueTitle;
+        combined = asciiSafe(combined);
         for (var c = 0; c < Math.min(combined.length, 60); c++) {
             msg.push(combined.charCodeAt(c) & 0x7F);
         }
@@ -3341,8 +3544,7 @@ function makeStripKnob(name, modId, paramId, ccNum) {
         console.log("[StripKnob " + name + " CC9/" + ccNum + "] mOnDisplayValueChange: " + 
                     displayValue + " " + units);
         var msg = [0xF0, 0x00, 0x21, 0x09, 0x32, modId & 0x7F, paramId & 0x7F];
-        var s = displayValue || '';
-        if (units) s += ' ' + units;
+        var s = asciiSafe((displayValue || '') + (units ? ' ' + units : ''));
         for (var c = 0; c < Math.min(s.length, 30); c++) {
             msg.push(s.charCodeAt(c) & 0x7F);
         }
@@ -3391,6 +3593,7 @@ function makeStripButton(name, modId, paramId, noteNum) {
         var combined = '';
         if (objectTitle) combined = objectTitle;
         if (valueTitle) combined = combined ? (combined + ':' + valueTitle) : valueTitle;
+        combined = asciiSafe(combined);
         for (var c = 0; c < Math.min(combined.length, 60); c++) {
             msg.push(combined.charCodeAt(c) & 0x7F);
         }
@@ -3410,8 +3613,7 @@ function makeStripButton(name, modId, paramId, noteNum) {
         console.log("[StripBtn " + name + " Note9/" + noteNum + "] mOnDisplayValueChange: " + 
                     displayValue + " " + units);
         var msg = [0xF0, 0x00, 0x21, 0x09, 0x32, modId & 0x7F, paramId & 0x7F];
-        var s = displayValue || '';
-        if (units) s += ' ' + units;
+        var s = asciiSafe((displayValue || '') + (units ? ' ' + units : ''));
         for (var c = 0; c < Math.min(s.length, 30); c++) {
             msg.push(s.charCodeAt(c) & 0x7F);
         }
@@ -3784,6 +3986,7 @@ try {
             var combined = '';
             if (objectTitle) combined = objectTitle;
             if (valueTitle) combined = combined ? (combined + ':' + valueTitle) : valueTitle;
+            combined = asciiSafe(combined);
             for (var c = 0; c < Math.min(combined.length, 60); c++) {
                 msg.push(combined.charCodeAt(c) & 0x7F);
             }
@@ -3795,8 +3998,7 @@ try {
     function makeDisplayHook(modId, paramId) {
         return function(activeDevice, activeMapping, value, units) {
             var msg = [0xF0, 0x00, 0x21, 0x09, 0x32, modId & 0x7F, paramId & 0x7F];
-            var s = value || '';
-            if (units) s += ' ' + units;
+            var s = asciiSafe((value || '') + (units ? ' ' + units : ''));
             for (var c = 0; c < Math.min(s.length, 30); c++) {
                 msg.push(s.charCodeAt(c) & 0x7F);
             }

@@ -257,6 +257,7 @@ body {
   <div>
     <span class="header-title">⬡ Plugin Mapper</span>
     <span class="header-sub">Push 2 / Nuendo Bridge</span>
+    <a class="header-sub" href="/keycmd" style="color:var(--accent); margin-left:16px; font-weight:600;">⌨ Key Commands →</a>
   </div>
   <div style="display:flex; align-items:center; gap:10px;">
     <div id="scanProgress" style="display:none; min-width:220px;">
@@ -272,6 +273,9 @@ body {
     <button class="btn" id="exportBtn" onclick="exportMappings()">Export</button>
     <button class="btn" id="importBtn" onclick="document.getElementById('importFile').click()">Import</button>
     <input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importMappings(event)">
+    <button class="btn" title="Download a zip of ALL bridge settings (Setup, key commands, mappings, function list)" onclick="window.location='/api/backup'">⬇ Backup all</button>
+    <button class="btn" title="Restore all bridge settings from a backup zip" onclick="document.getElementById('backupFile').click()">⬆ Restore</button>
+    <input type="file" id="backupFile" accept=".zip,application/zip" style="display:none" onchange="restoreBackup(this)">
     <button class="btn" id="foldersBtn" onclick="openFolders()">Folders…</button>
     <button class="btn btn-accent" id="scanBtn" onclick="startScan()">Rescan Plugins</button>
   </div>
@@ -515,6 +519,24 @@ function exportMappings() {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+async function restoreBackup(input) {
+  const file = input.files[0]; if (!file) return;
+  if (!confirm('Restore ALL bridge settings from this backup?\n' +
+               'Current settings, key commands and plugin mappings will be overwritten.')) {
+    input.value = ''; return;
+  }
+  try {
+    const r = await fetch(`${API}/backup/restore`, {
+      method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: file
+    });
+    const info = await r.json();
+    if (!r.ok) throw new Error(info.detail || 'restore failed');
+    alert(`Restored ${info.restored.length} file(s).\n\n${info.note}`);
+    location.reload();
+  } catch (e) { alert('Restore failed: ' + e.message); }
+  input.value = '';
 }
 
 async function importMappings(ev) {

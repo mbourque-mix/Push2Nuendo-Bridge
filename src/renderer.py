@@ -21,7 +21,9 @@ from state import (
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
     AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
-    FS_OPTIONS, FS_PEDAL_CC, FS_OFF, FS_SUSTAIN,
+    FS_OPTIONS, FS_PEDAL_CC, FS_OFF, FS_SUSTAIN, FS_EXPRESSION, FS_EXPRESSION_DEFAULT_CC,
+    FS_EXPR_TARGETS, EXPAND_MENUS,
+    KC_NUM_PAGES, KC_NUM_SLOTS, KC_SLOT_BUTTONS, kc_slot_display_label,
     BRIDGE_VERSION, BANK_SIZE, AppState,
     STRIP_MOD_GATE, STRIP_MOD_COMPRESSOR, STRIP_MOD_TOOLS,
     STRIP_MOD_SATURATOR, STRIP_MOD_LIMITER,
@@ -259,9 +261,14 @@ def _draw_arc_knob(draw, cx, cy, radius, value, color, bg_color=(50, 50, 50)):
 def _draw_header(draw, cell_x, track, is_selected):
     """
     Draw a cell header: colored background + track name.
-    
+
     Header height: 22 pixels (out of 160 total height)
     """
+    if not getattr(track, 'populated', True):
+        # Never received a name from Nuendo → banked past the last visible
+        # track. Render an empty dark header instead of a "Track NN" ghost.
+        draw.rectangle([cell_x, 0, cell_x + CELL_WIDTH - 1, 21], fill=(22, 22, 22))
+        return
     # Header background with track color
     r, g, b = track.color
     # Slightly darken so text is readable
@@ -814,7 +821,7 @@ def _render_insert_params_screen(state):
         selected = state.selected_track
         slot = state.selected_insert_slot
         plugin_name = state.current_insert_names[slot] if slot < len(state.current_insert_names) else '?'
-        
+
         # Title at top: plugin name + navigation
         r, g, b = selected.color if selected else (150, 150, 150)
         title_bg = (min(r, 150), min(g, 150), min(b, 150))
@@ -906,6 +913,8 @@ def _render_browser_screen(state):
             return _render_browser_plugin_list(state)
         elif state.browser_phase == "collection_select":
             return _render_browser_collection_select(state)
+        elif state.browser_phase == "folder_select":
+            return _render_browser_folder_select(state)
         return _render_browser_slot_select(state)
     except Exception as e:
         print(f"  ✗ Browser screen error: {e}")
@@ -1051,97 +1060,138 @@ def _render_browser_slot_select(state):
     return _to_push2_frame(img)
 
 
+def _draw_browser_loading(draw, state):
+    """Loading screen for the plugin browser, with a live count so a slow
+    first-time load (e.g. an emulated Windows VM, where each plugin needs
+    several DirectAccess reads) visibly shows progress. Once complete the list
+    is cached to disk and subsequent opens are instant."""
+    recv = sum(1 for p in state.browser_plugins if p)
+    msg = f"Loading… {recv} plugins" if recv else "Loading…"
+    tw = FONT_LG.getlength(msg) if hasattr(FONT_LG, 'getlength') else len(msg) * 10
+    draw.text(((SCREEN_WIDTH - tw) // 2, 64), msg, font=FONT_LG, fill=COLOR_TEXT_DIM)
+    sub = "first load builds a cache — then it's instant"
+    sw = FONT_SM.getlength(sub) if hasattr(FONT_SM, 'getlength') else len(sub) * 6
+    draw.text(((SCREEN_WIDTH - sw) // 2, 92), sub, font=FONT_SM, fill=(90, 90, 90))
+
+
 def _render_browser_plugin_list(state):
-    """Browser Phase 2: scrollable plugin list."""
+    """Browser Phase 2: vertical plugin list (name · type · manufacturer)."""
     img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
     draw = ImageDraw.Draw(img)
-    
+
     slot_num = state.browser_target_slot + 1
     coll_name = state.browser_collection_name or "Plugins"
-    total = len(state.browser_plugins)
+    view = state.browser_view_indices()   # absolute indices for current group
+    total = len(view)
     instrument = getattr(state, 'browser_instrument', False)
+    folder_lbl = "" if state.browser_folder is None else (state.browser_folder_label or "")
 
     # Title bar
     draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(20, 50, 80))
-    if instrument:
-        title = f"INSTRUMENT  ·  {coll_name}  ({total})"
-    else:
-        title = f"SLOT {slot_num}  ·  {coll_name}  ({total})"
-    draw.text((8, 3), title, font=FONT_MD, fill=(255, 255, 255))
-    
-    # Show position indicator
-    if total > 0:
-        pos_text = f"{state.browser_scroll + 1}-{min(state.browser_scroll + 8, total)}/{total}"
-        draw.text((SCREEN_WIDTH - 100, 5), pos_text, font=FONT_SM, fill=(180, 180, 180))
-    
+    ctx = f"{coll_name} / {folder_lbl}" if folder_lbl else coll_name
+    prefix = "INSTRUMENT" if instrument else f"SLOT {slot_num}"
+    draw.text((8, 3), f"{prefix}  ·  {ctx}", font=FONT_MD, fill=(255, 255, 255))
+
     if not state.browser_list_ready or total == 0:
-        draw.text((SCREEN_WIDTH // 2 - 50, 70), "Loading...", font=FONT_LG, fill=COLOR_TEXT_DIM)
+        _draw_browser_loading(draw, state)
         return _to_push2_frame(img)
-    
-    # 8 columns = 8 visible plugins
-    scroll = state.browser_scroll
-    
-    for col in range(8):
-        cell_x = col * CELL_WIDTH
-        plugin_idx = scroll + col
-        
-        if col > 0:
-            draw.line([(cell_x, 22), (cell_x, 141)], fill=COLOR_SEPARATOR)
-        
-        if plugin_idx >= total:
-            continue
-        
-        plugin = state.browser_plugins[plugin_idx]
+
+    selected = max(0, min(state.browser_selected, total - 1))
+    y_start, line_height, max_visible = 28, 16, 7
+    scroll_offset = selected - max_visible + 1 if selected >= max_visible else 0
+    scroll_offset = max(0, min(scroll_offset, max(0, total - max_visible)))
+
+    # Column x-positions (SCREEN_WIDTH = 960)
+    X_NAME, X_TYPE, X_VENDOR = 12, 500, 720
+
+    if total > 0:
+        draw.text((SCREEN_WIDTH - 70, 5), f"{selected + 1}/{total}", font=FONT_SM, fill=(180, 180, 180))
+
+    for i in range(max_visible):
+        idx = scroll_offset + i
+        if idx >= total:
+            break
+        plugin = state.browser_plugins[view[idx]]
         if not plugin:
             continue
-        
-        is_selected = (plugin_idx == state.browser_selected)
-        
-        # Background for selected plugin
-        if is_selected:
-            draw.rectangle([cell_x + 1, 24, cell_x + CELL_WIDTH - 2, 140],
-                           fill=(25, 40, 60))
-            draw.rectangle([cell_x + 1, 24, cell_x + CELL_WIDTH - 2, 140],
-                           outline=(0, 150, 220), width=1)
-        
-        # Plugin name (2-3 lines)
-        name = plugin['name']
-        lines = []
-        while name:
-            lines.append(name[:11])
-            name = name[11:]
-        y = 30
-        name_color = (255, 255, 255) if is_selected else COLOR_TEXT_MAIN
-        for line in lines[:3]:
-            draw.text((cell_x + 4, y), line, font=FONT_MD, fill=name_color)
-            y += 16
-        
-        # Vendor
-        vendor = plugin.get('vendor', '')
-        if vendor:
-            draw.text((cell_x + 4, 90), _truncate(vendor, 12), font=FONT_SM,
-                       fill=(120, 160, 200) if is_selected else COLOR_TEXT_DIM)
-        
-        # Category (extract after "Fx|")
-        sub_cat = plugin.get('sub_categories', '')
+        y = y_start + i * line_height
+        is_sel = (idx == selected)
+        if is_sel:
+            draw.rectangle([4, y - 1, SCREEN_WIDTH - 4, y + line_height - 2], fill=(25, 45, 70))
+            draw.rectangle([4, y - 1, SCREEN_WIDTH - 4, y + line_height - 2], outline=(0, 150, 220), width=1)
+
+        # Name
+        draw.text((X_NAME, y), _truncate(plugin.get('name', ''), 40),
+                  font=FONT_MD_BOLD if is_sel else FONT_MD,
+                  fill=(255, 255, 255) if is_sel else COLOR_TEXT_MAIN)
+        # Type (VST sub-category, keep the leaf after "Fx|")
+        sub_cat = plugin.get('sub_categories', '') or ''
         cat_short = sub_cat.split('|')[-1] if '|' in sub_cat else sub_cat
         if cat_short:
-            draw.text((cell_x + 4, 108), _truncate(cat_short, 12), font=FONT_SM,
-                       fill=(100, 180, 100) if is_selected else (70, 100, 70))
-        
-        # "LOAD" label for upper row button
-        draw.text((cell_x + CELL_WIDTH // 2 - 14, 126), "LOAD", font=FONT_SM,
-                   fill=(0, 180, 120) if is_selected else (60, 80, 60))
-    
+            draw.text((X_TYPE, y), _truncate(cat_short, 18), font=FONT_SM,
+                      fill=(100, 200, 130) if is_sel else (80, 120, 90))
+        # Manufacturer
+        vendor = plugin.get('vendor', '')
+        if vendor:
+            draw.text((X_VENDOR, y), _truncate(vendor, 20), font=FONT_SM,
+                      fill=(130, 170, 210) if is_sel else COLOR_TEXT_DIM)
+
     # Bottom bar
     draw.rectangle([0, 142, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(10, 10, 10))
     draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
-    draw.text((6, 147), "COLL ►", font=FONT_SM, fill=(220, 160, 0))
-    draw.text((200, 147), "Enc1: Page  Enc2: Fine", font=FONT_SM, fill=COLOR_TEXT_DIM)
-    
-    # Cancel label on last lower button
+    draw.text((6, 147), "LOAD", font=FONT_SM, fill=(0, 200, 120))
+    draw.text((CELL_WIDTH + 8, 147), "◄ FOLDERS", font=FONT_SM, fill=(220, 160, 0))
+    draw.text((320, 147), "Enc1: Page  Enc2: Fine", font=FONT_SM, fill=COLOR_TEXT_DIM)
     draw.text((7 * CELL_WIDTH + 8, 147), "BACK", font=FONT_SM, fill=(200, 100, 100))
-    
+
+    return _to_push2_frame(img)
+
+
+def _render_browser_folder_select(state):
+    """Browser: folder picker within the active collection (mCollectionPath)."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    coll_name = state.browser_collection_name or "Collection"
+    draw.rectangle([0, 0, SCREEN_WIDTH, 21], fill=(20, 50, 80))
+    draw.text((8, 3), f"{coll_name}  ·  FOLDERS", font=FONT_MD_BOLD, fill=(255, 255, 255))
+
+    folders = state.browser_folders
+    if not state.browser_list_ready or len(folders) == 0:
+        _draw_browser_loading(draw, state)
+        return _to_push2_frame(img)
+
+    selected = state.browser_folder_scroll
+    total = len(folders)
+    y_start, line_height, max_visible = 28, 16, 7
+    scroll_offset = selected - max_visible + 1 if selected >= max_visible else 0
+
+    for i in range(max_visible):
+        idx = scroll_offset + i
+        if idx >= total:
+            break
+        f = folders[idx]
+        y = y_start + i * line_height
+        is_sel = (idx == selected)
+        if is_sel:
+            draw.rectangle([4, y - 1, SCREEN_WIDTH - 4, y + line_height - 2], fill=(25, 45, 70))
+            draw.rectangle([4, y - 1, SCREEN_WIDTH - 4, y + line_height - 2], outline=(0, 150, 220), width=1)
+        label = ("▸ " if f['key'] is not None else "≡ ") + f['label']
+        draw.text((12, y), label, font=FONT_MD_BOLD if is_sel else FONT_MD,
+                  fill=(255, 255, 255) if is_sel else COLOR_TEXT_MAIN)
+        draw.text((SCREEN_WIDTH - 120, y), f"{f['count']} plugins", font=FONT_SM,
+                  fill=(0, 180, 220) if is_sel else COLOR_TEXT_DIM)
+
+    if total > max_visible:
+        draw.text((SCREEN_WIDTH - 30, 3), f"{selected + 1}/{total}", font=FONT_SM, fill=(180, 180, 180))
+
+    draw.rectangle([0, 142, SCREEN_WIDTH, SCREEN_HEIGHT], fill=(10, 10, 10))
+    draw.line([(0, 142), (SCREEN_WIDTH, 142)], fill=(50, 50, 50))
+    draw.text((6, 147), "OPEN", font=FONT_SM, fill=(0, 200, 120))
+    draw.text((CELL_WIDTH + 8, 147), "COLL ►", font=FONT_SM, fill=(220, 160, 0))
+    draw.text((280, 147), "Enc: Browse", font=FONT_SM, fill=COLOR_TEXT_DIM)
+    draw.text((7 * CELL_WIDTH + 8, 147), "BACK", font=FONT_SM, fill=(200, 100, 100))
+
     return _to_push2_frame(img)
 
 
@@ -1396,9 +1446,12 @@ def _draw_bottom_bar(draw, state, cr_state=None):
             draw.text((725, 147), f"PH {ph_db} dB", font=FONT_SM,
                       fill=(bright if phones_default else dim))
 
-    # Connection status (right side)
+    # Connection status + Key Command page (right side). The green dot still
+    # signals the Nuendo connection; the old "NUENDO" word is replaced by the
+    # current Key Command page so it's visible at a glance from the Mix page.
     if state.nuendo_connected:
-        draw.text((SCREEN_WIDTH - 90, 147), "● NUENDO", font=FONT_SM,
+        kc_pg = getattr(state, 'kc_page', 0) + 1
+        draw.text((SCREEN_WIDTH - 95, 147), f"● KC {kc_pg}/{KC_NUM_PAGES}", font=FONT_SM,
                   fill=(0, 200, 80))
     else:
         draw.text((SCREEN_WIDTH - 110, 147), "○ WAITING", font=FONT_SM,
@@ -1615,7 +1668,7 @@ def _render_midicc_screen(state):
 # ─────────────────────────────────────────────
 
 # Setup page definitions
-SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', None, None, 'About']
+SETUP_PAGE_NAMES = ['MIDI Ctrl', 'Vel Curve', 'CR Knob', 'Pedal 1', 'Pedal 2', 'Browser', None, 'About']
 
 # Per-page options: list of (label, value) for lower row buttons
 SETUP_PAGE_OPTIONS = {
@@ -1637,6 +1690,19 @@ SETUP_PAGE_OPTIONS = {
     ],
     3: list(FS_OPTIONS),  # Footswitch pedal 1 (CC 64) — action on lower-row 1-6
     4: list(FS_OPTIONS),  # Footswitch pedal 2 (CC 69)
+    5: [  # Plugin browser grouping (Default collection only)
+        ('Type',   'type'),
+        ('Vendor', 'vendor'),
+    ],
+}
+
+# Standard MIDI CC names shown in the expression pedal's destination-CC widget
+CC_NAMES = {
+    1: "Mod Wheel", 2: "Breath", 4: "Foot Ctrl", 5: "Porta Time", 7: "Volume",
+    8: "Balance", 10: "Pan", 11: "Expression", 12: "Effect 1", 13: "Effect 2",
+    64: "Sustain", 65: "Portamento", 66: "Sostenuto", 67: "Soft Pedal",
+    68: "Legato", 69: "Hold 2", 71: "Resonance", 72: "Release", 73: "Attack",
+    74: "Brightness",
 }
 
 def _render_setup_screen(state):
@@ -1737,6 +1803,20 @@ def _render_setup_screen(state):
         draw.text((20, 75), name, fill=COLOR_ACCENT, font=FONT_LG)
         draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
 
+    elif page_idx == 5:
+        # ── Page 5: Plugin browser grouping (Default collection only) ──
+        draw.text((20, 46), "Default Collection Folders", fill=(200, 200, 200), font=FONT_MD)
+        mode = getattr(state, 'browser_group_mode', 'type')
+        if mode == 'vendor':
+            name, desc = "By Vendor", "Virtual folders per manufacturer (+ All)"
+        else:
+            name, desc = "By Type", "The Default collection's type folders (+ All)"
+        draw.text((20, 70), name, fill=COLOR_ACCENT, font=FONT_LG)
+        draw.text((20, 96), desc, fill=(100, 100, 100), font=FONT_SM)
+        draw.text((20, 116), "Applies to the \"Default\" collection only — other "
+                             "collections keep their own folders.",
+                  fill=(120, 120, 90), font=FONT_SM)
+
     elif page_idx in (3, 4):
         # ── Pages 3/4: Footswitch (pedal 1 = CC 64, pedal 2 = CC 69) ──
         pedal = page_idx - 2
@@ -1750,18 +1830,99 @@ def _render_setup_screen(state):
         draw.text((20, 46), f"Footswitch {pedal}   (jack {pedal} = CC {cc_num})",
                   fill=(200, 200, 200), font=FONT_MD)
         draw.text((20, 70), act_name, fill=COLOR_ACCENT, font=FONT_LG)
-        # Sub-line describing behavior
-        if action == FS_SUSTAIN:
-            desc = "Sends CC 64 (sustain) to the instrument"
-        elif action == FS_OFF:
-            desc = "Pedal does nothing"
+        cal = getattr(state, 'pedal_cal', None)
+        calibrating = bool(cal and cal.get('pedal') == pedal)
+
+        if calibrating:
+            # ── Live calibration view (replaces desc + invert lines):
+            # one bar per ADC contact of this jack, all above y=140 so the
+            # lower-row labels stay untouched. ──
+            draw.text((20, 98), "CALIBRATING — move the pedal over its full range,"
+                                " then press Expr", fill=(255, 180, 60), font=FONT_SM)
+            for k, lbl in enumerate(("ring", "tip")):
+                by = 116 + k * 13            # bars: y 116-124 and 129-137
+                bx, bw = 60, 300
+                draw.text((20, by), lbl, fill=(140, 140, 140), font=FONT_SM)
+                draw.rectangle([bx, by, bx + bw, by + 8], outline=(70, 70, 70))
+                # captured min–max span so far
+                mn = bx + int(bw * max(0, min(4095, cal['min'][k])) / 4095)
+                mx = bx + int(bw * max(0, min(4095, cal['max'][k])) / 4095)
+                if mx > mn:
+                    draw.rectangle([mn, by + 1, mx, by + 7], fill=(0, 70, 90))
+                # live cursor
+                live = max(0, min(4095, cal['live'][k]))
+                lx = bx + int(bw * live / 4095)
+                draw.line([(lx, by), (lx, by + 8)], fill=COLOR_ACCENT, width=2)
+                rng = max(0, cal['max'][k] - cal['min'][k])
+                draw.text((bx + bw + 10, by), f"range {rng}",
+                          fill=(120, 120, 120), font=FONT_SM)
         else:
-            desc = "Fires on press"
-        draw.text((20, 98), desc, fill=(100, 100, 100), font=FONT_SM)
-        # Invert state
-        inv_txt = "Invert: ON" if invert else "Invert: off"
-        inv_col = COLOR_ACCENT if invert else (90, 90, 90)
-        draw.text((20, 116), inv_txt, fill=inv_col, font=FONT_SM)
+            # Sub-line describing behavior
+            target = cfg.get('target', 'cc')
+            if action == FS_SUSTAIN:
+                desc = "Sends CC 64 (sustain) to the instrument"
+            elif action == FS_EXPRESSION:
+                if not cfg.get('calibrated'):
+                    desc = "Press Expr again to CALIBRATE the pedal"
+                else:
+                    tgt_desc = {
+                        'cc': "Continuous CC to the instrument",
+                        'volume': "Volume of the selected track",
+                        'qc': f"Quick Control {cfg.get('qc_idx', 0) + 1} (selected track)",
+                        'send': f"Send {cfg.get('send_idx', 0) + 1} of the selected track",
+                        'ai': "AI Knob — value under the mouse",
+                    }.get(target, "")
+                    desc = f"{tgt_desc}  ·  cal {cfg.get('v_min', 0)}–{cfg.get('v_max', 4095)}"
+            elif action == FS_OFF:
+                desc = "Pedal does nothing"
+            else:
+                desc = "Fires on press"
+            draw.text((20, 98), desc, fill=(100, 100, 100), font=FONT_SM)
+            # Invert state
+            inv_txt = "Invert: ON" if invert else "Invert: off"
+            inv_col = COLOR_ACCENT if invert else (90, 90, 90)
+            draw.text((20, 116), inv_txt, fill=inv_col, font=FONT_SM)
+
+        if action == FS_EXPRESSION:
+            # ── Target + parameter widgets in columns 7 and 8 (edited with the
+            # encoders above them, mirroring the Vel Curve fixed-velocity
+            # pattern; column 8 sits right above the INVERT button). Visible
+            # during calibration too. ──
+            def _pedal_widget(col, label, big, small, hint):
+                wx = col * CELL_WIDTH
+                draw.line([(wx, 42), (wx, 140)], fill=COLOR_SEPARATOR)
+                draw.rectangle([wx + 4, 46, wx + CELL_WIDTH - 4, 136], outline=(60, 60, 60))
+                draw.text((wx + 12, 52), label, fill=(120, 120, 120), font=FONT_SM)
+                font_big = FONT_LG if len(big) <= 8 else FONT_MD
+                bw2 = font_big.getlength(big) if hasattr(font_big, 'getlength') else len(big) * 12
+                draw.text((wx + (CELL_WIDTH - bw2) // 2, 68), big,
+                          fill=COLOR_ACCENT, font=font_big)
+                if small:
+                    sw2 = FONT_SM.getlength(small) if hasattr(FONT_SM, 'getlength') else len(small) * 6
+                    draw.text((wx + (CELL_WIDTH - sw2) // 2, 96), small,
+                              fill=(170, 170, 170), font=FONT_SM)
+                hw2 = FONT_SM.getlength(hint) if hasattr(FONT_SM, 'getlength') else 40
+                draw.text((wx + (CELL_WIDTH - hw2) // 2, 118), hint,
+                          fill=(90, 90, 90), font=FONT_SM)
+
+            target = cfg.get('target', 'cc')
+            tgt_label = {v: lbl for lbl, v in FS_EXPR_TARGETS}.get(target, "?")
+            _pedal_widget(6, "TARGET", tgt_label, "", "↻ enc 7")
+
+            if target == 'cc':
+                cc_dest = cfg.get('cc', FS_EXPRESSION_DEFAULT_CC)
+                _pedal_widget(7, "DEST CC", str(cc_dest),
+                              CC_NAMES.get(cc_dest, ""), "↻ enc 8")
+            elif target == 'qc':
+                _pedal_widget(7, "QUICK CTRL", f"QC {cfg.get('qc_idx', 0) + 1}",
+                              "selected track", "↻ enc 8")
+            elif target == 'volume':
+                _pedal_widget(7, "VOLUME", "Sel. Trk", "follows selection", "")
+            elif target == 'send':
+                _pedal_widget(7, "SEND", f"Send {cfg.get('send_idx', 0) + 1}",
+                              "selected track", "↻ enc 8")
+            elif target == 'ai':
+                _pedal_widget(7, "AI KNOB", "Mouse", "value under cursor", "")
 
     elif page_idx == 7:
         # ── Page 7: About ──
@@ -1796,6 +1957,8 @@ def _render_setup_screen(state):
                 pedal = page_idx - 2
                 cfg = getattr(state, 'footswitch', {}).get(pedal, {})
                 is_selected = (cfg.get('action') == value)
+            elif page_idx == 5:
+                is_selected = (getattr(state, 'browser_group_mode', 'type') == value)
             else:
                 is_selected = False
             
@@ -3206,12 +3369,135 @@ def _render_vegas_screen(state):
     return _to_push2_frame(img)
 
 
+# Key Command page colour (name) -> on-screen RGB accent for the legend overlay
+KC_SCREEN_RGB = {
+    'red': (235, 70, 70), 'coral': (240, 130, 100), 'yellow': (225, 210, 60),
+    'green': (70, 200, 90), 'cyan': (60, 200, 210), 'blue': (90, 140, 235),
+    'purple': (175, 115, 230), 'fuchsia': (230, 80, 190),
+}
+
+def _render_expand_menu_screen(state):
+    """Long-press expand menu (New / Duplicate / Mute / Play / Record): the
+    lower-row buttons fire the listed commands; the menu stays until a
+    screen-changing button is pressed."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    title, lower_entries, upper_entries = EXPAND_MENUS.get(state.expand_menu, ('?', [], []))
+
+    # Title bar (centered — upper labels take the top corners)
+    tw = FONT_SM.getlength(title) if hasattr(FONT_SM, 'getlength') else len(title) * 6
+    draw.text(((SCREEN_WIDTH - tw) // 2, 66), title, fill=COLOR_ACCENT, font=FONT_MD)
+    hint = "buttons above/below fire  ·  any mode button exits"
+    hw = FONT_SM.getlength(hint) if hasattr(FONT_SM, 'getlength') else len(hint) * 6
+    draw.text(((SCREEN_WIDTH - hw) // 2, 84), hint, fill=(110, 110, 110), font=FONT_SM)
+
+    def _label_lines(label):
+        words = label.split(' ')
+        too_wide = (FONT_SM.getlength(label)
+                    if hasattr(FONT_SM, 'getlength') else len(label) * 6) > CELL_WIDTH - 14
+        if len(words) > 1 and too_wide:
+            mid = len(words) // 2
+            return [' '.join(words[:mid]), ' '.join(words[mid:])]
+        return [label]
+
+    for i in range(8):
+        x = i * CELL_WIDTH
+        # Upper-row entry (label near the top, ▲ points at the button above)
+        if i < len(upper_entries):
+            label = upper_entries[i][0]
+            draw.text((x + CELL_WIDTH // 2 - 3, 2), "▲", fill=COLOR_ACCENT, font=FONT_SM)
+            draw.rectangle([x + 3, 16, x + CELL_WIDTH - 3, 54], outline=(70, 70, 70))
+            lines = _label_lines(label)
+            y0 = 35 - 7 * len(lines)
+            for li, ln in enumerate(lines):
+                lw = FONT_SM.getlength(ln) if hasattr(FONT_SM, 'getlength') else len(ln) * 6
+                draw.text((x + (CELL_WIDTH - lw) // 2, y0 + li * 14), ln,
+                          fill=(220, 220, 220), font=FONT_SM)
+        # Lower-row entry (label near the bottom, ▼ points at the button below)
+        if i < len(lower_entries):
+            label = lower_entries[i][0]
+            draw.rectangle([x + 3, 100, x + CELL_WIDTH - 3, 138], outline=(70, 70, 70))
+            lines = _label_lines(label)
+            y0 = 119 - 7 * len(lines)
+            for li, ln in enumerate(lines):
+                lw = FONT_SM.getlength(ln) if hasattr(FONT_SM, 'getlength') else len(ln) * 6
+                draw.text((x + (CELL_WIDTH - lw) // 2, y0 + li * 14), ln,
+                          fill=(220, 220, 220), font=FONT_SM)
+            draw.text((x + CELL_WIDTH // 2 - 3, 144), "▼", fill=COLOR_ACCENT, font=FONT_SM)
+
+    return _to_push2_frame(img)
+
+
+def _render_kc_legend_screen(state):
+    """Full-screen legend for the Key Command slots: a single top-to-bottom
+    column of 8 rows mirroring the physical note-value buttons, for the current
+    page. Each row shows the slot number, the button's printed label, and the
+    assigned command/label."""
+    img = Image.new('RGB', (SCREEN_WIDTH, SCREEN_HEIGHT), color=COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    kc = getattr(state, 'key_commands', [])
+    pidx = getattr(state, 'kc_page', 0)
+    page = kc[pidx] if 0 <= pidx < len(kc) else None
+    color_name = page['color'] if page else 'cyan'
+    accent = KC_SCREEN_RGB.get(color_name, (60, 200, 210))
+    slots = page['slots'] if page else []
+
+    # Title bar
+    draw.rectangle([0, 0, SCREEN_WIDTH, 20], fill=(20, 20, 28))
+    draw.text((10, 3), f"KEY COMMANDS   ·   Page {pidx + 1}/{KC_NUM_PAGES}",
+              fill=accent, font=FONT_SM)
+    hint = "Page < >  switch   ·   any mode button exits"
+    hw = FONT_SM.getlength(hint) if hasattr(FONT_SM, 'getlength') else len(hint) * 6
+    draw.text((SCREEN_WIDTH - hw - 10, 3), hint, fill=(110, 110, 110), font=FONT_SM)
+
+    # 2 columns of 4 rows: left = slots 1-4, right = slots 5-8 (bigger text,
+    # easier to read than a single tall column).
+    top = 22
+    rows = 4
+    col_w = SCREEN_WIDTH // 2
+    row_h = (SCREEN_HEIGHT - top) // rows
+    draw.line([(col_w, top), (col_w, SCREEN_HEIGHT)], fill=COLOR_SEPARATOR)
+    for slot in range(KC_NUM_SLOTS):
+        col = slot // rows          # 0 = left (1-4), 1 = right (5-8)
+        row = slot % rows
+        x0 = col * col_w
+        y = top + row * row_h
+        ty = y + (row_h - 14) // 2
+        phys = KC_SLOT_BUTTONS[slot][0] if slot < len(KC_SLOT_BUTTONS) else ''
+        label = kc_slot_display_label(slots[slot]) if slot < len(slots) else ''
+        populated = bool(label)
+        # Number chip in the page colour
+        chip = accent if populated else (50, 50, 55)
+        draw.rectangle([x0 + 8, y + 4, x0 + 32, y + row_h - 4], fill=chip)
+        num = str(slot + 1)
+        nw = FONT_MD.getlength(num) if hasattr(FONT_MD, 'getlength') else 8
+        draw.text((x0 + 8 + (24 - nw) // 2, ty), num,
+                  fill=(12, 12, 14) if populated else (120, 120, 120), font=FONT_MD)
+        # Physical button label
+        draw.text((x0 + 42, ty), phys, fill=(140, 140, 145), font=FONT_SM)
+        # Assigned command / custom label
+        draw.text((x0 + 108, ty), _truncate(label, 32) if populated else "—",
+                  fill=(230, 230, 230) if populated else (70, 70, 75), font=FONT_MD)
+
+    return _to_push2_frame(img)
+
+
 def render_frame(state: AppState, pad_grid=None, cr_state=None):
     """
     Generate a complete frame to send to the Push 2 screen.
     """
     if getattr(state, 'vegas_mode', False):
         return _render_vegas_screen(state)
+
+    # Expand menu overlay (long-press New/Duplicate/Mute/Play/Record)
+    if getattr(state, 'expand_menu', None):
+        return _render_expand_menu_screen(state)
+
+    # Key Command legend overlay (long-press a note-value button to open it)
+    if getattr(state, 'kc_legend_active', False):
+        return _render_kc_legend_screen(state)
 
     if not state.nuendo_connected:
         return render_splash_screen()
@@ -3300,14 +3586,18 @@ def render_frame(state: AppState, pad_grid=None, cr_state=None):
         
         # Content according to mode (use the effective `mode`, not state.mode,
         # so the Navigation page can render the underlying mix screen safely)
+        _cell_populated = getattr(track, 'populated', True)
         if mode == MODE_VOLUME:
-            _draw_volume_cell(draw, cell_x, track)
+            if _cell_populated:
+                _draw_volume_cell(draw, cell_x, track)
 
         elif mode == MODE_PAN:
-            _draw_pan_cell(draw, cell_x, track)
+            if _cell_populated:
+                _draw_pan_cell(draw, cell_x, track)
 
         elif mode == MODE_SENDS:
-            _draw_send_cell(draw, cell_x, track, state.current_send)
+            if _cell_populated:
+                _draw_send_cell(draw, cell_x, track, state.current_send)
 
         elif mode == MODE_DEVICE:
             # In Device mode, display the 8 Quick Controls

@@ -2,7 +2,7 @@
 
 Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
-![Version](https://img.shields.io/badge/version-1.0.6-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.0.7-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 
@@ -49,11 +49,12 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 
 ### Plugin Browser *(Nuendo 15+ / API 1.3)*
 - **Add Device** button opens the Plugin Browser
-- Phase 1: Select target insert slot (upper row buttons)
-- Phase 2: Browse plugins with encoders (page scroll + fine scroll)
-- Load plugins directly from the Push 2 display
-- **Collection picker** — browse all available Nuendo plugin collections with a dedicated selection page
-- Auto-return to Inserts mode after loading
+- Select the target insert slot, then drill down by **folder** (your Nuendo Plugin Manager collection folders), then pick the plugin
+- **Vertical plugin list** showing each plugin's **name, type and manufacturer**
+- **Collection picker** — browse all available Nuendo plugin collections; the bridge **remembers your last-used collection**
+- **Group the Default collection by Type or Vendor** (Setup → Browser); the *All* (flat) folder is always available
+- **Instant on-disk cache** — the list opens immediately after the first load (background refresh keeps it current)
+- Load plugins directly from the Push 2 display; auto-return to Inserts mode after loading
 
 ### Plugin Mapper *(optional)*
 - Web-based parameter mapping tool at http://localhost:8100
@@ -94,8 +95,9 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 ### Footswitch / Pedals
 - Two pedal jacks supported: **jack 1 = CC 64**, **jack 2 = CC 69**
 - Each pedal is configured on its own Setup page (Pedal 1 / Pedal 2)
-- Assignable actions: **Sustain** (CC 64 passthrough to the instrument), **Play/Stop**, **Play**, **Stop**, **Record**, **Rec/Stop** (start recording, press again to stop), **Off**
-- **Invert** option per pedal for normally-closed switches
+- Assignable actions: **Sustain** (CC 64 passthrough to the instrument), **Play/Stop**, **Play**, **Expr** (expression pedal), **Record**, **Rec/Stop** (start recording, press again to stop), **Off**
+- **Expression pedal** — plug a passive TRS expression pedal into either jack, select **Expr**, then press Expr again to calibrate (once per pedal). Continuous control of a **MIDI CC**, **Volume**, a **Quick Control**, a **Send**, or **AI Knob** (whatever the mouse hovers); the touchstrip LED bar follows the value
+- **Invert** option per pedal (normally-closed switches, or heel/toe direction for an expression pedal)
 - Defaults: Pedal 1 = Sustain, Pedal 2 = Play/Stop
 
 ### Touchstrip
@@ -105,7 +107,8 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - **MIDI Ctrl** — Aftertouch Mode: Polyphonic, Channel, or Off
 - **Vel Curve** — Velocity Curve: Linear, Logarithmic, Exponential, S-Curve, Fixed (with adjustable value)
 - **CR Knob** — Master-encoder default: Main or Phones (Select gives the other)
-- **Pedal 1 / Pedal 2** — Footswitch action + invert (see Footswitch / Pedals above)
+- **Pedal 1 / Pedal 2** — Footswitch action + invert, and expression-pedal calibration/targets (see Footswitch / Pedals above)
+- **Browser** — group the Default plugin collection by **Type** or **Vendor** (Default collection only)
 - **Reload Script** (upper row 7) — re-scan tracks and re-sync the bridge's view of the project
 - **About** — Bridge version and JS Script version display
 - All Setup options are **saved to `~/.push2bridge/settings.json`** and restored on the next launch
@@ -116,6 +119,11 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - On/Off toggle via lower row buttons (for sustain, etc.)
 - Absolute value output (these generic CCs have no value feedback from Nuendo)
 - Default CCs: Mod Wheel, Breath, Volume, Balance, Pan, Expression, Sustain, Portamento
+
+### Key Commands
+- The eight **note-value buttons** trigger any Nuendo Key Command — **8 pages** of 8 slots (Page Left / Right to switch; page number shown in the Mix footer)
+- Per-slot colours; **long-press** any note-value button to show an on-screen legend of the current page
+- Configured in a **web editor** — open the Plugin Mapper page, then the **⌨ Key Commands** link (or http://localhost:8100/keycmd): searchable Nuendo function picker (import your Nuendo Key Commands export), custom labels, one-click **Generate & install**
 
 ### Note Input
 - Chromatic and drum pad modes
@@ -136,6 +144,9 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - Note / Scale / Session restore the normal pads
 
 ### Additional Features
+- **Long-press expand menus** — hold New, Duplicate, Mute, Play, Record or Fixed Length to open an on-screen menu of related Nuendo commands on the upper/lower rows
+- **Backup & Restore** — save/restore all bridge settings (Setup, pedals, Key Commands, plugin mappings, last collection) as a single zip, from the menu bar / tray or the Plugin Mapper web page
+- **Adaptive display** — the screen idles its refresh rate down when static, cutting CPU use at rest by roughly two-thirds
 - Track color display from Nuendo
 - Mix footer shows the pad MIDI note range
 - Long press upper row (1s) → Open instrument UI
@@ -182,7 +193,7 @@ The pre-built `.app` is **Apple Silicon (arm64) only**. On an M1/M2/M3 Mac, no H
 1. Copy **Push2 Nuendo Bridge.app** to `/Applications`
 2. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.6.app"
+   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.7.app"
    ```
 3. Copy **Ableton_Push2.js** to:
    ```
@@ -204,7 +215,7 @@ To build a native standalone `.app` for your architecture (e.g. an Intel `.app` 
 
 ### Windows
 
-Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_6.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
+Windows ships as a **standalone `.exe`** — no Python, pip or command line required. See the **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_7.pdf)** for the full step-by-step (loopMIDI, Nuendo configuration).
 
 Quick start:
 
@@ -287,10 +298,10 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 
 ## Documentation
 
-- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_6.pdf)** — Complete installation and usage manual
-- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_6.pdf)** — Version history
+- **[User Guide](docs/Push2_Nuendo_Bridge_User_Guide_v1_0_7.pdf)** — Complete installation and usage manual
+- **[Release Notes](docs/Push2_Nuendo_Bridge_Release_Notes_v1_0_7.pdf)** — Version history
 - **[Plugin Mapper Guide](docs/Push2_Nuendo_Bridge_Plugin_Mapper_Guide_v1_0.pdf)** — Plugin Mapper setup and usage
-- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_6.pdf)** — Step-by-step Windows `.exe` setup
+- **[Windows Installation Guide](docs/Push2_Nuendo_Bridge_Windows_Installation_Guide_v1_0_7.pdf)** — Step-by-step Windows `.exe` setup
 
 ---
 

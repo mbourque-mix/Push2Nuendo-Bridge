@@ -44,6 +44,7 @@ sBul = ParagraphStyle('Bul', parent=sB, leftIndent=20, bulletIndent=8, spaceAfte
 sCode = ParagraphStyle('Code', parent=styles['Code'], fontSize=9, leftIndent=20, spaceAfter=6, backColor=HexColor('#f5f5f5'), borderWidth=0.5, borderColor=HexColor('#dddddd'), borderPadding=4)
 sNote = ParagraphStyle('Note', parent=sB, fontSize=9, textColor=GREY, leftIndent=20, fontName='Helvetica-Oblique')
 sCtr = ParagraphStyle('Ctr', parent=sB, alignment=TA_CENTER, spaceAfter=10)
+sCell = ParagraphStyle('Cell', parent=sB, fontSize=9, leading=11, spaceAfter=0)  # wraps inside table cells
 
 def B(t): return Paragraph(f"<bullet>&bull;</bullet> {t}", sBul)
 def T(data, w=None):
@@ -63,6 +64,28 @@ def build_release_notes():
     s = []
     s.append(Paragraph("Push 2 / Nuendo Bridge", sTitle))
     s.append(Paragraph("Release Notes", sSub))
+
+    # \u2500\u2500 Version 1.0.7 \u2500\u2500
+    s.append(Paragraph("Version 1.0.7 \u2014 July 2026", sH1))
+    s.append(Paragraph("New Features", sH2))
+    s.append(B("<b>Key Commands</b>: the eight note-value buttons trigger any Nuendo Key Command, across 8 pages of 8 slots (Page Left/Right to switch). Per-slot colours, an on-screen legend on long-press, and a web editor (open the Plugin Mapper page, then the <i>\u2328 Key Commands</i> link, or go to /keycmd) with a searchable Nuendo function picker and one-click <i>Generate &amp; install</i>."))
+    s.append(B("<b>Expression pedal</b>: passive expression pedals now work as continuous controllers on either jack, with a one-time on-screen calibration. Targets: MIDI CC, Volume, a Quick Control, a Send, or <b>AI Knob</b> (whatever the mouse hovers). The touchstrip LED bar follows the value."))
+    s.append(B("<b>Long-press expand menus</b>: hold New, Duplicate, Mute, Play, Record or Fixed Length to open an on-screen menu of related Nuendo commands on the upper/lower row. The menu stays until you switch display mode."))
+    s.append(B("<b>Plugin Browser overhaul</b>: browse by <b>folder</b> (your Plugin Manager collection folders), a vertical list showing each plugin's <b>name, type and manufacturer</b>, an option to group the Default collection by <b>Type</b> or <b>Vendor</b> (Setup \u2192 Browser), an instant on-disk cache, and it remembers your last-used collection."))
+    s.append(B("<b>Backup &amp; Restore</b>: save and restore all bridge settings (Setup, pedals, Key Commands, plugin mappings, last collection) as a single zip \u2014 from the menu bar / tray or the Plugin Mapper web page."))
+    s.append(B("<b>Lower idle CPU</b>: the display now idles its refresh rate down when the screen is static, cutting the bridge's CPU use at rest by roughly two-thirds."))
+    s.append(B("<b>macOS</b>: <i>Start at Login</i> fixed; the app now requests Documents-folder access so <i>Generate &amp; install</i> can update the installed script."))
+    s.append(Paragraph("Technical", sH2))
+    s.append(B("Key Commands: generated <font face='Courier'>makeCommandBinding</font> per slot (note-value CCs 36-43, wire ch 12 / 0xBC); web editor endpoints under /api/keycommands + Nuendo Key Commands XML import; script generator writes the installed Ableton_Push2.js in place."))
+    s.append(B("Expand-menu commands on wire ch 13 (0xBD); command tables kept in sync between the bridge and the JS."))
+    s.append(B("Expression pedal via Push 2 display SysEx (0x30 contact config, 0x31 curve limits, 0x32 curve entries, 0x13 ADC sampling); calibration persisted per pedal."))
+    s.append(B("Plugin folder path (mCollectionPath) added to the plugin-list SysEx (0x2C); on-disk cache at ~/.push2bridge/plugin_list_cache.json; streaming batch raised to 40 entries/tick."))
+    s.append(B("Bank position is dead-reckoned with end-of-project detection; cells that never received a name render blank instead of a &ldquo;Track NN&rdquo; placeholder."))
+    s.append(B("Plugin parameter names are sanitised to ASCII (e.g. Unicode unit glyphs) before the 7-bit SysEx transport, and the Plugin Mapper name matcher normalises '.', '_' and spaces so decimal frequency bands match (e.g. Maag EQ4 &ldquo;2.5 kHz&rdquo;)."))
+    s.append(B("Display loop always emits a frame (the Push blanks its screen after ~2s without one) but renders at an adaptive rate; macOS Info.plist gains NSDocumentsFolderUsageDescription; the macOS build zips with symlink preservation."))
+    s.append(Paragraph("Known Limitations", sH2))
+    s.append(B("<b>Last track bank may show overlapping tracks.</b> Cubase's mixer bank zone always keeps 8 channels filled, so when the project's track count isn't a multiple of 8 the final bank slides back to show the last 8 visible tracks \u2014 overlapping the previous bank rather than showing a short, partial bank. The tracks shown are correct and fully controllable; only the grouping of the very last bank overlaps."))
+    s.append(PageBreak())
 
     # \u2500\u2500 Version 1.0.6 \u2500\u2500
     s.append(Paragraph("Version 1.0.6 \u2014 June 2026", sH1))
@@ -271,7 +294,7 @@ def build_user_guide():
     s.append(Paragraph("This guide covers installation, configuration, and use of the Push 2 / Nuendo Bridge.", sB))
     # TOC
     s.append(Paragraph("Table of Contents", sH1))
-    for item in ["1. System Requirements","2. Installation \u2014 macOS","3. Installation \u2014 Windows","4. First Launch","5. Nuendo Configuration","6. Using the Bridge","7. Mixer Modes","8. Sends Mode","9. Inserts Mode","10. Plugin Browser","11. Quick Controls","12. Transport","13. Automation","14. Touchstrip","15. Note Input","16. Control Room","17. Channel Strip","18. Channel EQ Page","19. Setup Page","20. Navigation Page","21. MIDI CC Controller","22. Plugin Mapper","23. Button Reference","24. MIDI Channel Allocation","25. Troubleshooting","26. Support"]:
+    for item in ["1. System Requirements","2. Installation \u2014 macOS","3. Installation \u2014 Windows","4. First Launch","5. Nuendo Configuration","6. Using the Bridge","7. Mixer Modes","8. Sends Mode","9. Inserts Mode","10. Plugin Browser","11. Quick Controls","12. Transport","13. Automation","14. Touchstrip","15. Note Input","16. Control Room","17. Channel Strip","18. Channel EQ Page","19. Setup Page","20. Navigation Page","21. MIDI CC Controller","22. Plugin Mapper","23. Key Commands","24. Button Reference","25. MIDI Channel Allocation","26. Troubleshooting","27. Backup & Restore","28. Support"]:
         s.append(Paragraph(item, ParagraphStyle('toc',parent=sB,spaceAfter=1,fontSize=10)))
     s.append(PageBreak())
     # 1
@@ -336,6 +359,17 @@ def build_user_guide():
     s.append(T([['Button','Mode','Encoders'],['Mix','Volume','8 track volumes'],['Mix (again)','Channel Strip','Strip module params'],['Shift+Mix','Track','Vol+Pan+Sends'],['Clip','Sends','8 sends'],['Clip (again)','Pan','8 track pans'],['Device','Quick Controls','8 QC'],['Browse','Inserts','Plugin params'],['Add Device','Plugin Browser','Browse/load plugins'],['Session','XY pad','Morph 2 track params / CC'],['Master','Navigation','D-pads: zoom / scroll / markers / nudge']],w=[80,90,290]))
     s.append(Spacer(1,6))
     s.append(Paragraph("Lower row: Mute toggles Mute/Monitor. Solo toggles Solo/Rec. Shift+Mute/Solo clears all.", sB))
+    s.append(Paragraph("Long-press menus", sH2))
+    s.append(Paragraph("<b>Hold</b> (≈half a second) <b>New, Duplicate, Mute, Play, Record or Fixed Length</b> to open an on-screen menu of related Nuendo commands. The upper and lower row buttons fire the entries (the menu stays open so you can fire several); press any mode button (Mix, Clip, Device…) to leave. A short tap keeps each button's normal action.", sB))
+    s.append(T([['Button','Menu entries'],
+        ['New', Paragraph('Track Version, Events to Part, Real Copy, Render in Place, Group, Insert Marker, Bounce', sCell)],
+        ['Duplicate', Paragraph('Duplicate Track, Duplicate Version, Duplicate Clip, Repeat, Fill Loop', sCell)],
+        ['Mute', Paragraph('Unmute All, Bypass Sends / Inserts / Channel Strip / EQs', sCell)],
+        ['Record', Paragraph('Audio/MIDI/MIDI-Cycle record modes, Retrospective Record, Punch In/Out, Punch=Cycle; upper row: Pre-roll, Post-roll', sCell)],
+        ['Play', Paragraph('Play Selection (solo), From Start / Until End, To Marker, Shuttle 2x / ½x; upper row: Start Mode, Auto RTZ, Until Start, From End, Preview, Set Left/Right Locator', sCell)],
+        ['Fixed Length', Paragraph('Loop Selection, Loop Selection Solo', sCell)],
+    ], w=[70,390]))
+    s.append(Paragraph("<b>Note — Bypass commands:</b> Nuendo only applies the <i>Mixer → Bypass: Sends / Inserts / Channel Strip / EQs</i> key commands when the <b>MixConsole window is focused</b>. Click into the MixConsole first (or keep it focused on a second screen), then fire the bypass entries from the Push.", sNote))
     # 7
     s.append(Paragraph("7. Mixer Modes", sH1))
     s.append(Paragraph("Volume Mode (Mix button)", sH2))
@@ -374,13 +408,20 @@ def build_user_guide():
     s.append(B("Upper row buttons (above the display) = select the target slot"))
     s.append(B("Left/Right = switch between slots 1-8 and 9-16"))
     s.append(B("Lower row button 8 = Cancel"))
-    s.append(Paragraph("Phase 2 \u2014 Plugin List", sH2))
-    s.append(B("Encoder 1 = page scroll (8 at a time)"))
-    s.append(B("Encoder 2 = fine scroll (highlight moves within page)"))
-    s.append(B("Upper row = load plugin from that column"))
-    s.append(B("Lower row button 1 = cycle to next collection"))
-    s.append(B("Lower row button 8 / Browse = back / cancel"))
+    s.append(Paragraph("Phase 2 \u2014 Folders", sH2))
+    s.append(Paragraph("The collection is presented as a list of folders. <b>All</b> (top of the list) shows the whole collection flat.", sB))
+    s.append(B("Encoder = scroll the folder list"))
+    s.append(B("<b>OPEN</b> (lower row 1, or any upper-row button) = enter the highlighted folder"))
+    s.append(B("<b>COLL \u25b6</b> (lower row 2) = choose a different plugin collection"))
+    s.append(B("<b>BACK</b> (lower row 8) = back to slot selection"))
+    s.append(Paragraph("Folders come from your Nuendo Plugin Manager collection structure (mCollectionPath). For the Default collection you can switch between grouping by <b>Type</b> or by <b>Vendor</b> \u2014 see Setup \u2192 Browser.", sNote))
+    s.append(Paragraph("Phase 3 \u2014 Plugin List", sH2))
+    s.append(Paragraph("A vertical list showing each plugin's <b>name</b>, <b>type</b> and <b>manufacturer</b>.", sB))
+    s.append(B("Encoder 1 = page, Encoder 2 = fine (moves the highlight)"))
+    s.append(B("<b>LOAD</b> (lower row 1, or any upper-row button) = load the highlighted plugin"))
+    s.append(B("<b>\u25c4 FOLDERS</b> (lower row 2) / <b>BACK</b> (lower row 8) = back to the folder list"))
     s.append(Paragraph("After loading, the bridge returns to Inserts mode and rescans slots automatically.", sB))
+    s.append(Paragraph("The plugin list is <b>cached to disk</b>, so it opens instantly after the first load (a background refresh keeps it current). The bridge also remembers your <b>last-used collection</b> and reopens it next time.", sNote))
     # 11
     s.append(Paragraph("11. Quick Controls (Device Mode)", sH1))
     s.append(Paragraph("Press Device. 8 Quick Controls of the selected track. Left/Right = navigate tracks.", sB))
@@ -390,9 +431,15 @@ def build_user_guide():
     # 13
     s.append(Paragraph("13. Automation", sH1))
     s.append(Paragraph("Automate button cycles: Off \u2192 Read \u2192 Read+Write \u2192 Write \u2192 Off.", sB))
+    s.append(Paragraph("Holding values while writing (plateaus)", sH2))
+    s.append(B("<b>Encoders are touch-sensitive</b>: in <b>Volume</b>, <b>Pan</b> and <b>Quick Controls</b> modes, keep your finger resting on an encoder after turning it and the current value is held for the automation write \u2014 release the encoder to let the automation return. Several encoders can be held at once."))
+    s.append(B("<b>Send levels and plugin parameters</b> use relative encoders and cannot be held this way \u2014 to ride a plugin parameter with plateaus, assign it to a <b>Quick Control</b> and ride it from Device mode (or with the expression pedal's QC target)."))
+    s.append(B("The <b>touchstrip</b> (Volume mode) holds its value the same way while your finger stays on the strip."))
+    s.append(B("The <b>expression pedal</b> (Volume / QC / Send targets) holds its last position while the transport is rolling \u2014 park the pedal during a pass and the value stays written until you stop."))
     # 14
     s.append(Paragraph("14. Touchstrip", sH1))
     s.append(Paragraph("Shift+Layout to cycle: Pitch Bend, Mod Wheel (CC 1), Volume.", sB))
+    s.append(B("In <b>Volume</b> mode the LED bar mirrors the selected track's actual volume \u2014 it follows fader moves made in Nuendo, track selection, and automation playback."))
     # 15
     s.append(Paragraph("15. Note Input", sH1))
     s.append(Paragraph("64 pads: Chromatic (default) or Drum (Layout). Scale, Accent, Note Repeat available. Set instrument input to BridgeNotes.", sB))
@@ -443,7 +490,18 @@ def build_user_guide():
     s.append(Paragraph("CR Knob", sH2))
     s.append(B("Sets what the Master encoder controls by default — Control Room <i>Main</i> or <i>Phones</i> level. Holding <i>Select</i> always gives the other one."))
     s.append(Paragraph("Pedal 1 / Pedal 2 (Footswitch)", sH2))
-    s.append(B("The Push 2 has two pedal jacks: jack 1 sends CC 64, jack 2 sends CC 69. Each pedal has its own tab. The lower row picks the action — <i>Sustain</i> (CC 64 passed through to the instrument), <i>Play/Stop</i>, <i>Play</i>, <i>Stop</i>, <i>Rec</i>, <i>Rec/Stop</i> (start recording, press again to stop), or <i>Off</i> — and lower-row button 8 toggles <i>Invert</i> (for normally-closed pedals). Defaults: Pedal 1 = Sustain, Pedal 2 = Play/Stop."))
+    s.append(B("The Push 2 has two pedal jacks: jack 1 sends CC 64, jack 2 sends CC 69. Each pedal has its own tab. The lower row picks the action — <i>Sustain</i> (CC 64 passed through to the instrument), <i>Play/Stop</i>, <i>Play</i>, <i>Expr</i> (expression pedal, below), <i>Rec</i>, <i>Rec/Stop</i> (start recording, press again to stop), or <i>Off</i> — and lower-row button 8 toggles <i>Invert</i> (polarity: normally-closed switches, or heel/toe direction for an expression pedal). Defaults: Pedal 1 = Sustain, Pedal 2 = Play/Stop."))
+    s.append(Paragraph("Expression pedal (Expr)", sH2))
+    s.append(B("Plug a passive expression pedal (TRS) into either jack and select <b>Expr</b>. Then <b>press Expr a second time to calibrate</b>: move the pedal over its full range while the screen shows the live readings, and press Expr again to finish. The bridge detects the pedal's wiring automatically (tip or ring) and stores the calibration — it is reapplied on every launch, so you only calibrate once per pedal."))
+    s.append(B("<b>Target</b> (Encoder 7) selects what the pedal controls; <b>Encoder 8</b> picks the parameter where applicable:"))
+    s.append(B("<b>MIDI CC</b> — continuous CC to the instrument (Encoder 8 picks the CC, default 11 Expression)."))
+    s.append(B("<b>Volume</b> — volume of the selected track (the touchstrip LED bar follows)."))
+    s.append(B("<b>QC</b> — a Quick Control of the selected track (Encoder 8 picks QC 1-8)."))
+    s.append(B("<b>Send</b> — a send level of the selected track (Encoder 8 picks Send 1-8)."))
+    s.append(B("<b>AI Knob</b> — controls whatever parameter the mouse pointer is hovering in Nuendo, like Steinberg's AI Knob."))
+    s.append(Paragraph("The AI Knob target is a <i>relative</i> control aimed at a moving target (whatever the mouse hovers), so it cannot hold plateau values for automation writing the way the other targets do. To ride a specific plugin parameter with plateaus, assign that parameter to a <b>Quick Control</b> in Nuendo and use the <b>QC</b> target instead.", sNote))
+    s.append(Paragraph("Browser", sH2))
+    s.append(B("Controls how the <b>Default</b> plugin collection is grouped into folders in the Plugin Browser: by <b>Type</b> (the Default collection's own type folders) or by <b>Vendor</b> (virtual folders per manufacturer). This setting applies to the Default collection only — every other collection always keeps its own folders. The <i>All</i> (flat) folder is available in both modes."))
     # Navigation
     s.append(Paragraph("20. Navigation Page", sH1))
     s.append(Paragraph("Press the <b>Master</b> button to overlay four directional D-pads on the 64 pads, one in each corner: <b>Zoom</b> (top-left), <b>Scroll / cursor</b> (top-right), <b>Markers / locators</b> (bottom-left) and <b>Nudge</b> (bottom-right). Each pad has hold-to-repeat. The overlay stays active across the mix pages, so you can navigate the timeline while you keep working — and Note, Scale or Session restore the normal pads.", sB))
@@ -457,15 +515,26 @@ def build_user_guide():
     s.append(Paragraph("22. Plugin Mapper", sH1))
     s.append(Paragraph("Create custom parameter mappings for your plugins. Access via the macOS menu bar / Windows tray (Plugin Mapper) or http://localhost:8100. Plugins the scanner can't read (iLok/PACE, Waves shells, Nuendo stock plug-ins) can be captured live from Nuendo with <b>Shift+Browse</b>; the <b>Edit Map</b> button (Inserts parameter page) opens the Mapper on the selected plugin. Mappings are saved in <b>~/.push2bridge/mappings/</b> \u2014 after saving, press <b>\u21bb Reload</b> (Setup) to pick them up. See the separate Plugin Mapper Guide for details.", sB))
     s.append(Paragraph("All Mapper dependencies are bundled in the standalone .app/.exe \u2014 nothing to install. Only source installs need: pip install fastapi uvicorn pedalboard.", sNote))
-    # 20
-    s.append(Paragraph("23. Button Reference", sH1))
+    # 23 Key Commands
+    s.append(Paragraph("23. Key Commands", sH1))
+    s.append(Paragraph("The eight note-value buttons (1/32t … 1/4, left of the pads) can trigger any Nuendo Key Command. There are <b>8 pages</b> of 8 slots — use <b>Page Left / Right</b> to switch pages; the current page number shows in the Mix footer.", sB))
+    s.append(B("<b>Long-press</b> any note-value button to open the on-screen <b>legend</b> for the current page (slot number, printed button label, assigned command). It closes when you press a screen-changing button."))
+    s.append(B("Each button's colour is set per slot in the editor; <b>white is reserved for Note Repeat</b> when Repeat is engaged."))
+    s.append(Paragraph("Configuring", sH2))
+    s.append(B("The editor lives inside the <b>Plugin Mapper</b> web page. Open <b>Plugin Mapper</b> from the macOS menu bar / Windows tray (or go to http://localhost:8100), then click the <b>⌨ Key Commands →</b> link at the top of the page (direct URL: http://localhost:8100/keycmd). Pick a page, assign each slot a Nuendo function (searchable list), set a colour and an optional custom label."))
+    s.append(B("The function list is populated from your Nuendo Key Commands: in Nuendo, <b>File → Key Commands → Export</b>, then <b>Import Functions</b> in the editor. Names must match your Nuendo version / language."))
+    s.append(B("Press <b>Generate &amp; install</b> — the bridge bakes the bindings into the installed Ableton_Push2.js and updates it in place."))
+    s.append(Paragraph("After <i>Generate &amp; install</i>, reload <b>both</b> sides: <b>reload the MIDI Remote script in Nuendo</b> so the new command bindings take effect, and on the Push press <b>Setup → ↻ Reload</b> (or restart the bridge) so it picks up the new colours, labels and legend.", sNote))
+    s.append(Paragraph("macOS: the app needs permission to reach ~/Documents to find and update the installed script. If <i>Generate &amp; install</i> reports it can't find the script, add the app to <b>System Settings → Privacy &amp; Security → Full Disk Access</b>, then quit and relaunch.", sNote))
+    # 24
+    s.append(Paragraph("24. Button Reference", sH1))
     s.append(T([['Button','Action','Shift + Button'],['Mix','Volume mode (press again: Channel Strip)','Track mode'],['Clip','Sends mode (press again: Pan)',''],['Device','Quick Controls',''],['Browse','Inserts mode','Capture params (DirectAccess)'],['Add Device','Plugin Browser',''],['Session','XY pad',''],['Master','Navigation D-pads',''],['Select','(hold) Master encoder → Phones',''],['Note','MIDI note pads','MIDI CC controller'],['Setup','Setup page',''],['Left/Right','Bank nav (8) / track nav','Nudge (1) in Vol/Pan'],['Play','Playback',''],['Record','Record toggle',''],['Mute','Mute/Monitor','Clear all'],['Solo','Solo/Rec arm','Clear all'],['User','Control Room',''],['Layout','Drum/Chromatic','Touchstrip cycle'],['Upper (dbl / Shift)','Edit Channel Settings',''],['Scale','Scale selector',''],['Accent','Fixed velocity',''],['Repeat','Auto-repeat','']],w=[80,180,190]))
     s.append(PageBreak())
     # 23
-    s.append(Paragraph("24. MIDI Channel Allocation", sH1))
+    s.append(Paragraph("25. MIDI Channel Allocation", sH1))
     s.append(T([['Channel','Usage'],['1 (0xB0)','Mixer (volume, pan, transport, selection, VU)'],['2 (0xB1)','Insert plugin parameters'],['3 (0xB2)','Send levels (selected track)'],['4 (0xB3)','Insert bypass toggles'],['5 (0xB4)','Quick Controls'],['6 (0xB5)','Control Room'],['7 (0xB6)','Bank zone sends'],['8 (0xB7)','DirectAccess commands (browser, bypass, edit, strip slot, param-flip, variant)'],['9 (0xB8)','DirectAccess encoder control (mapped params, strip slots)'],['16 (0xBF)','Heartbeat']],w=[80,380]))
     # 22
-    s.append(Paragraph("25. Troubleshooting", sH1))
+    s.append(Paragraph("26. Troubleshooting", sH1))
     s.append(B("<b>Push 2 not found</b>: check USB, libusb, close Ableton Live."))
     s.append(B("<b>push2-python error</b>: install it from source \u2014 pip install git+https://github.com/ffont/push2-python.git. Use Python 3.11.9 or lower."))
     s.append(B("<b>No Nuendo connection</b>: check bridge is running; add the surface manually (MIDI Remote Manager \u2192 Add, Vendor Ableton / Model Push2)."))
@@ -473,9 +542,16 @@ def build_user_guide():
     s.append(B("<b>Channel Strip / EQ curve not working</b>: requires Nuendo 15+ (API 1.3). Drill into a section once to trigger DA strip exploration."))
     s.append(B("<b>Plugin Mapper not loading</b>: pip install fastapi uvicorn pedalboard."))
     s.append(B("<b>Track names not loading</b>: navigate Left/Right to refresh."))
+    s.append(B("<b>Hidden/shown tracks not reflected on the Push</b>: after changing track visibility in Nuendo, the display updates by itself within ~10-20 seconds — <b>select any track</b> in Nuendo to refresh it immediately."))
     s.append(Paragraph("Logs: macOS \u2014 ~/Library/Logs/Push2NuendoBridge.log. Windows \u2014 terminal output.", sNote))
-    # 25
-    s.append(Paragraph("26. Support", sH1))
+    # 27
+    s.append(Paragraph("27. Backup &amp; Restore", sH1))
+    s.append(Paragraph("All of your bridge settings live in <b>~/.push2bridge/</b> (Setup options, footswitch/pedal calibration, Key Commands, plugin mappings, last-used collection, Plugin Mapper settings). You can back them up and restore them as a single zip.", sB))
+    s.append(B("From the macOS menu bar / Windows tray: <b>Backup Settings…</b> saves a zip; <b>Restore Settings…</b> loads one back."))
+    s.append(B("The Plugin Mapper web page also has <b>⬇ Backup all</b> / <b>⬆ Restore</b> buttons."))
+    s.append(Paragraph("Restoring overwrites the current settings with the ones in the zip. Restart the bridge (and Reload the script) after a restore.", sNote))
+    # 28
+    s.append(Paragraph("28. Support", sH1))
     s.append(Paragraph("Push 2 / Nuendo Bridge is donationware.", sB))
     s.append(B("GitHub: https://github.com/mbourque-mix/Push2Nuendo-Bridge"))
     s.append(B("Buy Me A Coffee: https://buymeacoffee.com/mbourque"))

@@ -89,6 +89,7 @@ pyinstaller ^
     --paths . ^
     --add-data "assets;assets" ^
     --add-data "mapper;mapper" ^
+    --add-data "..\Ableton_Push2.js;mapper" ^
     --add-data "state.py;." ^
     --add-data "nuendo_link.py;." ^
     --add-data "push2_controller.py;." ^

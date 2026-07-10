@@ -521,8 +521,16 @@ class NuendoLink:
                 # DA fallback requested — Python should handle it
                 self._da_fallback_needed = True
             elif value == 1:
+                was_available = self._da_available
                 self._da_available = True
                 print("  ✓ DirectAccess available (API 1.2+)")
+                # DA can come online LATE on slow systems (emulated VMs). If the
+                # insert tree was scanned viewer-based before DA was ready,
+                # explore it now via DA so _da_inserts_ready gets set — otherwise
+                # the Plugin Browser stays stuck on "Loading" forever (its list
+                # request requires _da_inserts_ready).
+                if not was_available and not getattr(self, '_da_inserts_ready', False):
+                    self.request_da_insert_exploration()
             elif value == 2:
                 # DA cleared all monitors — sync local state
                 for t in state.tracks:
@@ -814,22 +822,33 @@ class NuendoLink:
                 state.current_insert_active[i] = False
             self._leds_dirty = True
             print(f"  ✓ DA Insert exploration complete: {count} slots cached")
-            # One-time Plugin Manager exploration on the first slot with a plugin
+            # One-time Plugin Manager exploration on the first slot with a
+            # plugin. Only latch _pm_explored once we actually launch it, so a
+            # track with no inserts doesn't permanently skip the exploration.
             if not getattr(self, '_pm_explored', False):
-                self._pm_explored = True  # Set to False in console to re-run
-                # Find first slot with a plugin
                 for i in range(count):
                     if state.current_insert_names[i]:
+                        self._pm_explored = True
                         self.request_da_plugin_manager_explore(i)
                         break
-            # One-time plugin list fetch (collection "Push" = index 1)
-            if not getattr(self, '_plugin_list_fetched', False):
-                self._plugin_list_fetched = True
+            # Plugin list fetch of the LAST-USED collection (restored from
+            # settings.json; defaults to 1 = "Push"). Instant from cache. Latch
+            # _plugin_list_fetched only once the request actually SUCCEEDS, so if
+            # DA wasn't fully ready the first time (slow VM) a later DA insert
+            # exploration retries it instead of leaving the browser stuck.
+            if (not getattr(self, '_plugin_list_fetched', False)
+                    and not getattr(self, '_plugin_fetch_inflight', False)):
+                self._plugin_fetch_inflight = True
                 import threading
                 def _delayed_fetch():
                     import time
                     time.sleep(2.0)  # Wait for PM exploration to finish
-                    self.request_da_plugin_list(1)  # "Push" collection
+                    try:
+                        if self.request_da_plugin_list(
+                                getattr(self.state, 'browser_collection_index', 1)):
+                            self._plugin_list_fetched = True
+                    finally:
+                        self._plugin_fetch_inflight = False
                 threading.Thread(target=_delayed_fetch, daemon=True).start()
             return
         elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x26:
@@ -957,7 +976,8 @@ class NuendoLink:
             vendor = fields[1] if len(fields) > 1 else ''
             sub_cat = fields[2] if len(fields) > 2 else ''
             uid = fields[3] if len(fields) > 3 else ''
-            
+            coll_path = fields[4] if len(fields) > 4 else ''
+
             state = self.state
             # Ensure list is large enough
             while len(state.browser_plugins) <= idx:
@@ -967,6 +987,7 @@ class NuendoLink:
                 'vendor': vendor,
                 'sub_categories': sub_cat,
                 'uid': uid,
+                'collection_path': coll_path,
             }
             return
         elif len(message) >= 7 and message[1] == 0x00 and message[2] == 0x2D:
@@ -982,6 +1003,20 @@ class NuendoLink:
             state.browser_collection_count = coll_count
             state.browser_collection_name = coll_name
             state.browser_list_ready = True
+            state.build_browser_folders()
+            # Persist to the on-disk cache so the next open is instant.
+            try:
+                key = getattr(self, '_plugin_refresh_key', None) or f"ins_{coll_idx}"
+                cache = self._load_plugin_cache()
+                cache[key] = {
+                    'name': coll_name,
+                    'coll_count': coll_count,
+                    'count': count,
+                    'entries': [p for p in state.browser_plugins if p],
+                }
+                self._save_plugin_cache()
+            except Exception as _e:
+                print(f"  plugin cache update error: {_e}")
             print(f"  ✓ Plugin list received: {count} entries from \"{coll_name}\" (collection {coll_idx}/{coll_count})")
             # Print first 5 entries as sample
             for i in range(min(5, count)):
@@ -1222,6 +1257,25 @@ class NuendoLink:
                 print(f"  DA Strip bypass slot {slot_idx}: FAILED")
             return
 
+        elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x40:
+            # DA strip on/off result : [F0 00 40 slotIdx success isOn F7]
+            slot_idx = message[3]
+            success  = message[4] > 0
+            if success and len(message) >= 7:
+                is_on = message[5] > 0
+                cache = getattr(self, '_da_strip_slot_cache', [])
+                if slot_idx < len(cache) and cache[slot_idx]:
+                    cache[slot_idx]['is_on'] = is_on
+                    mod_id = cache[slot_idx]['mod_id']
+                    slot_state = self.state.channel_strip.slots.get(mod_id)
+                    if slot_state:
+                        slot_state.on = is_on
+                        self._leds_dirty = True
+                print(f"  DA Strip on/off slot {slot_idx}: {'ON' if is_on else 'OFF'} ✓")
+            elif not success:
+                print(f"  DA Strip on/off slot {slot_idx}: FAILED")
+            return
+
         elif len(message) >= 5 and message[1] == 0x00 and message[2] == 0x37:
             # DA strip edit result : [F0 00 37 slotIdx success F7]
             slot_idx = message[3]
@@ -1260,6 +1314,8 @@ class NuendoLink:
                 name = name_bytes.decode('utf-8').rstrip('\x00')
                 if abs_index < len(self.state.tracks):
                     self.state.tracks[abs_index].name = name
+                    if name:
+                        self.state.tracks[abs_index].populated = True
             except UnicodeDecodeError:
                 pass
         
@@ -1492,21 +1548,54 @@ class NuendoLink:
             bank_start = ((payload[0] & 0x7F) << 7) | (payload[1] & 0x7F)
             # Plausibility guard: a glitched DA read (seen when opening a
             # plugin UI) can report a bogus position. Never accept a bank
-            # start outside the known project, or beyond our track cache —
-            # a wrong jump here makes every visible track show as a blank
-            # default ("lost all names/colours").
-            total = getattr(self.state, 'total_tracks', 0)
-            if total > 0 and bank_start >= total:
-                print(f"  Bank sync: ignoring implausible bank start {bank_start} "
-                      f"(project has {total} tracks)")
-                return
+            # start beyond our track cache — a wrong jump here makes every
+            # visible track show as a blank default ("lost all names/colours").
             if bank_start >= len(self.state.tracks):
                 return
-            if bank_start != self.state.bank_offset:
-                print(f"  Bank sync: Nuendo zone starts at track {bank_start + 1} "
-                      f"(bridge thought {self.state.bank_offset + 1}) — corrected")
-                if hasattr(self, '_on_bank_switch_needed'):
-                    self._on_bank_switch_needed(bank_start)
+
+            # ── Dynamic end-of-project detection ──
+            # getMixerChannelIndex reports a GLOBAL console position that counts
+            # hidden channels (hidden I/O, tracks in closed folders), so it can't
+            # be mapped to bank_offset directly — that's why absolute auto-correct
+            # was removed. But its MAXIMUM is a rock-solid end marker: when the
+            # zone stops advancing (same global reported on a further bank), the
+            # bridge has banked past the last VISIBLE track (dead reckoning
+            # against the hard-coded 128 overshoots the real, visibility-aware
+            # end). Learn that cap from the no-movement signal; re-expand it if a
+            # later report shows the zone moved further (a folder was opened).
+            bo = self.state.bank_offset
+
+            # Re-learn from scratch when the global position at bank 1 changes:
+            # that means the project was switched or visibility reconfigured
+            # (folder opened/closed, channels hidden) without a reconnect, so a
+            # previously-learned cap is stale.
+            if bo == 0:
+                prev0 = getattr(self, '_bank_global_at_zero', None)
+                if prev0 is not None and prev0 != bank_start:
+                    self._bank_global_max = -1
+                    self._bank_offset_at_max = 0
+                    self.state.bank_offset_cap = None
+                    print("  Bank end: project/visibility changed — cap reset")
+                self._bank_global_at_zero = bank_start
+            gmax = getattr(self, '_bank_global_max', -1)
+            if bank_start > gmax:
+                # Zone advanced into new territory → this bank is reachable.
+                self._bank_global_max = bank_start
+                self._bank_offset_at_max = bo
+                if (self.state.bank_offset_cap is not None
+                        and bo >= self.state.bank_offset_cap):
+                    self.state.bank_offset_cap = None
+                    print(f"  Bank end: cap lifted (zone advanced, global {bank_start})")
+            elif bank_start == gmax and bo > getattr(self, '_bank_offset_at_max', 0):
+                # Bridge advanced but Nuendo's zone didn't → past the real end.
+                cap = self._bank_offset_at_max
+                if self.state.bank_offset_cap != cap:
+                    self.state.bank_offset_cap = cap
+                    print(f"  Bank end: last visible bank at track {cap + 1} "
+                          f"(Nuendo zone maxed at global {bank_start}); clamping")
+                if self.state.bank_offset > cap:
+                    self.state.bank_offset = cap
+                    self._leds_dirty = True
 
         # ── DirectAccess diagnostic log (type 0x20) ──
         elif msg_type == 0x20 and len(payload) >= 1:
@@ -1643,6 +1732,22 @@ class NuendoLink:
         """Send a CC message on channel 5 (0xB4)."""
         if self._midi_out and self._running:
             self._midi_out.send_message([0xB4, cc_num & 0x7F, int(value) & 0x7F])
+
+    def send_expand_command(self, index):
+        """Fire an expand-menu Nuendo command (wire channel 14 = 0xBD,
+        CC = index into the JS expandCommands table). Pulsed 127 then 0."""
+        if not (self._midi_out and self._running):
+            return
+        self._midi_out.send_message([0xBD, index & 0x7F, 127])
+        time.sleep(0.01)
+        self._midi_out.send_message([0xBD, index & 0x7F, 0])
+
+    def send_cc_kc(self, cc_num, value):
+        """Send a Key Command trigger CC on the dedicated KC channel
+        (MIDI channel 13, status 0xBC). The JS MIDI Remote script exposes these
+        as unassigned buttons for the user to map to Nuendo Key Commands."""
+        if self._midi_out and self._running:
+            self._midi_out.send_message([0xBC, cc_num & 0x7F, int(value) & 0x7F])
 
     def send_cc_ch6(self, cc_num, value):
         """Send a CC message on channel 6 (0xB5). Used for Control Room."""
@@ -2271,14 +2376,66 @@ class NuendoLink:
 
         self.set_da_browse_mode(instrument)
 
-        # Reset browser state
-        self.state.browser_plugins = []
-        self.state.browser_list_ready = False
+        # Instant display from the on-disk cache (the installed plugin set is
+        # static between sessions). We still request a fresh list from the JS
+        # below and update the cache when it completes (0x2D) — but the user can
+        # browse the cached list immediately instead of waiting ~12s for 1300+
+        # entries to trickle over SysEx.
+        key = self._plugin_cache_key(collection_index, instrument)
+        self._plugin_refresh_key = key
+        cached = self._load_plugin_cache().get(key)
+        if cached and cached.get('entries'):
+            self.state.browser_plugins = [dict(e) for e in cached['entries']]
+            self.state.browser_collection_index = collection_index
+            self.state.browser_collection_count = cached.get(
+                'coll_count', self.state.browser_collection_count)
+            self.state.browser_collection_name = cached.get('name', '')
+            self.state.browser_list_ready = True
+            self.state.build_browser_folders()
+            self._leds_dirty = True
+            print(f"  → DA: showing {len(cached['entries'])} cached plugins for "
+                  f"collection {collection_index}; refreshing in background")
+        else:
+            # No cache yet — wait for the JS to stream the list.
+            self.state.browser_plugins = []
+            self.state.browser_list_ready = False
 
         self._midi_out.send_message([0xB7, 83, collection_index & 0x7F])
         kind = "instrument" if instrument else "insert"
         print(f"  → DA: Requested {kind} list for collection {collection_index}")
         return True
+
+    # ── Plugin-list disk cache ──────────────────────────────────────────────
+    # The installed plugin set rarely changes, so caching each collection's
+    # entries makes "Add Device" instant after the first load.
+    def _plugin_cache_file(self):
+        from pathlib import Path
+        return Path.home() / ".push2bridge" / "plugin_list_cache.json"
+
+    def _plugin_cache_key(self, collection_index, instrument):
+        return f"{'inst' if instrument else 'ins'}_{collection_index}"
+
+    def _load_plugin_cache(self):
+        if getattr(self, '_plugin_cache', None) is not None:
+            return self._plugin_cache
+        import json
+        self._plugin_cache = {}
+        try:
+            f = self._plugin_cache_file()
+            if f.exists():
+                self._plugin_cache = json.loads(f.read_text(encoding='utf-8'))
+        except Exception:
+            self._plugin_cache = {}
+        return self._plugin_cache
+
+    def _save_plugin_cache(self):
+        import json
+        try:
+            f = self._plugin_cache_file()
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps(self._plugin_cache), encoding='utf-8')
+        except Exception as e:
+            print(f"  plugin cache save error: {e}")
 
     def request_da_collection_info(self, instrument=False):
         """Ask JS to send info about all plugin collections (CC 88 ch8).
@@ -2430,6 +2587,26 @@ class NuendoLink:
             return False
         value = (slot_index & 0x07) | (0x40 if want_bypass else 0x00)
         self._midi_out.send_message([0xB7, 71, value & 0x7F])
+        return True
+
+    def send_da_strip_on(self, slot_index, want_on):
+        """Activate/deactivate a strip module slot via DirectAccess (CC 89 ch8).
+
+        slot_index: 0-4 (Gate=0, Comp=1, Tools=2, Sat=3, Limiter=4)
+        want_on: True = module ON (active in the chain), False = OFF.
+
+        Writes the slot's mOn tag (4098) directly — the binding path is
+        unreliable across bank-zone refreshes, just like bypass.
+        JS responds with SysEx 0x3A. Returns True if the command was sent.
+        """
+        if not (self._midi_out and self._running):
+            return False
+        if not getattr(self, '_da_available', False):
+            return False
+        if not getattr(self, '_da_strip_explored', False):
+            return False
+        value = (slot_index & 0x07) | (0x40 if want_on else 0x00)
+        self._midi_out.send_message([0xB7, 89, value & 0x7F])
         return True
 
     def send_da_strip_edit(self, slot_index):
@@ -2634,6 +2811,14 @@ class NuendoLink:
         midi_val = int(value_0_to_1 * 127)
         self.send_cc_ch5(56 + qc_index, midi_val)
 
+    def send_selected_send_level(self, send_index, value_0_to_1):
+        """Set a send level of the SELECTED track, absolute. CC 100-107 ch7
+        (dedicated absolute bindings — the ch3 CC 20-27 send knobs are relative
+        and would wind-up with an absolute controller like the expression pedal).
+        send_index: 0-7."""
+        midi_val = int(max(0.0, min(1.0, value_0_to_1)) * 127)
+        self.send_cc_ch7(100 + (send_index & 0x07), midi_val)
+
     def send_select_track(self, track_in_bank):
         """Select a track in the current bank (0-7)."""
         if 0 <= track_in_bank < 8:
@@ -2657,6 +2842,12 @@ class NuendoLink:
 
     def _request_name_scan(self):
         """Start initial scan via on_connected callback."""
+        # Reset the learned end-of-project cap: a reconnect may mean a different
+        # project (or the same one re-scanned), so re-learn the reachable range.
+        self._bank_global_max = -1
+        self._bank_offset_at_max = 0
+        self._bank_global_at_zero = None
+        self.state.bank_offset_cap = None
         import threading
         def _delayed():
             time.sleep(1.5)

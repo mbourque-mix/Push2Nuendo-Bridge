@@ -76,6 +76,7 @@ pyinstaller \
     --add-data "main_macos.py:." \
     --add-data "assets:assets" \
     --add-data "mapper:mapper" \
+    --add-data "../Ableton_Push2.js:mapper" \
     --hidden-import rumps \
     --hidden-import push2_python \
     --hidden-import push2_python.constants \
@@ -137,12 +138,23 @@ if [ -f "$PLIST" ]; then
     /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :LSUIElement true" "$PLIST"
     echo "  ✓ LSUIElement set (app will hide from Dock)"
+    # macOS TCC guards ~/Documents. The app scans Documents/Steinberg to find
+    # and update the installed MIDI Remote script; supplying a usage string
+    # gives the first-access permission prompt a reason and makes it more
+    # likely to surface for this background/menu-bar (LSUIElement) app.
+    DOC_REASON="Push2 Nuendo Bridge locates and updates the Push 2 MIDI Remote script in your Documents/Steinberg folder."
+    /usr/libexec/PlistBuddy -c "Add :NSDocumentsFolderUsageDescription string $DOC_REASON" "$PLIST" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :NSDocumentsFolderUsageDescription $DOC_REASON" "$PLIST"
+    echo "  ✓ NSDocumentsFolderUsageDescription set (Documents-access prompt reason)"
 fi
 
 # Create zip for GitHub release
 cd "$PROJECT_DIR/dist"
 ZIP_NAME="Push2NuendoBridge-v${VERSION}-macOS.zip"
-zip -r "$ZIP_NAME" "${APP_NAME}.app" Ableton_Push2.js *.pdf 2>/dev/null
+# -y preserves the app's internal symlinks (PyInstaller bundles ~99 of them);
+# without it zip follows and DUPLICATES the targets — the extracted app
+# ballooned from ~66 MB to ~218 MB (affected every release up to 1.0.6).
+zip -ry "$ZIP_NAME" "${APP_NAME}.app" Ableton_Push2.js *.pdf 2>/dev/null
 cd "$PROJECT_DIR"
 
 echo ""

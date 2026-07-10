@@ -103,20 +103,40 @@ LAUNCH_AGENT_PATH = os.path.expanduser(
     f"~/Library/LaunchAgents/{LAUNCH_AGENT_LABEL}.plist"
 )
 
+def _app_bundle_path():
+    """Path of the running .app bundle (frozen builds), else None."""
+    if not getattr(sys, 'frozen', False):
+        return None
+    p = os.path.abspath(sys.executable)
+    while p and p != '/':
+        if p.endswith('.app'):
+            return p
+        p = os.path.dirname(p)
+    return None
+
+def _auto_start_args():
+    """The ProgramArguments the launch agent should use for THIS install.
+
+    Frozen app → launch the .app BUNDLE via /usr/bin/open: running the inner
+    Mach-O directly from launchd (the previous behaviour) starts with cwd=/
+    and a minimal environment, which broke the app — and the recorded path
+    embedded the versioned app name, so it went stale on every upgrade."""
+    bundle = _app_bundle_path()
+    if bundle:
+        return ["/usr/bin/open", bundle]
+    if getattr(sys, 'frozen', False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(__file__)]
+
 def is_auto_start_enabled():
     return os.path.exists(LAUNCH_AGENT_PATH)
 
 def set_auto_start(enabled):
     try:
         if enabled:
-            if getattr(sys, 'frozen', False):
-                args = [sys.executable]
-            else:
-                args = [sys.executable, os.path.abspath(__file__)]
-            
             plist = {
                 "Label": LAUNCH_AGENT_LABEL,
-                "ProgramArguments": args,
+                "ProgramArguments": _auto_start_args(),
                 "RunAtLoad": True,
                 "KeepAlive": False,
             }
@@ -130,6 +150,22 @@ def set_auto_start(enabled):
             blog("Auto-start at login: disabled")
     except Exception as e:
         blog(f"Auto-start failed: {e}")
+
+def refresh_auto_start():
+    """Self-heal the launch agent: if auto-start is enabled but the recorded
+    launch arguments don't match this install (app renamed by an upgrade,
+    moved, or written by the old direct-binary version), rewrite it."""
+    try:
+        if not is_auto_start_enabled():
+            return
+        with open(LAUNCH_AGENT_PATH, "rb") as f:
+            current = plistlib.load(f)
+        expected = _auto_start_args()
+        if current.get("ProgramArguments") != expected:
+            blog(f"Auto-start: updating stale launch agent → {expected}")
+            set_auto_start(True)
+    except Exception as e:
+        blog(f"Auto-start refresh failed: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -274,7 +310,11 @@ class Push2BridgeApp(rumps.App):
         self._mapper_status = "not started"
         
         self.auto_start_item = rumps.MenuItem("Start at Login", callback=self.on_toggle_auto_start)
+        refresh_auto_start()  # heal a stale agent (renamed/upgraded app)
         self.auto_start_item.state = is_auto_start_enabled()
+
+        self.backup_item = rumps.MenuItem("Backup Settings…", callback=self.on_backup_settings)
+        self.restore_item = rumps.MenuItem("Restore Settings…", callback=self.on_restore_settings)
         
         self.quit_item = rumps.MenuItem("Quit", callback=self.on_quit)
         
@@ -286,6 +326,8 @@ class Push2BridgeApp(rumps.App):
             self.start_stop_item,
             self.show_logs_item,
             self.mapper_item,
+            self.backup_item,
+            self.restore_item,
             None,
             self.auto_start_item,
             None,
@@ -502,6 +544,58 @@ class Push2BridgeApp(rumps.App):
                         "pip install fastapi uvicorn pedalboard",
                 ok="OK"
             )
+
+    def on_backup_settings(self, sender):
+        """Download a zip of all bridge settings via the web server (the
+        browser handles the save dialog)."""
+        if "running" in self._mapper_status:
+            import webbrowser
+            webbrowser.open("http://localhost:8100/api/backup")
+        else:
+            rumps.alert(
+                title="Backup Settings",
+                message="The backup runs through the built-in web server, "
+                        f"which is not running (status: {self._mapper_status}).",
+                ok="OK"
+            )
+
+    def on_restore_settings(self, sender):
+        """Pick a backup zip with the native chooser and restore it through
+        the web server's validated endpoint."""
+        if "running" not in self._mapper_status:
+            rumps.alert(title="Restore Settings",
+                        message="The restore runs through the built-in web server, "
+                                f"which is not running (status: {self._mapper_status}).",
+                        ok="OK")
+            return
+        import subprocess
+        script = ('POSIX path of (choose file with prompt '
+                  '"Restore Push 2 Bridge settings from a backup zip" '
+                  'of type {"public.zip-archive"})')
+        try:
+            out = subprocess.run(["osascript", "-e", script],
+                                 capture_output=True, text=True, timeout=300)
+            path = out.stdout.strip()
+        except Exception:
+            path = ""
+        if not path:
+            return  # cancelled
+        try:
+            import urllib.request, json as _json
+            with open(path, "rb") as f:
+                data = f.read()
+            req = urllib.request.Request(
+                "http://localhost:8100/api/backup/restore", data=data,
+                headers={"Content-Type": "application/zip"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                info = _json.loads(r.read().decode())
+            rumps.alert(title="Restore Settings",
+                        message=f"Restored {len(info.get('restored', []))} file(s).\n\n"
+                                f"{info.get('note', '')}",
+                        ok="OK")
+        except Exception as e:
+            rumps.alert(title="Restore Settings",
+                        message=f"Restore failed: {e}", ok="OK")
     
     def on_toggle_auto_start(self, sender):
         sender.state = not sender.state
