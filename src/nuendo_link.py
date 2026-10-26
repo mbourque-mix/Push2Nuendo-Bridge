@@ -36,6 +36,7 @@ import threading
 import time
 import struct
 import os
+from coremidi_ids import pin_unique_id
 from state import (
     AppState, TrackInfo, InsertInfo, QuickControl,
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS,
@@ -176,6 +177,7 @@ class NuendoLink:
             self._midi_in = rtmidi.MidiIn()
             self._midi_in.ignore_types(sysex=False, timing=False, active_sense=True)
             self._midi_in.open_virtual_port(PORT_BRIDGE_IN)
+            pin_unique_id(PORT_BRIDGE_IN, is_source=False)
             self._midi_in.set_callback(self._on_midi_received)
             print(f"  ✓ Virtual port '{PORT_BRIDGE_IN}' created (Nuendo → Bridge)")
             return True
@@ -188,6 +190,8 @@ class NuendoLink:
         try:
             self._midi_out = rtmidi.MidiOut()
             self._midi_out.open_virtual_port(PORT_BRIDGE_OUT)
+            # Stable ID so Nuendo remembers "In 'All MIDI Inputs'" = off
+            pin_unique_id(PORT_BRIDGE_OUT, is_source=True)
             print(f"  ✓ Virtual port '{PORT_BRIDGE_OUT}' created (Bridge → Nuendo)")
             return True
         except Exception as e:
@@ -269,6 +273,7 @@ class NuendoLink:
         self._midi_notes_out = rtmidi.MidiOut()
         try:
             self._midi_notes_out.open_virtual_port(PORT_NOTES_OUT)
+            pin_unique_id(PORT_NOTES_OUT, is_source=True)
             print(f"  ✓ Virtual port '{PORT_NOTES_OUT}' created")
         except Exception:
             # Windows (WinMM) has no virtual ports — use the loopMIDI port
@@ -290,6 +295,7 @@ class NuendoLink:
         self._midi_notes_in = rtmidi.MidiIn()
         try:
             self._midi_notes_in.open_virtual_port(PORT_NOTES_IN)
+            pin_unique_id(PORT_NOTES_IN, is_source=False)
             self._midi_notes_in.set_callback(self._on_notes_received)
             print(f"  ✓ Virtual port '{PORT_NOTES_IN}' created")
         except Exception:
@@ -545,6 +551,12 @@ class NuendoLink:
                 print("  DA: All rec arms cleared")
                 if hasattr(self, '_on_selection_changed'):
                     self._on_selection_changed()
+            elif value in (4, 5):
+                # Group Folder Monitor (4) / Rec (5): the JS has just selected
+                # the folder; once the selection has settled, fire the 'Edit'
+                # key command (EXPAND_JS_COMMANDS 39 / 40) on it.
+                index = 39 if value == 4 else 40
+                threading.Timer(0.2, self.send_expand_command, args=(index,)).start()
         
         # ── Volumes of the 8 visible tracks (CC 20-27) ──
         elif 20 <= cc_num <= 27:
@@ -1527,8 +1539,10 @@ class NuendoLink:
         elif msg_type == 0x10 and len(payload) >= 1:
             try:
                 ver = bytes(payload).decode('utf-8').rstrip('\x00')
-                self.state.js_version = ver
-                print(f"  ✓ JS Script version: {ver}")
+                # Re-sent by the JS every ~2s — only log when it changes
+                if ver != self.state.js_version:
+                    self.state.js_version = ver
+                    print(f"  ✓ JS Script version: {ver}")
             except UnicodeDecodeError:
                 pass
 
@@ -1732,6 +1746,16 @@ class NuendoLink:
         """Send a CC message on channel 5 (0xB4)."""
         if self._midi_out and self._running:
             self._midi_out.send_message([0xB4, cc_num & 0x7F, int(value) & 0x7F])
+
+    def pulse_record(self):
+        """Fire Nuendo's 'Transport'/'Record' command (JS transportRecord,
+        CC 52). It is a command binding, so pulse 127 then 0 to give it a
+        fresh rising edge on every press."""
+        if not (self._midi_out and self._running):
+            return
+        self._midi_out.send_message([0xB0, 52, 127])
+        time.sleep(0.01)
+        self._midi_out.send_message([0xB0, 52, 0])
 
     def send_expand_command(self, index):
         """Fire an expand-menu Nuendo command (wire channel 14 = 0xBD,
@@ -2832,13 +2856,32 @@ class NuendoLink:
         """Set solo on a track."""
         self.send_cc(100 + track_in_bank, 127 if is_solo else 0)
 
-    def send_monitor_toggle(self, track_in_bank, is_monitored):
+    def send_monitor_toggle(self, track_in_bank, is_monitored, user_press=True):
         """Set monitor on a track."""
         self.send_cc(110 + track_in_bank, 127 if is_monitored else 0)
+        if user_press:
+            self._send_folder_press(95, track_in_bank)
 
-    def send_rec_toggle(self, track_in_bank, is_armed):
+    def send_rec_toggle(self, track_in_bank, is_armed, user_press=True):
         """Set record arm on a track."""
         self.send_cc(118 + track_in_bank, 127 if is_armed else 0)
+        if user_press:
+            self._send_folder_press(96, track_in_bank)
+
+    def _send_folder_press(self, cc_num, track_in_bank):
+        """Report a Monitor (CC 95) / Rec (CC 96) press on a bank slot, wire
+        channel 8 (0xB7). The value bindings above do nothing on a Nuendo Group
+        Folder; the JS script uses this event to select the folder and answer
+        CC 68 = 4 / 5 (ignored for other tracks).
+        Value = slot + 1, +8 on every other press: a single message whose value
+        always differs from the previous one, so the JS callback fires on every
+        press (a value-then-0 pulse was coalesced and only the 0 got through).
+        Not sent for the Clear-All sweeps (user_press=False)."""
+        if not (self._midi_out and self._running) or not 0 <= track_in_bank < 8:
+            return
+        self._folder_press_flip = not getattr(self, '_folder_press_flip', False)
+        value = track_in_bank + 1 + (8 if self._folder_press_flip else 0)
+        self._midi_out.send_message([0xB7, cc_num, value])
 
     def _request_name_scan(self):
         """Start initial scan via on_connected callback."""
@@ -2884,6 +2927,7 @@ class NuendoLink:
                     # Reset state to avoid stale data
                     self.state.is_playing = False
                     self.state.is_recording = False
+                    self.state.js_version = "?"   # re-announced by the JS on reconnect
                     self.state.metronome_on = False
                     self.state.cycle_active = False
                     for t in self.state.tracks:

@@ -16,6 +16,7 @@ import math
 import numpy as np
 import time
 from PIL import Image, ImageDraw, ImageFont
+from chords import chord_name, scale_prefers_flats
 from state import (
     MODE_VOLUME, MODE_PAN, MODE_SENDS, MODE_DEVICE, MODE_INSERTS, MODE_TRACK, MODE_CR,
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
@@ -1396,8 +1397,14 @@ def _draw_bottom_bar(draw, state, cr_state=None):
     label, color = lower_labels.get(lower_mode, ("MUTE", (200, 120, 0)))
     draw.text((120, 147), label, font=FONT_SM, fill=color)
 
-    # Pad MIDI note range (Mix page only)
-    if state.mode == MODE_VOLUME:
+    # Chord held on the pads (Mix / Pan pages — the track headers leave no
+    # room for the top-right badge there), else the pad MIDI note range
+    # (Mix page only)
+    global _chord_drawn
+    if _chord_text and state.mode in (MODE_VOLUME, MODE_PAN):
+        draw.text((172, 147), f"♪ {_chord_text}", font=FONT_SM_BOLD, fill=(150, 255, 190))
+        _chord_drawn = True
+    elif state.mode == MODE_VOLUME:
         note_range = getattr(state, 'pad_note_range', '')
         if note_range:
             draw.text((172, 147), f"♪ {note_range}", font=FONT_SM, fill=(120, 170, 130))
@@ -1676,6 +1683,9 @@ SETUP_PAGE_OPTIONS = {
         ('Poly AT', AT_POLY),
         ('Chan AT', AT_CHANNEL),
         ('AT Off',  AT_OFF),
+        None,
+        ('Chord #', False),   # chord-name spelling when the scale doesn't decide
+        ('Chord b', True),
     ],
     1: [  # Velocity Curve page
         ('Linear',  VC_LINEAR),
@@ -1753,6 +1763,18 @@ def _render_setup_screen(state):
             at_name, desc = "Off", "Pad pressure ignored"
         draw.text((20, 75), at_name, fill=COLOR_ACCENT, font=FONT_LG)
         draw.text((20, 100), desc, fill=(100, 100, 100), font=FONT_SM)
+
+        # Chord-name spelling (lower buttons 5 / 6)
+        cx = 4 * CELL_WIDTH
+        draw.line([(cx, 42), (cx, 140)], fill=COLOR_SEPARATOR)
+        draw.text((cx + 20, 50), "Chord Names", fill=(200, 200, 200), font=FONT_MD)
+        flats_def = getattr(state, 'chord_flats_default', False)
+        draw.text((cx + 20, 75), "Flats (Bb)" if flats_def else "Sharps (A#)",
+                  fill=COLOR_ACCENT, font=FONT_LG)
+        draw.text((cx + 20, 100), "Follows the active scale. This choice is used when the",
+                  fill=(100, 100, 100), font=FONT_SM)
+        draw.text((cx + 20, 113), "scale doesn't decide (Piano, Chromatic, C major...).",
+                  fill=(100, 100, 100), font=FONT_SM)
     
     elif page_idx == 1:
         # ── Page 1: Velocity Curve — graphique par bouton ──
@@ -1780,7 +1802,9 @@ def _render_setup_screen(state):
             # Draw the curve (pass accent_velocity for Fixed mode)
             curve_color = COLOR_ACCENT if is_selected else (80, 80, 80)
             fixed_vel = state.accent_velocity
-            _draw_velocity_preview(draw, gx, gy, gw, gh, vc_val, curve_color, fixed_vel)
+            _draw_velocity_preview(draw, gx, gy, gw, gh, vc_val, curve_color, fixed_vel,
+                                   getattr(state, 'velocity_min', 1),
+                                   getattr(state, 'velocity_max', 127))
             
             # Show velocity value on Fixed graph
             if vc_val == VC_FIXED:
@@ -1791,6 +1815,22 @@ def _render_setup_screen(state):
             
             # Separator
             draw.line([(x, 42), (x, 140)], fill=COLOR_SEPARATOR)
+
+        # Encoders 6 / 7 / 8: pad sensitivity (how hard to hit for full
+        # velocity) and output range (softest hit → Min, hardest → Max).
+        # Dimmed while the Fixed curve is selected (it ignores them).
+        range_on = (state.velocity_curve != VC_FIXED)
+        for cell, label, val in ((5, "Sens", getattr(state, 'velocity_sens', 5)),
+                                 (6, "Min", getattr(state, 'velocity_min', 1)),
+                                 (7, "Max", getattr(state, 'velocity_max', 127))):
+            x = cell * CELL_WIDTH
+            draw.line([(x, 42), (x, 140)], fill=COLOR_SEPARATOR)
+            ltw = FONT_SM.getlength(label) if hasattr(FONT_SM, 'getlength') else len(label) * 6
+            draw.text((x + (CELL_WIDTH - ltw) // 2, 62), label, fill=(140, 140, 140), font=FONT_SM)
+            vtxt = str(val)
+            vtw = FONT_LG.getlength(vtxt) if hasattr(FONT_LG, 'getlength') else len(vtxt) * 12
+            draw.text((x + (CELL_WIDTH - vtw) // 2, 84), vtxt,
+                      fill=COLOR_ACCENT if range_on else (90, 90, 90), font=FONT_LG)
     
     elif page_idx == 2:
         # ── Page 2: Control Room knob default ──
@@ -1931,8 +1971,8 @@ def _render_setup_screen(state):
         draw.text((20, 70), f"Bridge  v{BRIDGE_VERSION}", fill=COLOR_ACCENT, font=FONT_LG)
         
         # JS version
-        js_ver = state.js_version if state.js_version != "?" else "not connected"
-        draw.text((20, 95), f"Script  v{js_ver}", fill=COLOR_ACCENT, font=FONT_MD)
+        js_ver = f"v{state.js_version}" if state.js_version != "?" else "not connected"
+        draw.text((20, 95), f"Script  {js_ver}", fill=COLOR_ACCENT, font=FONT_MD)
         
         # Links
         draw.text((20, 118), "github.com/mbourque-mix/Push2Nuendo-Bridge", fill=(80, 80, 80), font=FONT_SM)
@@ -1944,11 +1984,14 @@ def _render_setup_screen(state):
         x = i * CELL_WIDTH
         draw.line([(x, 141), (x, SCREEN_HEIGHT)], fill=COLOR_SEPARATOR)
         
-        if i < len(options):
+        if i < len(options) and options[i] is not None:
             label, value = options[i]
             
             if page_idx == 0:
-                is_selected = (state.aftertouch_mode == value)
+                if isinstance(value, bool):
+                    is_selected = (getattr(state, 'chord_flats_default', False) == value)
+                else:
+                    is_selected = (state.aftertouch_mode == value)
             elif page_idx == 1:
                 is_selected = (state.velocity_curve == value)
             elif page_idx == 2:
@@ -1984,8 +2027,10 @@ def _render_setup_screen(state):
 
     return _to_push2_frame(img)
 
-def _draw_velocity_preview(draw, x, y, w, h, vc_mode, color=None, fixed_vel=100):
-    """Draw a velocity curve preview graph."""
+def _draw_velocity_preview(draw, x, y, w, h, vc_mode, color=None, fixed_vel=100,
+                           v_min=1, v_max=127):
+    """Draw a velocity curve preview graph (scaled into [v_min, v_max],
+    except the Fixed curve)."""
     import math
     if color is None:
         color = COLOR_ACCENT
@@ -2005,6 +2050,8 @@ def _draw_velocity_preview(draw, x, y, w, h, vc_mode, color=None, fixed_vel=100)
             v = fixed_vel / 127.0 if t > 0 else 0
         else:
             v = t
+        if vc_mode != VC_FIXED and t > 0:
+            v = (v_min + v * (v_max - v_min)) / 127.0
         px = x + i
         py = y + h - int(v * h)
         if prev_px is not None:
@@ -3484,10 +3531,74 @@ def _render_kc_legend_screen(state):
     return _to_push2_frame(img)
 
 
+# ─────────────────────────────────────────────
+# Chord display (pads currently held)
+# ─────────────────────────────────────────────
+# The chord name is shown wherever the current screen has room for it:
+#  - Mix / Pan pages: in the bottom bar, in place of the pad note range;
+#  - every other screen: a small badge in the top-right corner (the header
+#    bars are empty there), drawn in _to_push2_frame so no screen needs to
+#    know about it.
+# It lingers briefly after the pads are released so short stabs stay readable.
+CHORD_LINGER_S = 0.8
+_chord_text = ""        # chord to show on this frame ("" = nothing)
+_chord_last = ""        # last chord detected while pads were held
+_chord_last_time = 0.0
+_chord_drawn = False    # set by a screen that drew the chord itself
+
+
+def _update_chord(pad_grid, state=None):
+    """Work out the chord held on the pads (called once per frame)."""
+    global _chord_text, _chord_last, _chord_last_time, _chord_drawn
+    _chord_drawn = False
+    name = ""
+    if (pad_grid is not None and not pad_grid.drum_mode
+            and not getattr(pad_grid, 'scale_mode', False)):
+        notes = []
+        for r in range(8):
+            for c in range(8):
+                if not pad_grid.pad_pressed[r][c]:
+                    continue
+                if pad_grid.is_keyswitch_layout and pad_grid._ks_index_for_pad(r, c) is not None:
+                    continue  # keyswitch pads are not part of the chord
+                n = pad_grid.note_map[r][c]
+                if n >= 0:
+                    notes.append(n)
+        # Sharps or flats: from the active scale, else the Setup preference
+        flats = None
+        if pad_grid.scale_name != "Piano":
+            flats = scale_prefers_flats(pad_grid.root_note, pad_grid.scale_intervals)
+        if flats is None:
+            flats = bool(getattr(state, 'chord_flats_default', False))
+        name = chord_name(notes, flats)
+    now = time.time()
+    if name:
+        _chord_last, _chord_last_time = name, now
+        _chord_text = name
+    elif _chord_last and now - _chord_last_time < CHORD_LINGER_S:
+        _chord_text = _chord_last
+    else:
+        _chord_last = ""
+        _chord_text = ""
+
+
+def _draw_chord_badge(img):
+    """Top-right chord badge, for screens that didn't draw the chord themselves."""
+    if not _chord_text or _chord_drawn:
+        return
+    draw = ImageDraw.Draw(img)
+    tw = int(FONT_MD_BOLD.getlength(_chord_text)) if hasattr(FONT_MD_BOLD, 'getlength') else len(_chord_text) * 9
+    w = max(60, tw + 20)
+    x0 = SCREEN_WIDTH - w - 2
+    draw.rectangle([x0, 1, SCREEN_WIDTH - 2, 20], fill=(15, 40, 30), outline=(60, 160, 110), width=1)
+    draw.text((x0 + (w - tw) // 2, 3), _chord_text, font=FONT_MD_BOLD, fill=(150, 255, 190))
+
+
 def render_frame(state: AppState, pad_grid=None, cr_state=None):
     """
     Generate a complete frame to send to the Push 2 screen.
     """
+    _update_chord(pad_grid, state)
     if getattr(state, 'vegas_mode', False):
         return _render_vegas_screen(state)
 
@@ -3932,6 +4043,7 @@ def _to_push2_frame(img):
 
     BGR565 format: [b4 b3 b2 b1 b0 | g5 g4 g3 g2 g1 g0 | r4 r3 r2 r1 r0]
     """
+    _draw_chord_badge(img)
     rgb = np.array(img, dtype=np.uint16)   # shape: (160, 960, 3)
 
     r = rgb[:, :, 0]

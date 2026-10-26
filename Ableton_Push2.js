@@ -1,6 +1,6 @@
 // =============================================================================
 // Ableton_Push2.js — MIDI Remote Script for Nuendo / Cubase
-// Version 1.0.7
+// Version 1.0.8
 //
 // A single bank zone of 8 channels.
 // Banking via mNextBank/mPrevBank (CC 8/9).
@@ -15,7 +15,7 @@
 // CC 50-53 : Transport  CC 5 : Start scan  CC 7 : Stop scan
 // =============================================================================
 
-var JS_VERSION = '1.0.7';
+var JS_VERSION = '1.0.8';
 
 // ── TEXT SANITIZER ──
 // Names/values are packed into 7-bit SysEx with `charCodeAt(c) & 0x7F`. A char
@@ -646,7 +646,15 @@ console.log("Send Level ABS Knobs OK (ch7 CC100-107)");
 // Transport
 page.makeValueBinding(transportPlay.mSurfaceValue, page.mHostAccess.mTransport.mValue.mStart).setTypeToggle();
 page.makeValueBinding(transportStop.mSurfaceValue, page.mHostAccess.mTransport.mValue.mStop).setTypeToggle();
-page.makeValueBinding(transportRecord.mSurfaceValue, page.mHostAccess.mTransport.mValue.mRecord).setTypeToggle();
+// Record is fired as the 'Transport'/'Record' key command, NOT by writing
+// mTransport.mValue.mRecord: a value binding forces the record state on, so
+// with "Use Pre-roll" Nuendo punched in right away instead of waiting for the
+// end of the pre-roll. The command behaves exactly like Nuendo's own Record key.
+// The bridge pulses CC 52 (127 then 0). Record state feedback (CC 73) comes from
+// a separate read-only variable so nothing ever writes mRecord back to the host.
+page.makeCommandBinding(transportRecord.mSurfaceValue, 'Transport', 'Record');
+var transportRecordState = surface.makeCustomValueVariable('transportRecordState');
+page.makeValueBinding(transportRecordState, page.mHostAccess.mTransport.mValue.mRecord);
 page.makeValueBinding(transportCycle.mSurfaceValue, page.mHostAccess.mTransport.mValue.mCycleActive).setTypeToggle();
 
 // Undo / Redo
@@ -783,6 +791,9 @@ var expandCommands = [
     ['Transport', 'Loop Selection Solo'],         // 36
     ['Transport', 'StartStop Preview'],           // 37
     ['Transport', 'Use Post-roll'],               // 38
+    ['Edit', 'Monitor'],                          // 39  (Group Folder Monitor — not in a menu)
+    ['Edit', 'Record Enable'],                    // 40  (Group Folder Rec — not in a menu)
+    ['Transport', 'Precount On'],                 // 41  (Shift+Metronome — not in a menu)
 ];
 var expandButtons = [];  // keep references so the bindings persist
 for (var exI = 0; exI < expandCommands.length; exI++) {
@@ -1084,7 +1095,7 @@ transportCycle.mSurfaceValue.mOnProcessValueChange = function(activeDevice, valu
 };
 
 // Feedback record → bridge (CC 73 = is_recording)
-transportRecord.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+transportRecordState.mOnProcessValueChange = function(activeDevice, value, diff) {
     midiOutput_Loop.sendMidi(activeDevice, [0xB0, 73, value > 0.5 ? 127 : 0]);
 };
 
@@ -1288,6 +1299,9 @@ if (page.mHostAccess.makeDirectAccess) {
             daChan.deactivate(activeMapping);
             daChanActive = false;
         }
+        for (var dsJ = 1; dsJ < 8; dsJ++) {
+            if (daBankSlotActive[dsJ]) { daBankSlot[dsJ].deactivate(activeMapping); daBankSlotActive[dsJ] = false; }
+        }
         daMapping = null;
         daAvailable = false;
         daInsExplored = false;
@@ -1332,6 +1346,93 @@ if (page.mHostAccess.makeDirectAccess) {
         } catch (e) {}
         return false;
     }
+
+    // ── Group Folder (Nuendo 15) Mute / Solo / Monitor / Rec ──
+    // A Group Folder shows up in the bank zone as a 'GroupChannel', but the
+    // regular mMute/mSolo/mMonitorEnable/mRecordEnable value bindings have no
+    // effect on it.
+    //  - Mute / Solo: when the bridge sets the button on a slot holding a
+    //    GroupChannel, write the same value through DirectAccess (tags 1027 /
+    //    1028). The write is skipped when the host already has that value, so
+    //    the normal host → surface feedback never causes a write.
+    //  - Monitor / Rec: the channel's own tags (4001 / 4002) do nothing on a
+    //    Group Folder — those buttons belong to the folder TRACK. The bridge
+    //    reports each press on CC 95 (Monitor) / CC 96 (Rec) ch8, value =
+    //    slot + 1 (+8 every other press); if that slot is a GroupChannel the script selects it and
+    //    answers CC 68 = 4 (Monitor) / 5 (Rec). The bridge then pulses the
+    //    'Edit' key command (expandCommands 39 / 40), which toggles the
+    //    folder's button. Command bindings only fire from real MIDI input, not
+    //    from setProcessValue — hence the round trip. Selecting the folder is a
+    //    side effect of this path.
+    // Other channel types keep using the bindings only.
+    var daBankSlot = [], daBankSlotActive = [];
+    for (var dsI = 0; dsI < 8; dsI++) {
+        daBankSlot.push(dsI === 0 ? daBank : page.mHostAccess.makeDirectAccess(bankChannels[dsI]));
+        daBankSlotActive.push(false);
+    }
+    // Object ID of bank slot `slot` if it holds a GroupChannel, else -1.
+    function daGroupSlotID(slot) {
+        if (!ensureDA()) return -1;
+        var m = daMapping, d = daBankSlot[slot];
+        if (slot === 0) {
+            if (!daBankActive) { daBank.activate(m); daBankActive = true; }
+        } else if (!daBankSlotActive[slot]) {
+            d.activate(m);
+            daBankSlotActive[slot] = true;
+        }
+        var id = d.getBaseObjectID(m);
+        if (id < 0 || !d.getObjectTypeName) return -1;
+        return (d.getObjectTypeName(m, id) === 'GroupChannel') ? id : -1;
+    }
+    function daGroupSlotWrite(activeDevice, slot, tag, value) {
+        if (!daMapping || scanActive) return;
+        try {
+            var m = daMapping, d = daBankSlot[slot];
+            var id = daGroupSlotID(slot);
+            if (id < 0) return;
+            var hasTag = false, pc = d.getNumberOfParameters(m, id);
+            for (var p = 0; p < pc; p++) {
+                if (d.getParameterTagByIndex(m, id, p) === tag) { hasTag = true; break; }
+            }
+            if (!hasTag) return;
+            var want = value > 0.5 ? 1 : 0;
+            var cur = d.getParameterProcessValue(m, id, tag) > 0.5 ? 1 : 0;
+            if (cur !== want) d.setParameterProcessValue(m, id, tag, want);
+        } catch (e) {
+            daLog(activeDevice, 'DA group slot ' + slot + ' tag ' + tag + ' error: ' + e);
+        }
+    }
+    function daGroupSlotHook(btn, slot, tag) {
+        btn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+            daGroupSlotWrite(activeDevice, slot, tag, value);
+        };
+    }
+    for (var dgI = 0; dgI < 8; dgI++) {
+        daGroupSlotHook(muteButtons[dgI], dgI, 1027);
+        daGroupSlotHook(soloButtons[dgI], dgI, 1028);
+    }
+
+    // Folder-track Monitor / Rec (see above).
+    function folderCmdHook(cc, which) {
+        var b = surface.makeButton(95 + which * 2, 26, 2, 2);
+        b.mSurfaceValue.mMidiBinding.setInputPort(midiInput_Loop).bindToControlChange(7, cc);
+        b.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
+            // value = slot + 1, +8 on every other press (always a new value)
+            var raw = Math.round(value * 127);
+            if (raw < 1 || raw > 16) return;
+            var slot = (raw - 1) % 8;
+            if (!daMapping || scanActive) return;
+            try {
+                if (daGroupSlotID(slot) < 0) return;
+                pendingAbsSelect = slot;
+                midiOutput_Loop.sendMidi(activeDevice, [0xB0, 68, 4 + which]);
+            } catch (e) {
+                daLog(activeDevice, 'Folder cmd slot ' + slot + ' error: ' + e);
+            }
+        };
+        return b;
+    }
+    var folderCmdBtns = [folderCmdHook(95, 0), folderCmdHook(96, 1)];
 
     daDiagBtn.mSurfaceValue.mOnProcessValueChange = function(activeDevice, value, diff) {
         if (value < 0.5 || !daMapping || daDiagDone) return;
@@ -3052,6 +3153,16 @@ var scanDelay = 0;
 var initialSyncDone = false;
 var initialSyncDelay = 0;
 
+// Send JS version to bridge via SysEx 0x10
+function sendJsVersion(context) {
+    var verMsg = [0xF0, 0x00, 0x21, 0x09, 0x10];
+    for (var c = 0; c < JS_VERSION.length; c++) {
+        verMsg.push(JS_VERSION.charCodeAt(c) & 0x7F);
+    }
+    verMsg.push(0xF7);
+    midiOutput_Loop.sendMidi(context, verMsg);
+}
+
 deviceDriver.mOnIdle = function(context) {
     tick++;
     if (tick >= 5) {
@@ -3071,6 +3182,10 @@ deviceDriver.mOnIdle = function(context) {
         if (da && daMapping) {
             midiOutput_Loop.sendMidi(context, [0xB0, 68, 1]);
         }
+        // Same for the script version: sent once after script load, it never
+        // reached a bridge started (or restarted) later — the About page then
+        // showed "not connected". Repeat it with the same period.
+        if (initialSyncDone) sendJsVersion(context);
     }
 
     // After first heartbeat, send current volume/pan values to bridge
@@ -3086,13 +3201,7 @@ deviceDriver.mOnIdle = function(context) {
                 midiOutput_Loop.sendMidi(context, [0xBA, 20 + i, Math.round(vol * 127)]);
                 midiOutput_Loop.sendMidi(context, [0xB0, 40 + i, Math.round(pan * 127)]);
             }
-            // Send JS version to bridge via SysEx 0x10
-            var verMsg = [0xF0, 0x00, 0x21, 0x09, 0x10];
-            for (var c = 0; c < JS_VERSION.length; c++) {
-                verMsg.push(JS_VERSION.charCodeAt(c) & 0x7F);
-            }
-            verMsg.push(0xF7);
-            midiOutput_Loop.sendMidi(context, verMsg);
+            sendJsVersion(context);
         }
     }
 

@@ -68,6 +68,8 @@ pyinstaller \
     "${LIBUSB_ARG[@]}" \
     --add-data "state.py:." \
     --add-data "nuendo_link.py:." \
+    --add-data "coremidi_ids.py:." \
+    --add-data "chords.py:." \
     --add-data "push2_controller.py:." \
     --add-data "renderer.py:." \
     --add-data "pad_grid.py:." \

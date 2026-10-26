@@ -92,6 +92,8 @@ pyinstaller ^
     --add-data "..\Ableton_Push2.js;mapper" ^
     --add-data "state.py;." ^
     --add-data "nuendo_link.py;." ^
+    --add-data "coremidi_ids.py;." ^
+    --add-data "chords.py;." ^
     --add-data "push2_controller.py;." ^
     --add-data "renderer.py;." ^
     --add-data "pad_grid.py;." ^
@@ -102,6 +104,8 @@ pyinstaller ^
     --hidden-import main_windows ^
     --hidden-import state ^
     --hidden-import nuendo_link ^
+    --hidden-import coremidi_ids ^
+    --hidden-import chords ^
     --hidden-import push2_controller ^
     --hidden-import renderer ^
     --hidden-import pad_grid ^

@@ -2,7 +2,7 @@
 
 Turn your **Ableton Push 2** into a full-featured control surface for **Steinberg Nuendo** (and Cubase 14+).
 
-![Version](https://img.shields.io/badge/version-1.0.7-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.0.8-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)
 
@@ -19,6 +19,7 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - **Mute / Solo / Monitor / Record** — Toggle per track with colored LED indicators
 - **Long press** in Mute mode = Monitor toggle, in Solo mode = Record Arm toggle
 - **Clear All** — Shift+Mute/Solo clears all mutes, solos, monitors, or rec arms
+- **Nuendo 15 Group Folders** — Mute / Solo / Monitor / Record work on Group Folder tracks (Monitor / Record select the folder in Nuendo)
 - **Edit Channel Settings** — Double press upper row to open
 - **Bank navigation** — Browse tracks in groups of 8, Shift+◄► nudges by 1 track
 - **Adaptive text color** — Track headers automatically switch between white and black text based on background luminance
@@ -76,7 +77,7 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 ### Transport
 - Play / Stop / Record
 - Cycle (Loop) toggle
-- Metronome toggle
+- Metronome toggle; **Shift+Metronome** toggles the count-in (the Metronome button blinks while it is on — slow with the metronome off, fast with it on)
 - Undo
 - Play LED: white (stop), green (play), purple (play + loop)
 - Record LED: orange (idle), blinking red (track armed), solid red (recording)
@@ -104,8 +105,8 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - 3 modes (cycle with Shift+Layout): Pitch Bend / Mod Wheel / Volume Fader
 
 ### Setup Page
-- **MIDI Ctrl** — Aftertouch Mode: Polyphonic, Channel, or Off
-- **Vel Curve** — Velocity Curve: Linear, Logarithmic, Exponential, S-Curve, Fixed (with adjustable value)
+- **MIDI Ctrl** — Aftertouch Mode: Polyphonic, Channel, or Off; chord-name spelling (sharps / flats) used when the scale doesn't decide
+- **Vel Curve** — Velocity Curve: Linear, Logarithmic, Exponential, S-Curve, Fixed (with adjustable value), plus **Sens** (how hard to hit for full velocity) and the output **Min / Max** velocity
 - **CR Knob** — Master-encoder default: Main or Phones (Select gives the other)
 - **Pedal 1 / Pedal 2** — Footswitch action + invert, and expression-pedal calibration/targets (see Footswitch / Pedals above)
 - **Browser** — group the Default plugin collection by **Type** or **Vendor** (Default collection only)
@@ -130,7 +131,8 @@ Turn your **Ableton Push 2** into a full-featured control surface for **Steinber
 - Scale selector with root note (includes Piano and two Octatonic scales)
 - **Keyswitch layouts** (Layout button cycles 64 / 56+8 KS / 48+16 KS / Drum): orange, user-configurable keyswitch pads on the bottom row(s), with latch and a monophonic keyswitch section. Long-press Layout to configure (start note, per-pad overrides, Chromatic/Naturals)
 - Note Repeat with adjustable BPM
-- Adjustable velocity curves and fixed velocity
+- Adjustable velocity curves (with sensitivity and min/max range) and fixed velocity
+- **Chord display** — the chord held on the pads is named on screen (Mix/Pan footer, or a badge on the other pages), with inversions and sharps/flats following the active scale
 
 ### XY Pad (Session button)
 - 64 pads morph two parameters of the selected track (Volume / Pan / Quick Controls) or raw MIDI CC
@@ -193,7 +195,7 @@ The pre-built `.app` is **Apple Silicon (arm64) only**. On an M1/M2/M3 Mac, no H
 1. Copy **Push2 Nuendo Bridge.app** to `/Applications`
 2. The app is **not code-signed**, so macOS Gatekeeper blocks it on first launch. Remove the quarantine flag from Terminal (adjust the version in the name to match your copy):
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.7.app"
+   xattr -dr com.apple.quarantine "/Applications/Push2 Nuendo Bridge_v1.0.8.app"
    ```
 3. Copy **Ableton_Push2.js** to:
    ```
@@ -240,6 +242,8 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 
 > ⚠️ **Avoid doubled pad notes:** in Studio Setup → MIDI Port Setup, uncheck **"In 'All MIDI Inputs'"** for both **Ableton Push 2** (Live Port) and **Ableton Push 2 User Port**. Otherwise every pad is received twice (once via BridgeNotes, once direct from the hardware).
 
+> ⚠️ **Also uncheck "In 'All MIDI Inputs'" for NuendoBridge Out** — it carries the bridge's control messages to the script; left checked, MIDI tracks receive them too and their parameters can change. Since 1.0.8 this setting is kept between launches (on macOS, uncheck it once more after upgrading).
+
 ---
 
 ## Button Reference
@@ -258,13 +262,15 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 | Record | Record toggle | |
 | Fixed Length | Cycle/Loop toggle | |
 | Automate | Automation cycle | |
-| Metronome | Metronome toggle | |
+| Metronome | Metronome toggle | Count-in (precount) toggle |
 | Mute | Mute / Monitor toggle | Clear all mutes (or monitors) |
 | Solo | Solo / Rec arm toggle | Clear all solos (or rec arms) |
 | User | Control Room mode | |
 | Layout | Drum/Chromatic toggle | Touchstrip mode cycle |
 | Upper row (long) | Open instrument UI | Clear peak clip |
 | Upper row (double) | Edit Channel Settings | |
+
+> **Count-in LED:** with the count-in on, the Metronome button blinks — slowly when the metronome is off, fast when it is on. Nuendo does not report the count-in state to MIDI Remote scripts, so the bridge only tracks its own **Shift + Metronome** presses: if you toggle the count-in in Nuendo itself, the bridge cannot see that change and the LED will be out of step. Toggle it once more in Nuendo to realign.
 
 ## MIDI Channel Allocation
 
@@ -293,6 +299,7 @@ For Cubase, replace `Nuendo` with `Cubase` in that path.
 - **Plugin Mapper not loading**: with the standalone app this shouldn't happen (everything is bundled) — when running from source, install the dependencies with `pip install fastapi uvicorn pedalboard`
 - **Peak clip on startup**: Normal — filtered automatically after a 3-second grace period
 - **Track names not loading**: Navigate with ◄► to force a bank refresh
+- **Metronome button blinks but the count-in is off (or the reverse)**: the count-in was changed in Nuendo, which the bridge cannot see — toggle it once more in Nuendo to realign
 
 ---
 

@@ -38,7 +38,7 @@ CS_PAGE_SAT = "sat"
 CS_PAGE_LIMITER = "limiter"
 
 # Bridge version
-BRIDGE_VERSION = "1.0.7"
+BRIDGE_VERSION = "1.0.8"
 
 # Aftertouch modes
 AT_POLY    = "poly"       # Polyphonic aftertouch (per-note)
@@ -51,6 +51,15 @@ VC_LOG     = "log"       # Logarithmic (more sensitive at low velocities)
 VC_EXP     = "exp"       # Exponential (more sensitive at high velocities)
 VC_SCURVE  = "s-curve"   # S-curve (compressed extremes, expanded middle)
 VC_FIXED   = "fixed"     # Fixed velocity (always 100)
+# The Push's velocity table is indexed by PAD FORCE over 0..4095 g (128 steps
+# of 32 g), but real playing only uses the bottom of that range. The curves are
+# therefore laid out between VC_FORCE_MIN_G (softest hit) and the force that
+# gives full velocity, picked by the sensitivity setting (0 = hit hard to reach
+# max … 10 = light touch). Values follow Ableton Live's own pad-sensitivity table.
+VC_FORCE_MIN_G = 160.0
+VC_SENS_MAX_G = [1700.0, 1660.0, 1590.0, 1510.0, 1420.0, 1300.0,
+                 1170.0, 1030.0, 860.0, 640.0, 400.0]
+VC_SENS_DEFAULT = 5
 
 # Footswitch / pedal actions (Push 2 has two pedal jacks: jack 1 = CC 64,
 # jack 2 = CC 69). Each pedal is assigned one of these, with an optional invert.
@@ -195,6 +204,9 @@ EXPAND_JS_COMMANDS = [
     ('Transport', 'Loop Selection Solo'),        # 36
     ('Transport', 'StartStop Preview'),          # 37
     ('Transport', 'Use Post-roll'),              # 38
+    ('Edit', 'Monitor'),                         # 39  (Group Folder Monitor — not in a menu)
+    ('Edit', 'Record Enable'),                   # 40  (Group Folder Rec — not in a menu)
+    ('Transport', 'Precount On'),                # 41  (Shift+Metronome — not in a menu)
 ]
 # Menu = (title, lower_row_entries, upper_row_entries) — each row up to 8.
 # Entry kinds: 'js' = one command (index into EXPAND_JS_COMMANDS), 'cc' =
@@ -663,6 +675,9 @@ class AppState:
         # ── Transport ──
         self.is_playing = False
         self.is_recording = False
+        # Count-in (precount). Nuendo's MIDI Remote API doesn't expose it, so
+        # this only mirrors the Shift+Metronome presses made on the Push.
+        self.precount_on = False
         self.tempo_display = ""
         self.position_display = ""
         self.beats_display = ""
@@ -682,6 +697,14 @@ class AppState:
         self.setup_page = 0         # 0 = MIDI Controller, future pages...
         self.aftertouch_mode = AT_POLY  # default: polyphonic aftertouch
         self.velocity_curve = VC_LINEAR  # default: linear velocity
+        # Output range of the velocity curve: the softest hit gives
+        # velocity_min, the hardest velocity_max (ignored by the Fixed curve).
+        self.velocity_min = 1
+        self.velocity_max = 127
+        self.velocity_sens = VC_SENS_DEFAULT   # index into VC_SENS_MAX_G
+        # Chord display: accidental spelling used when the active scale doesn't
+        # decide (Piano layout, Chromatic, C major…). False = sharps, True = flats.
+        self.chord_flats_default = False
 
         # ── Footswitch / pedals (jack 1 = CC 64, jack 2 = CC 69) ──
         # Per pedal: {'action': FS_*, 'invert': bool, 'cc': int}. 'cc' is the

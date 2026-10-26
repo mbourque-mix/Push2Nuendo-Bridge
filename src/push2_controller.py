@@ -24,6 +24,7 @@ from state import (
     MODE_SETUP, MODE_MIDICC, MODE_BROWSER, MODE_CHANNEL_STRIP, MODE_XY, XY_TRACK_PARAMS,
     AT_POLY, AT_CHANNEL, AT_OFF,
     VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED,
+    VC_FORCE_MIN_G, VC_SENS_MAX_G, VC_SENS_DEFAULT,
     FS_SUSTAIN, FS_PLAYSTOP, FS_PLAY, FS_STOP, FS_RECORD, FS_RECSTOP, FS_EXPRESSION, FS_OFF, FS_OPTIONS, FS_PEDAL_CC,
     FS_EXPRESSION_DEFAULT_CC, FS_EXPR_TARGETS,
     EXPAND_MENUS,
@@ -594,6 +595,13 @@ class Push2Controller:
         self._update_pad_colors()
         self._configure_touchstrip_mode()
         self._configure_aftertouch()
+        # Re-apply a persisted non-default velocity curve / range (the Push
+        # forgets it on power-cycle). Left alone when everything is at default,
+        # so the pads keep the firmware's own response.
+        if (self.state.velocity_curve != VC_LINEAR or self.state.velocity_min != 1
+                or self.state.velocity_max != 127
+                or self.state.velocity_sens != VC_SENS_DEFAULT):
+            self._apply_velocity_curve()
         self._setup_button_palette()
         self._load_plugin_mappings()
         self._load_key_commands()
@@ -683,6 +691,18 @@ class Push2Controller:
     # Encoder handling
     # ─────────────────────────────────────────
 
+    def _enc_steps(self, key, increment, ticks_per_step=4):
+        """Slow an encoder down for discrete picks (lists, note/CC numbers).
+
+        Raw encoder ticks are too fast to land on one item, so accumulate them
+        per `key` and return one step every `ticks_per_step` ticks (0 until
+        then). The remainder is kept, so slow turns still register."""
+        accs = self.__dict__.setdefault('_enc_step_accs', {})
+        acc = accs.get(key, 0) + increment
+        step = int(acc / ticks_per_step)  # truncates toward 0 for both signs
+        accs[key] = acc - step * ticks_per_step
+        return step
+
     def _handle_encoder(self, encoder_name, increment):
         """
         Called when the user rotates an encoder.
@@ -746,6 +766,23 @@ class Push2Controller:
                 self.state.accent_velocity = max(1, min(127, self.state.accent_velocity + increment))
                 if self.state.velocity_curve == VC_FIXED:
                     self._apply_velocity_curve()
+            elif encoder_index in (5, 6, 7):  # encoders 6 / 7 / 8: Sens / Min / Max
+                st = self.state
+                if encoder_index == 5:
+                    step = self._enc_steps('vel_sens', increment)
+                    new = max(0, min(len(VC_SENS_MAX_G) - 1, st.velocity_sens + step))
+                    changed = (new != st.velocity_sens)
+                    st.velocity_sens = new
+                elif encoder_index == 6:
+                    new = max(1, min(st.velocity_max, st.velocity_min + increment))
+                    changed = (new != st.velocity_min)
+                    st.velocity_min = new
+                else:
+                    new = max(st.velocity_min, min(127, st.velocity_max + increment))
+                    changed = (new != st.velocity_max)
+                    st.velocity_max = new
+                if changed and st.velocity_curve != VC_FIXED:
+                    self._apply_velocity_curve(quiet=True)
             return
 
         # Setup mode: on a Pedal page with Expr selected, encoder 7 (index 6)
@@ -792,7 +829,7 @@ class Push2Controller:
             if self.state.cc_edit_mode:
                 # Edit mode: encoder changes CC number
                 cc = self.state.cc_numbers[encoder_index]
-                cc = max(0, min(127, cc + increment))
+                cc = max(0, min(127, cc + self._enc_steps(f'cc_num_{encoder_index}', increment)))
                 self.state.cc_numbers[encoder_index] = cc
             else:
                 # Normal mode: encoder changes CC value (sent immediately)
@@ -807,17 +844,19 @@ class Push2Controller:
         if self.state.mode == MODE_XY:
             st = self.state
             if encoder_index == 0:                 # Enc1 = X param
+                step = self._enc_steps('xy_x', increment)
                 if st.xy_cat_x == 'cc':
-                    st.xy_cc_x = max(0, min(127, st.xy_cc_x + increment))
+                    st.xy_cc_x = max(0, min(127, st.xy_cc_x + step))
                 else:
                     st.xy_track_param_x = max(0, min(len(XY_TRACK_PARAMS) - 1,
-                                                     st.xy_track_param_x + increment))
+                                                     st.xy_track_param_x + step))
             elif encoder_index == 1:               # Enc2 = Y param
+                step = self._enc_steps('xy_y', increment)
                 if st.xy_cat_y == 'cc':
-                    st.xy_cc_y = max(0, min(127, st.xy_cc_y + increment))
+                    st.xy_cc_y = max(0, min(127, st.xy_cc_y + step))
                 else:
                     st.xy_track_param_y = max(0, min(len(XY_TRACK_PARAMS) - 1,
-                                                     st.xy_track_param_y + increment))
+                                                     st.xy_track_param_y + step))
             elif encoder_index == 3:               # Enc4 = Sensitivity
                 st.xy_sensitivity = max(0.1, min(4.0, st.xy_sensitivity + increment * 0.05))
             elif encoder_index == 4:               # Enc5 = Smooth
@@ -988,7 +1027,7 @@ class Push2Controller:
             if encoder_index == 0 or encoder_index == 1:
                 total = len(state.browser_collections)
                 if total > 0:
-                    state.browser_coll_scroll += increment
+                    state.browser_coll_scroll += self._enc_steps('browser_coll', increment)
                     state.browser_coll_scroll = max(0, min(total - 1, state.browser_coll_scroll))
             return
         
@@ -997,7 +1036,7 @@ class Push2Controller:
             if encoder_index in (0, 1):
                 total = len(state.browser_folders)
                 if total > 0:
-                    state.browser_folder_scroll += increment
+                    state.browser_folder_scroll += self._enc_steps('browser_folder', increment)
                     state.browser_folder_scroll = max(0, min(total - 1, state.browser_folder_scroll))
             return
 
@@ -1007,9 +1046,10 @@ class Push2Controller:
             if total == 0:
                 return
             if encoder_index == 0:
-                state.browser_selected += increment * 7
+                state.browser_selected += self._enc_steps('browser_page', increment) * 7
             elif encoder_index == 1:
-                state.browser_selected += increment
+                # Long list: lighter slow-down than the short pickers
+                state.browser_selected += self._enc_steps('browser_fine', increment, 2)
             else:
                 return
             state.browser_selected = max(0, min(total - 1, state.browser_selected))
@@ -1350,6 +1390,13 @@ class Push2Controller:
         
         # ── Metronome ──
         if BTN_METRONOME and button_name == BTN_METRONOME:
+            if state.shift_held:
+                # Shift+Metronome = toggle the count-in ('Transport' /
+                # 'Precount On', EXPAND_JS_COMMANDS 41)
+                self.nuendo_link.send_expand_command(41)
+                state.precount_on = not state.precount_on
+                self._update_metronome_led()
+                return
             self.nuendo_link.send_cc(58, 127)
             time.sleep(0.01)
             self.nuendo_link.send_cc(58, 0)
@@ -1434,7 +1481,7 @@ class Push2Controller:
                 self.nuendo_link.send_cc(50, 127)  # Play
             return
         if button_name == BTN_RECORD:
-            self.nuendo_link.send_cc(52, 127)
+            self.nuendo_link.pulse_record()
             return
         if BTN_AUTOMATE and button_name == BTN_AUTOMATE:
             # Cycle: Off → Read → Read+Write → Write → Off
@@ -1836,6 +1883,10 @@ class Push2Controller:
                         elif i == 2:
                             state.aftertouch_mode = AT_OFF
                             self._apply_aftertouch_mode()
+                        elif i in (4, 5):
+                            # Chord-name spelling default: 5 = sharps, 6 = flats
+                            state.chord_flats_default = (i == 5)
+                            self._update_lower_row_leds()
                     elif state.setup_page == 1:
                         # Page 1: Velocity Curve (buttons 1-5)
                         VC_LIST = [VC_LINEAR, VC_LOG, VC_EXP, VC_SCURVE, VC_FIXED]
@@ -2420,7 +2471,7 @@ class Push2Controller:
                                     abs_idx = bank_idx * 8 + t
                                     if abs_idx < len(self.state.tracks):
                                         self.state.tracks[abs_idx].is_monitored = False
-                                        self.nuendo_link.send_monitor_toggle(t, False)
+                                        self.nuendo_link.send_monitor_toggle(t, False, user_press=False)
                                 if bank_idx < num_banks - 1:
                                     self.nuendo_link.send_cc(8, 127)
                                     time.sleep(0.02)
@@ -2480,7 +2531,7 @@ class Push2Controller:
                                     abs_idx = bank_idx * 8 + t
                                     if abs_idx < len(self.state.tracks):
                                         self.state.tracks[abs_idx].is_armed = False
-                                        self.nuendo_link.send_rec_toggle(t, False)
+                                        self.nuendo_link.send_rec_toggle(t, False, user_press=False)
                                 if bank_idx < num_banks - 1:
                                     self.nuendo_link.send_cc(8, 127)
                                     time.sleep(0.02)
@@ -2790,11 +2841,14 @@ class Push2Controller:
         ks_index = pg.ks_edit_page * 8 + encoder_index
         if ks_index >= pg.ks_count():
             return
+        step = self._enc_steps(f'ks_note_{ks_index}', increment)
+        if not step:
+            return
         if ks_index == 0:
-            pg.set_ks_start(pg.ks_start_note + increment)
+            pg.set_ks_start(pg.ks_start_note + step)
         else:
             current = pg.ks_effective_notes()[ks_index]
-            pg.set_ks_override(ks_index, current + increment)
+            pg.set_ks_override(ks_index, current + step)
         self._update_pad_colors()
 
     def _handle_ks_press(self, ksi, row, col, velocity):
@@ -3266,7 +3320,7 @@ class Push2Controller:
         elif action == FS_STOP:
             self.nuendo_link.send_cc(51, 127)
         elif action == FS_RECORD:
-            self.nuendo_link.send_cc(52, 127)
+            self.nuendo_link.pulse_record()
         elif action == FS_PLAYSTOP:
             if getattr(self.state, 'is_playing', False):
                 self.nuendo_link.send_cc(51, 127)  # Stop
@@ -3278,7 +3332,7 @@ class Push2Controller:
                     getattr(self.state, 'is_recording', False):
                 self.nuendo_link.send_cc(51, 127)  # Stop
             else:
-                self.nuendo_link.send_cc(52, 127)  # Record
+                self.nuendo_link.pulse_record()  # Record
 
     # ─────────────────────────────────────────────
     # Expression pedal hardware config + calibration (Push 2 pedal SysEx)
@@ -3978,16 +4032,29 @@ class Push2Controller:
             self.nuendo_link.send_rec_toggle(rel, track.is_armed)
         self._update_lower_row_leds()
 
-    def _apply_velocity_curve(self):
-        """Apply the current velocity curve preset to the Push 2 pads."""
+    def _apply_velocity_curve(self, quiet=False):
+        """Apply the current velocity curve preset to the Push 2 pads.
+
+        The curve's output is scaled into [velocity_min, velocity_max] (the
+        Fixed curve ignores that range). quiet=True skips the log line (used
+        while an encoder is being turned)."""
         if not self.push:
             return
         import math
         mode = self.state.velocity_curve
         fixed_vel = self.state.accent_velocity  # synced with Accent
+        v_min = max(1, min(127, int(getattr(self.state, 'velocity_min', 1))))
+        v_max = max(v_min, min(127, int(getattr(self.state, 'velocity_max', 127))))
+        sens = max(0, min(len(VC_SENS_MAX_G) - 1,
+                          int(getattr(self.state, 'velocity_sens', VC_SENS_DEFAULT))))
+        force_max = VC_SENS_MAX_G[sens]
         curve = []
         for i in range(128):
-            t = i / 127.0  # normalized 0..1
+            # Table index = pad force (32 g per step). Normalize the playable
+            # force range to 0..1 — NOT the full 0..4095 g table, where even a
+            # hard hit only reached the first ~10-30 % of the curve.
+            t = (i * 32.0 - VC_FORCE_MIN_G) / (force_max - VC_FORCE_MIN_G)
+            t = max(0.0, min(1.0, t))
             if mode == VC_LINEAR:
                 v = t
             elif mode == VC_LOG:
@@ -4000,14 +4067,18 @@ class Push2Controller:
                 v = fixed_vel / 127.0 if i > 0 else 0
             else:
                 v = t
-            curve.append(max(0, min(127, int(v * 127))))
+            if mode != VC_FIXED:
+                v = (v_min + v * (v_max - v_min)) / 127.0
+            curve.append(max(0, min(127, int(round(v * 127)))))
         curve[0] = 0  # ensure 0→0
         try:
             self.push.pads.set_velocity_curve(curve)
-            if mode == VC_FIXED:
+            if quiet:
+                pass
+            elif mode == VC_FIXED:
                 print(f"  Velocity curve → {mode} (vel={fixed_vel})")
             else:
-                print(f"  Velocity curve → {mode}")
+                print(f"  Velocity curve → {mode} (range {v_min}-{v_max}, sens {sens})")
         except Exception as e:
             print(f"  Velocity curve error: {e}")
 
@@ -4036,6 +4107,22 @@ class Push2Controller:
         """Turn on or off the LED of a monochrome button."""
         self._set_mono_led(button_name, 127 if on else 0)
     
+    def _update_metronome_led(self, force=False):
+        """Metronome button LED: lit = metronome on, off = metronome off.
+        With the count-in active it blinks instead — slowly (~1 Hz) when the
+        metronome is off, fast (~4 Hz) when it is on."""
+        if not BTN_METRONOME:
+            return
+        st = self.state
+        if getattr(st, 'precount_on', False):
+            half_period = 0.125 if st.metronome_on else 0.5
+            value = 127 if int(time.time() / half_period) % 2 == 0 else 0
+        else:
+            value = 127 if st.metronome_on else 0
+        if force or value != getattr(self, '_metronome_led_value', None):
+            self._metronome_led_value = value
+            self._set_mono_led(BTN_METRONOME, value)
+
     def _set_mono_led(self, button_name, value):
         """Control the LED of a monochrome button.
         
@@ -4299,8 +4386,7 @@ class Push2Controller:
             
             self._update_automate_led()
             # Metronome (monochrome)
-            if BTN_METRONOME:
-                self._set_mono_led(BTN_METRONOME, 127 if self.state.metronome_on else 0)
+            self._update_metronome_led(force=True)
             
             # Fixed Length / Cycle (CC 90, monochrome)
             self._send_midi_to_push([0xB0, 90, 127 if self.state.cycle_active else 0])
@@ -4824,6 +4910,9 @@ class Push2Controller:
                         if i < 3:
                             is_sel = (state.aftertouch_mode == AT_OPTIONS[i])
                             self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
+                        elif i in (4, 5):
+                            is_sel = (getattr(state, 'chord_flats_default', False) == (i == 5))
+                            self._send_midi_to_push([0xB0, cc, BTN_WHITE if is_sel else BTN_DIM])
                         else:
                             self._send_midi_to_push([0xB0, cc, LED_OFF])
                     elif state.setup_page == 1:
@@ -5198,6 +5287,10 @@ class Push2Controller:
                             t.is_armed for t in self.state.tracks if t.name):
                         self._update_rec_led()
 
+                # Count-in blink on the Metronome button (time-based)
+                if getattr(self.state, 'precount_on', False) and not self.state.vegas_mode:
+                    self._update_metronome_led()
+
                 if _display_ok:
                     frame = render_frame(self.state, self.pad_grid, self.cr_state)
                     # Detect a static image to drive the adaptive frame rate, but
@@ -5234,7 +5327,7 @@ class Push2Controller:
             # Keep full rate for LED-only animations the frame diff can't see
             # (record-arm blink, Vegas), otherwise a static screen would slow
             # them down.
-            if self.state.vegas_mode or (
+            if self.state.vegas_mode or getattr(self.state, 'precount_on', False) or (
                     not self.state.is_recording
                     and any(t.is_armed for t in self.state.tracks if t.name)):
                 _idle_frames = 0
@@ -5786,6 +5879,14 @@ class Push2Controller:
                 st.velocity_curve = data['velocity_curve']
             if 'accent_velocity' in data:
                 st.accent_velocity = int(data['accent_velocity'])
+            if 'velocity_min' in data:
+                st.velocity_min = max(1, min(127, int(data['velocity_min'])))
+            if 'velocity_max' in data:
+                st.velocity_max = max(st.velocity_min, min(127, int(data['velocity_max'])))
+            if 'chord_flats_default' in data:
+                st.chord_flats_default = bool(data['chord_flats_default'])
+            if 'velocity_sens' in data:
+                st.velocity_sens = max(0, min(len(VC_SENS_MAX_G) - 1, int(data['velocity_sens'])))
             if 'cr_phones_default' in data:
                 st.cr_phones_default = bool(data['cr_phones_default'])
             if 'last_collection_index' in data:
@@ -5849,6 +5950,10 @@ class Push2Controller:
                 'aftertouch_mode': st.aftertouch_mode,
                 'velocity_curve': st.velocity_curve,
                 'accent_velocity': int(getattr(st, 'accent_velocity', 100)),
+                'velocity_min': int(getattr(st, 'velocity_min', 1)),
+                'velocity_max': int(getattr(st, 'velocity_max', 127)),
+                'velocity_sens': int(getattr(st, 'velocity_sens', VC_SENS_DEFAULT)),
+                'chord_flats_default': bool(getattr(st, 'chord_flats_default', False)),
                 'cr_phones_default': bool(getattr(st, 'cr_phones_default', False)),
                 'last_collection_index': int(getattr(st, 'browser_collection_index', 1)),
                 'browser_group_mode': getattr(st, 'browser_group_mode', 'folder'),
